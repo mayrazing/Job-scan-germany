@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def write_record(name: str, payload: bytes) -> None:
+    path = os.environ.get(name)
+    if path is not None:
+        Path(path).write_bytes(payload)
+
+
+def append_acceptance_record(kind: str, payload: bytes) -> None:
+    path = os.environ.get("FAKE_CLAUDE_RECORD_PATH")
+    if path is None:
+        return
+    record = {
+        "kind": kind,
+        "argv": sys.argv,
+        "stdin_bytes": len(payload),
+    }
+    with Path(path).open("a", encoding="utf-8") as output:
+        output.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def acceptance_review(prompt: bytes) -> dict[str, object]:
+    marker = b"Submitted jobs (JSON; complete_jd is the complete plain-text JD):\n"
+    submitted = json.loads(prompt.split(marker, 1)[1])
+    results: list[dict[str, object]] = []
+    for job in submitted:
+        title = job["title"]
+        common: dict[str, object] = {
+            "job_key": job["job_key"],
+            "german_requirement": "none",
+            "visa_sponsorship": "not_mentioned",
+            "existing_work_authorization": "not_mentioned",
+            "citizenship_requirement": "none",
+            "security_clearance": "none",
+            "staffing_agency": "no",
+            "eligibility_evidence": [],
+            "score": 80,
+            "reason": "Acceptance fixture result.",
+            "confidence": "high",
+        }
+        if title == "Visa Platform Engineer":
+            common.update(visa_sponsorship="offered", score=90)
+        elif title == "German Security Engineer":
+            common.update(
+                german_requirement="required",
+                visa_sponsorship="not_offered",
+                citizenship_requirement="german_or_eu",
+                security_clearance="required",
+                eligibility_evidence=[
+                    "Fluent German is required.",
+                    "Visa sponsorship is not available.",
+                    "German or EU citizenship is required.",
+                ],
+                score=74,
+            )
+        elif title == "Recruiter Backend Engineer":
+            common.update(staffing_agency="yes", score=82)
+        elif title == "Uncertain Platform Engineer":
+            common.update(
+                german_requirement="uncertain",
+                visa_sponsorship="uncertain",
+                existing_work_authorization="uncertain",
+                confidence="low",
+                score=55,
+            )
+        elif title == "Missing Result Engineer":
+            continue
+        else:
+            raise SystemExit(f"unsupported acceptance title: {title}")
+        results.append(common)
+    return {"structured_output": {"results": results}, "total_cost_usd": "0.01"}
+
+
+mode = os.environ.get("FAKE_CLAUDE_MODE", "success")
+write_record("FAKE_CLAUDE_ARGV_PATH", json.dumps(sys.argv).encode("utf-8"))
+write_record(
+    "FAKE_CLAUDE_THINKING_PATH",
+    os.environ.get("MAX_THINKING_TOKENS", "").encode("utf-8"),
+)
+
+if mode in {"orphan-closed-stdio", "orphan-holds-stdin"}:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=(subprocess.DEVNULL if mode == "orphan-closed-stdio" else None),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    write_record(
+        "FAKE_CLAUDE_PID_PATH",
+        (
+            f"{os.getpid()} {child.pid} "
+            f"{os.getpgrp()} {os.getpgid(child.pid)}"
+        ).encode("ascii"),
+    )
+    raise SystemExit(0)
+
+stdin = sys.stdin.buffer.read()
+write_record("FAKE_CLAUDE_STDIN_PATH", stdin)
+
+if mode == "acceptance":
+    if sys.argv[1:] == ["--version"]:
+        append_acceptance_record("version", stdin)
+        sys.stdout.write("2.1.7 (Claude Code)\n")
+    elif sys.argv[1:] == ["auth", "status", "--json"]:
+        append_acceptance_record("auth", stdin)
+        sys.stdout.write('{"loggedIn":true,"email":"fixture@example.test"}')
+    elif b"Required Markdown headings:" in stdin:
+        append_acceptance_record("profile", stdin)
+        profile = (
+            "# Target roles\nBackend engineer\n\n"
+            "# Technical skills\nPython and distributed systems\n\n"
+            "# Experience\nBackend delivery experience\n\n"
+            "# Languages\nEnglish fluent, German B1\n\n"
+            "# Work authorization and visa\nNeeds German visa sponsorship\n\n"
+            "# Preferences\nBerlin or Hamburg"
+        )
+        sys.stdout.write(json.dumps({"structured_output": {"profile_markdown": profile}}))
+    elif b"Submitted jobs (JSON; complete_jd is the complete plain-text JD):" in stdin:
+        append_acceptance_record("review", stdin)
+        if os.environ.get("FAKE_CLAUDE_FORCE_FAILURE") == "1":
+            sys.stderr.write("forced acceptance failure")
+            raise SystemExit(17)
+        sys.stdout.write(json.dumps(acceptance_review(stdin), separators=(",", ":")))
+    else:
+        raise SystemExit("unsupported acceptance invocation")
+elif mode == "version":
+    sys.stdout.write("2.1.7 (Claude Code)\n")
+elif mode == "empty-version":
+    pass
+elif mode == "auth":
+    sys.stdout.write(
+        json.dumps(
+            {
+                "loggedIn": True,
+                "email": "fake@example.test",
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+            },
+            separators=(",", ":"),
+        )
+    )
+elif mode == "unauthenticated":
+    sys.stdout.write('{"loggedIn":false}')
+elif mode == "malformed-auth":
+    sys.stdout.write('{"loggedIn":"yes"}')
+elif mode == "success":
+    padding = "x" * int(os.environ.get("FAKE_CLAUDE_PAD_BYTES", "0"))
+    sys.stdout.write(
+        json.dumps(
+            {
+                "structured_output": {"result": "ok"},
+                "total_cost_usd": "0.0125",
+                "padding": padding,
+            },
+            separators=(",", ":"),
+        )
+    )
+    sys.stdout.flush()
+    sys.stderr.write("fake stderr" + padding)
+elif mode == "nonzero":
+    sys.stdout.write("fake stdout")
+    sys.stderr.write("fake failure")
+    raise SystemExit(17)
+elif mode == "invalid-json":
+    sys.stdout.write("{not-json")
+elif mode == "oversized":
+    size = int(os.environ.get("FAKE_CLAUDE_OUTPUT_BYTES", "70000"))
+    stream = sys.stderr.buffer if os.environ.get("FAKE_CLAUDE_STREAM") == "stderr" else sys.stdout.buffer
+    stream.write(b"x" * size)
+    stream.flush()
+elif mode == "timeout":
+    time.sleep(30)
+elif mode == "spawn-child":
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=None,
+        stderr=None,
+    )
+    write_record(
+        "FAKE_CLAUDE_PID_PATH",
+        f"{os.getpid()} {child.pid}".encode("ascii"),
+    )
+    time.sleep(30)
+else:
+    raise SystemExit(f"unsupported fake mode: {mode}")

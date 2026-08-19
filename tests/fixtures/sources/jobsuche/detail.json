@@ -1,0 +1,14 @@
+{
+  "refnr": "10000-123456-S",
+  "arbeitgeber": "Example Systems GmbH",
+  "stellenangebotsTitel": "Senior Backend Engineer",
+  "arbeitsorte": [
+    {
+      "plz": "10115",
+      "ort": "Berlin"
+    }
+  ],
+  "aktuelleVeroeffentlichungsdatum": "2026-07-30",
+  "stellenangebotsBeschreibung": "Build and operate reliable backend services for a public platform. You will design APIs, review production changes, improve observability, and collaborate with product and infrastructure colleagues across Germany.",
+  "externeUrl": "https://jobs.example.org/apply/10000-123456-S"
+}

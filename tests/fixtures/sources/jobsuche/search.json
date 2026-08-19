@@ -1,0 +1,27 @@
+{
+  "stellenangebote": [
+    {
+      "refnr": "10000-123456-S",
+      "arbeitgeber": "Example Systems GmbH",
+      "titel": "Senior Backend Engineer",
+      "arbeitsort": {
+        "plz": "10115",
+        "ort": "Berlin"
+      },
+      "aktuelleVeroeffentlichungsdatum": "2026-07-30"
+    },
+    {
+      "refnr": "10000-654321-S",
+      "arbeitgeber": "Public Data GmbH",
+      "titel": "Platform Engineer",
+      "arbeitsort": {
+        "plz": "20095",
+        "ort": "Hamburg"
+      },
+      "aktuelleVeroeffentlichungsdatum": "2026-07-29"
+    }
+  ],
+  "page": 1,
+  "size": 2,
+  "maxErgebnisse": 2
+}

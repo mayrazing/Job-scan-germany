@@ -1,0 +1,43 @@
+{% from "_review_queue.html" import groups, manual_job_import, navigation %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="job-scan-revision" content="{{ revision }}">
+    <title>Job scan review desk</title>
+    <style>{{ dashboard_css | safe }}</style>
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Local review desk</p>
+        <h1>Job scan</h1>
+        <p>One candidate. One factual queue. Fast, calm triage.</p>
+      </div>
+      <p class="revision">Data revision <strong>{{ revision }}</strong></p>
+    </header>
+
+    <main>
+      <section class="review-block" data-review-block="current">
+        <header class="review-block-heading"><p class="eyebrow">Current search</p><h2>Current history</h2></header>
+        <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
+          {{ navigation(current_dashboard, 'Current history job groups') }}
+          <div class="review-groups">{{ groups(current_dashboard, false, false, 'current') }}</div>
+        </div>
+      </section>
+      <section class="review-block" data-review-block="global">
+        <header class="review-block-heading review-block-heading-actions">
+          <div><p class="eyebrow">All searches</p><h2>Global job status</h2></div>
+          {{ manual_job_import() }}
+        </header>
+        <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
+          {{ navigation(global_dashboard, 'Global job status groups') }}
+          <div class="review-groups">{{ groups(global_dashboard, false, false, 'global') }}</div>
+        </div>
+      </section>
+    </main>
+
+    <script>{{ dashboard_js | safe }}</script>
+  </body>
+</html>

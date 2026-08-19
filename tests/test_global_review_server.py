@@ -1,0 +1,1061 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, date, datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+from bs4 import BeautifulSoup
+from fastapi.testclient import TestClient
+from pydantic import HttpUrl
+
+from job_scan.ai_config import AiProviderDraft, AiProviderStore
+from job_scan.ai_selection import (
+    AiRuntimeSelection,
+    AiSelectionStore,
+    ClaudeRuntimeSelection,
+)
+from job_scan.ats_history import AtsHistoryStore
+from job_scan.ats_models import AtsRunState
+from job_scan.ats_workflow import AtsWorkflowInput
+from job_scan.company_size import (
+    CompanySizeEvidence,
+    CompanySizeLookupError,
+    CompanySizeService,
+    CompanySizeStore,
+)
+from job_scan.config import (
+    AppConfig,
+    ClaudeSettings,
+    SchedulerSettings,
+    load_config,
+    save_config,
+    serialize_config,
+)
+from job_scan.dashboard.render import render_dashboard
+from job_scan.domain import (
+    AvailabilityStatus,
+    JobRecord,
+    MachineStatus,
+    Snapshot,
+    SourceKind,
+    SourceOccurrence,
+    StoreMeta,
+    UserStatus,
+)
+from job_scan.global_jobs import GlobalJobStore
+from job_scan.locking import FileRWLock, LockUnavailable
+from job_scan.paths import AppPaths
+from job_scan.repository import JsonlRepository
+from job_scan.review_server import create_review_app
+from job_scan.search_history import SearchHistoryStore
+
+NOW = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
+ORIGIN = "http://127.0.0.1:8765"
+TOKEN = "test-token"
+HEADERS = {"Origin": ORIGIN, "Host": "127.0.0.1:8765"}
+
+
+class ReliableCompanySizeLookup:
+    def lookup(
+        self,
+        company: str,
+        _config: AppConfig,
+        checked_at: datetime,
+        *,
+        location: str | None = None,
+    ) -> CompanySizeEvidence:
+        del location
+        return CompanySizeEvidence(
+            company_name=company,
+            band="1000-9999",
+            employee_count=4200,
+            source_url="https://acme.example/company",
+            source_title="Acme company facts",
+            checked_at=checked_at,
+            confidence="high",
+        )
+
+
+class UnavailableCompanySizeLookup:
+    def lookup(
+        self,
+        _company: str,
+        _config: AppConfig,
+        _checked_at: datetime,
+        *,
+        location: str | None = None,
+    ) -> CompanySizeEvidence:
+        del location
+        raise CompanySizeLookupError("No reliable employee-count source was found.")
+
+
+def _job(
+    key: str,
+    *,
+    external_id: str,
+    user_status: UserStatus = UserStatus.NEW,
+) -> JobRecord:
+    occurrence = SourceOccurrence(
+        source=SourceKind.LINKEDIN,
+        source_instance="acme/jobs",
+        external_id=external_id,
+        source_generation=1,
+        url=HttpUrl(f"https://acme.example/jobs/{external_id}"),
+        company="Acme",
+        title=f"Backend Engineer {key}",
+        location="Berlin",
+        description="Build complete backend systems.",
+        posted_at=date(2026, 8, 19),
+        content_hash=f"sha256:{key}",
+        availability_status=AvailabilityStatus.ACTIVE,
+        detail_complete=True,
+    )
+    return JobRecord(
+        canonical_job_key=key,
+        source_occurrences=[occurrence],
+        primary_source_occurrence_key=occurrence.source_occurrence_key,
+        company="Acme",
+        title=f"Backend Engineer {key}",
+        location="Berlin",
+        url=occurrence.url,
+        description=occurrence.description,
+        posted_at=occurrence.posted_at,
+        content_hash=occurrence.content_hash,
+        first_seen=NOW,
+        last_seen=NOW,
+        availability_status=AvailabilityStatus.ACTIVE,
+        machine_status=MachineStatus.ELIGIBLE,
+        user_status=user_status,
+        user_status_updated_at=NOW,
+        score=80,
+    )
+
+
+def _snapshot(*jobs: JobRecord) -> Snapshot:
+    return Snapshot(meta=StoreMeta(data_revision=1, generated_at=NOW), jobs=list(jobs))
+
+
+def _repository(paths: AppPaths, *jobs: JobRecord) -> JsonlRepository:
+    repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
+    repository.mutate(lambda _old: _snapshot(*jobs))
+    return repository
+
+
+def _save_config(paths: AppPaths) -> None:
+    save_config(
+        paths.config_toml,
+        AppConfig(
+            candidate_name="Ada",
+            ai_runtime="api:deepseek",
+            ai_model="current-model",
+            resume_path=paths.root / "default.pdf",
+            resume_sha256="sha256:" + "a" * 64,
+            profile_sha256="sha256:" + "b" * 64,
+            search_terms=["backend"],
+            locations=["Berlin"],
+            german_level="B1",
+            claude=ClaudeSettings(model="sonnet", effort="medium"),
+            scheduler=SchedulerSettings(),
+        ),
+    )
+
+
+def _archive(
+    history: SearchHistoryStore,
+    tmp_path: Path,
+    run_id: str,
+    snapshot: Snapshot,
+    resume_bytes: bytes = b"ARCHIVED RESUME",
+    profile_bytes: bytes = b"profile",
+    config_bytes: bytes = b"config",
+) -> None:
+    resume = tmp_path / f"{run_id}.pdf"
+    resume.write_bytes(resume_bytes)
+    history.archive(
+        run_id=run_id,
+        candidate_name="Ada",
+        resume_filename=f"{run_id}.pdf",
+        resume_path=resume,
+        snapshot=snapshot,
+        finished_at=NOW,
+        profile_bytes=profile_bytes,
+        config_bytes=config_bytes,
+    )
+
+
+class RecordingAtsWorkflow:
+    def __init__(self) -> None:
+        self.inputs: list[AtsWorkflowInput] = []
+
+    def start(self, inputs: AtsWorkflowInput) -> AtsRunState:
+        self.inputs.append(inputs)
+        return AtsRunState(
+            run_id="ats-1",
+            search_run_id=inputs.search_run_id,
+            status="running",
+            stage="resume",
+            message="Checking resume...",
+            progress_percent=0,
+            tasks=[],
+        )
+
+    def read_run(self, _run_id: str) -> AtsRunState | None:
+        return None
+
+    def read_current_run(self) -> AtsRunState | None:
+        return None
+
+
+def _open_session(client: TestClient) -> None:
+    assert client.get("/").status_code == 200
+
+
+def test_status_change_is_global_and_new_is_rejected(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = _repository(paths, _job("current", external_id="shared"))
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        saved = client.post(
+            "/api/jobs/current/status",
+            json={"status": "shortlisted"},
+            headers=HEADERS,
+        )
+        reset = client.post(
+            "/api/jobs/current/status",
+            json={"status": "new"},
+            headers=HEADERS,
+        )
+
+    assert saved.status_code == 204
+    assert reset.status_code == 422
+    assert repository.load().jobs[0].user_status is UserStatus.NEW
+    assert global_jobs.find("current").user_status is UserStatus.SHORTLISTED
+
+
+def test_history_status_appears_in_global_block_of_another_history(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = _repository(paths)
+    history = SearchHistoryStore(paths)
+    _archive(history, tmp_path, "run-a", _snapshot(_job("a", external_id="shared")))
+    _archive(history, tmp_path, "run-b", _snapshot(_job("b", external_id="shared")))
+    global_jobs = GlobalJobStore(paths)
+    workflow = SimpleNamespace(load_setup_answers=lambda: None)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=workflow,
+        history_store=history,
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/scan-history/run-a/jobs/a/status",
+            json={"status": "applied"},
+            headers=HEADERS,
+        )
+        page_response = client.get("/setup?run_id=run-b#review")
+
+    page = BeautifulSoup(page_response.text, "html.parser")
+    assert response.status_code == 204
+    assert page_response.status_code == 200
+    assert page.select_one('[data-review-block="global"] #applied [data-job-key]')
+    assert page.select_one('[data-review-block="current"] [data-job-key="b"]') is None
+    assert history.load("run-a").jobs[0].user_status is UserStatus.NEW
+    assert history.load("run-b").jobs[0].user_status is UserStatus.NEW
+
+
+def test_ats_uses_uploaded_resume_with_current_and_global_jobs(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    current = _job("current", external_id="current")
+    global_job = _job("global", external_id="global")
+    repository = _repository(paths, current)
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={"search_run_id": "", "job_keys": json.dumps(["current", "global"])},
+            files={"resume": ("Other CV.pdf", b"CUSTOM RESUME", "application/pdf")},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202
+    inputs = ats_workflow.inputs[0]
+    assert inputs.search_run_id == "global"
+    assert inputs.resume_filename == "Other CV.pdf"
+    assert inputs.resume_bytes == b"CUSTOM RESUME"
+    assert [job.canonical_job_key for job in inputs.jobs] == ["current", "global"]
+    assert inputs.config.selected_model == "sonnet"
+
+
+def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_job = _job("global", external_id="global")
+    repository = _repository(paths)
+    _save_config(paths)
+    history = SearchHistoryStore(paths)
+    _archive(history, tmp_path, "run-a", _snapshot(global_job), b"DEFAULT RESUME")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={"search_run_id": "run-a", "job_keys": json.dumps(["global"])},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202
+    inputs = ats_workflow.inputs[0]
+    assert inputs.search_run_id == "run-a"
+    assert inputs.resume_filename == "run-a.pdf"
+    assert inputs.resume_bytes == b"DEFAULT RESUME"
+
+
+def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_job = _job("global", external_id="global")
+    repository = _repository(paths)
+    _save_config(paths)
+    history_config = AppConfig(
+        candidate_name="History Candidate",
+        ai_runtime="claude-code",
+        resume_path=paths.root / "history.pdf",
+        resume_sha256="sha256:" + "c" * 64,
+        profile_sha256="sha256:" + "d" * 64,
+        search_terms=["backend"],
+        locations=["Berlin"],
+        german_level="B1",
+        claude=ClaudeSettings(model="history-opus", effort="high"),
+        scheduler=SchedulerSettings(),
+    )
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(global_job),
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={
+                "search_run_id": "run-a",
+                "ai_choice": "history",
+                "job_keys": json.dumps(["global"]),
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202
+    inputs = ats_workflow.inputs[0]
+    assert inputs.config.ai_runtime == "claude-code"
+    assert inputs.config.selected_model == "sonnet"
+    assert inputs.candidate_name == "History Candidate"
+
+
+def test_review_removes_the_ats_ai_picker_and_uses_the_global_modal(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = _repository(paths)
+    _save_config(paths)
+    ai_store = AiProviderStore(paths.ai_config_toml)
+    provider = ai_store.create(
+        AiProviderDraft(
+            display_name="ds",
+            base_url="https://ai.example/v1",
+            api_key="secret",
+            model="deepseek-v4-pro",
+            reasoning_effort="low",
+        )
+    )
+    history_config = AppConfig(
+        candidate_name="History Candidate",
+        ai_runtime=f"api:{provider.id}",
+        ai_model=provider.model,
+        resume_path=paths.root / "history.pdf",
+        resume_sha256="sha256:" + "c" * 64,
+        profile_sha256="sha256:" + "d" * 64,
+        search_terms=["backend"],
+        locations=["Berlin"],
+        german_level="B1",
+        claude=ClaudeSettings(model="sonnet", effort="high"),
+        scheduler=SchedulerSettings(),
+    )
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(_job("history", external_id="history")),
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    workflow = SimpleNamespace(load_setup_answers=lambda: None)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=workflow,
+        history_store=history,
+        ai_store=ai_store,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        page = BeautifulSoup(
+            client.get("/setup?run_id=run-a#review").text,
+            "html.parser",
+        )
+
+    assert page.select_one("#ats-ai-choice") is None
+    assert page.select_one("#ai-config-modal #ai-runtime") is not None
+
+
+def test_ats_can_override_history_ai_with_saved_provider(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    current = _job("current", external_id="current")
+    repository = _repository(paths, current)
+    _save_config(paths)
+    ai_store = AiProviderStore(paths.ai_config_toml)
+    provider = ai_store.create(
+        AiProviderDraft(
+            display_name="Alternate",
+            base_url="https://ai.example/v1",
+            api_key="secret",
+            model="alternate-model",
+            reasoning_effort="low",
+        )
+    )
+    AiSelectionStore(paths.ai_selection_toml).save(
+        AiRuntimeSelection(
+            ai_runtime=f"api:{provider.id}",
+            claude=ClaudeRuntimeSelection(model="opus", effort="high"),
+        )
+    )
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        ai_store=ai_store,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={
+                "ai_choice": f"runtime:api:{provider.id}",
+                "job_keys": json.dumps(["current"]),
+            },
+            files={"resume": ("Current.pdf", b"RESUME", "application/pdf")},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202
+    inputs = ats_workflow.inputs[0]
+    assert inputs.config.ai_runtime == f"api:{provider.id}"
+    assert inputs.config.selected_model == "alternate-model"
+
+
+def test_ats_uses_global_ai_selection_instead_of_history_ai(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_job = _job("global", external_id="global")
+    repository = _repository(paths, global_job)
+    _save_config(paths)
+    ai_store = AiProviderStore(paths.ai_config_toml)
+    provider = ai_store.create(
+        AiProviderDraft(
+            display_name="Current",
+            base_url="https://ai.example/v1",
+            api_key="secret",
+            model="current-model",
+            reasoning_effort="high",
+        )
+    )
+    AiSelectionStore(paths.ai_selection_toml).save(
+        AiRuntimeSelection(
+            ai_runtime=f"api:{provider.id}",
+            claude=ClaudeRuntimeSelection(model="opus", effort="low"),
+        )
+    )
+    history_config = load_config(paths.config_toml).model_copy(
+        update={
+            "candidate_name": "History Candidate",
+            "ai_runtime": "claude-code",
+            "ai_model": None,
+            "claude": ClaudeSettings(model="history-opus", effort="high"),
+        }
+    )
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(global_job),
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+        ai_store=ai_store,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={
+                "search_run_id": "run-a",
+                "ai_choice": "history",
+                "job_keys": json.dumps(["global"]),
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202, response.text
+    inputs = ats_workflow.inputs[0]
+    assert inputs.config.ai_runtime == f"api:{provider.id}"
+    assert inputs.config.selected_model == "current-model"
+    assert inputs.config.claude.model == "opus"
+    assert inputs.candidate_name == "History Candidate"
+
+
+def test_manual_job_import_rejects_non_public_url(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "http://127.0.0.1:8765/setup"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "Use a public HTTPS job URL without credentials."
+    }
+
+
+def test_manual_job_import_persists_card_as_shortlisted(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    imported = _job("manual", external_id="manual")
+    imported.url = HttpUrl("https://careers.example/jobs/manual")
+    imported.source_occurrences[0].url = imported.url
+    global_jobs = GlobalJobStore(paths)
+    _save_config(paths)
+    AiSelectionStore(paths.ai_selection_toml).save(
+        AiRuntimeSelection(
+            ai_runtime="claude-code",
+            claude=ClaudeRuntimeSelection(
+                model="opus",
+                effort="high",
+                thinking_enabled=False,
+            ),
+        )
+    )
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    import_inputs: list[tuple[object, ...]] = []
+
+    def import_job(*inputs: object) -> JobRecord:
+        import_inputs.append(inputs)
+        return imported
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=import_job,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {"job_key": "manual", "status": "shortlisted"}
+    assert len(import_inputs) == 1
+    url, config, profile, imported_at = import_inputs[0]
+    assert url == "https://careers.example/jobs/manual"
+    assert isinstance(config, AppConfig)
+    assert config.ai_runtime == "claude-code"
+    assert config.claude.model == "opus"
+    assert profile == "# Current candidate profile"
+    assert isinstance(imported_at, datetime)
+    assert imported_at.tzinfo is not None
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.user_status is UserStatus.SHORTLISTED
+
+
+def test_manual_job_import_uses_selected_history_profile_and_config(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    imported = _job("manual", external_id="manual")
+    global_jobs = GlobalJobStore(paths)
+    _save_config(paths)
+    AiSelectionStore(paths.ai_selection_toml).save(
+        AiRuntimeSelection(
+            ai_runtime="claude-code",
+            claude=ClaudeRuntimeSelection(model="opus", effort="high"),
+        )
+    )
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    history_config = load_config(paths.config_toml).model_copy(
+        update={
+            "candidate_name": "History Candidate",
+            "resume_sha256": "sha256:" + "c" * 64,
+            "profile_sha256": "sha256:" + "d" * 64,
+        }
+    )
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(),
+        profile_bytes=b"# History candidate profile",
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    import_inputs: list[tuple[object, ...]] = []
+
+    def import_job(*inputs: object) -> JobRecord:
+        import_inputs.append(inputs)
+        return imported
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+        manual_job_importer=import_job,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={
+                "url": "https://careers.example/jobs/manual",
+                "run_id": "run-a",
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    assert len(import_inputs) == 1
+    _url, config, profile, _imported_at = import_inputs[0]
+    assert isinstance(config, AppConfig)
+    assert config.candidate_name == "History Candidate"
+    assert config.resume_sha256 == "sha256:" + "c" * 64
+    assert config.ai_runtime == "claude-code"
+    assert config.claude.model == "opus"
+    assert profile == "# History candidate profile"
+
+
+def test_manual_job_import_rejects_missing_selected_history(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={
+                "url": "https://careers.example/jobs/manual",
+                "run_id": "missing-run",
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "The selected search history is unavailable."
+    }
+
+
+def test_manual_job_import_persists_company_size_before_shortlisting(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    imported = _job("manual", external_id="manual")
+    global_jobs = GlobalJobStore(paths)
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    company_sizes = CompanySizeService(
+        CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+        ReliableCompanySizeLookup(),
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=lambda *_inputs: imported,
+        company_size_service=company_sizes,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.company_size is not None
+    assert saved.company_size.employee_count == 4200
+    assert saved.company_size.source_title == "Acme company facts"
+
+
+def test_manual_job_import_stays_shortlisted_when_company_size_is_unknown(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    company_sizes = CompanySizeService(
+        CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+        UnavailableCompanySizeLookup(),
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        company_size_service=company_sizes,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.user_status is UserStatus.SHORTLISTED
+    assert saved.company_size is not None
+    assert saved.company_size.band.value == "unknown"
+
+
+def test_global_company_size_search_updates_the_global_job(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.upsert_with_default_status(
+        _job("manual", external_id="manual"),
+        UserStatus.SHORTLISTED,
+        NOW,
+    )
+    _save_config(paths)
+    company_sizes = CompanySizeService(
+        CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+        ReliableCompanySizeLookup(),
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        company_size_service=company_sizes,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/manual/company-size",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 200
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.company_size is not None
+    assert saved.company_size.employee_count == 4200
+    assert saved.company_size.source_title == "Acme company facts"
+
+
+def test_global_company_size_search_reports_lookup_failure(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.upsert_with_default_status(
+        _job("manual", external_id="manual"),
+        UserStatus.SHORTLISTED,
+        NOW,
+    )
+    _save_config(paths)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/manual/company-size",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "No reliable employee-count source was found."
+    }
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.user_status is UserStatus.SHORTLISTED
+
+
+def test_delete_global_job_does_not_delete_the_current_search(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    current = _job("manual", external_id="manual")
+    repository = _repository(paths, current)
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(current, UserStatus.SHORTLISTED, NOW)
+    before = repository.load()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.delete(
+            "/api/global-jobs/manual",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 204
+    assert global_jobs.find("manual") is None
+    assert repository.load() == before
+
+
+def test_delete_unknown_global_job_returns_404(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.delete(
+            "/api/global-jobs/missing",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 404
+
+
+def test_manual_job_import_rejects_while_scan_is_running(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    imported = _job("manual", external_id="manual")
+    calls: list[tuple[object, ...]] = []
+
+    def import_job(*inputs: object) -> JobRecord:
+        calls.append(inputs)
+        return imported
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        manual_job_importer=import_job,
+    )
+
+    with FileRWLock(paths.scan_lock_file).exclusive(), TestClient(
+        app,
+        base_url=ORIGIN,
+    ) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "A scan is running; retry the job import after it completes."
+    }
+    assert calls == []
+
+
+def test_manual_job_import_holds_scan_lock_until_import_finishes(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    imported = _job("manual", external_id="manual")
+    lock_available_during_import: list[bool] = []
+
+    def import_job(*_inputs: object) -> JobRecord:
+        try:
+            with FileRWLock(paths.scan_lock_file).exclusive(blocking=False):
+                lock_available_during_import.append(True)
+        except LockUnavailable:
+            lock_available_during_import.append(False)
+        return imported
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        manual_job_importer=import_job,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    assert lock_available_during_import == [False]
+
+
+def test_reimported_manual_job_preserves_existing_global_status(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    global_jobs = GlobalJobStore(paths)
+    existing = _job("manual", external_id="manual")
+    global_jobs.set_status(existing, UserStatus.APPLIED, NOW)
+    refreshed = _job("manual", external_id="manual")
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=lambda *_inputs: refreshed,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import",
+            json={"url": "https://careers.example/jobs/manual"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {"job_key": "manual", "status": "applied"}
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.user_status is UserStatus.APPLIED

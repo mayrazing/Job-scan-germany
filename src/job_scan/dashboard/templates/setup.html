@@ -1,0 +1,746 @@
+{% from "_review_queue.html" import groups, manual_job_import, navigation %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Job scan local console</title>
+    <style>{{ bootstrap_css | safe }}</style>
+    <style>{{ tom_select_css | safe }}</style>
+    <style>{{ dashboard_css | safe }}</style>
+    <style>{{ console_css | safe }}</style>
+  </head>
+  <body data-review-run-id="{{ selected_run_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Local scan console</p>
+        <h1>Job scan</h1>
+        <p>Set preferences once. Run the search. Review the queue.</p>
+      </div>
+      <div class="console-header-actions">
+        <button class="btn btn-outline-secondary" type="button" data-open-ai-config data-bs-toggle="modal" data-bs-target="#ai-config-modal">AI configuration</button>
+        <p class="revision console-state">Status <strong id="header-status">Ready</strong></p>
+      </div>
+    </header>
+
+    <div class="modal fade" id="ai-config-modal" tabindex="-1" aria-labelledby="ai-config-modal-title" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <header class="modal-header">
+            <div>
+              <p class="eyebrow">Global AI settings</p>
+              <h2 class="modal-title" id="ai-config-modal-title">AI configuration</h2>
+              <p class="modal-intro">One runtime and model is used by every new AI task.</p>
+            </div>
+            <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="Close"></button>
+          </header>
+          <div class="modal-body">
+            <p class="alert alert-warning" id="ai-config-lock-note" role="status" hidden>AI is in use. Configuration is read-only until the current task finishes.</p>
+            <section class="form-section ai-runtime-section" aria-labelledby="ai-runtime-title">
+              <h3 id="ai-runtime-title">AI runtime and model</h3>
+              <div class="field-grid">
+                <label class="field-wide runtime-picker">
+                  <span class="field-label">AI runtime and model</span>
+                  <select class="form-select" id="ai-runtime" name="ai-runtime" data-ai-config-control>
+                    <option value="claude-code"{% if setup.ai_runtime == 'claude-code' %} selected{% endif %}>Claude Code CLI · {{ setup.claude.model }}</option>
+                    {% for provider in ai_providers %}
+                    <option value="api:{{ provider.id }}"{% if setup.ai_runtime == 'api:' ~ provider.id %} selected{% endif %}>{{ provider.display_name }} API · {{ provider.model }}</option>
+                    {% endfor %}
+                  </select>
+                  <span class="form-text">Used for profile building, job review, company size, resume analysis, manual import, and ATS Check.</span>
+                </label>
+                <div class="field-wide runtime-settings field-grid" id="claude-code-settings"{% if setup.ai_runtime != 'claude-code' %} hidden{% endif %}>
+                  <div class="claude-model-settings">
+                    <label>
+                      <span class="field-label">Claude Code model</span>
+                      {% set claude_models = ['sonnet', 'opus', 'haiku'] %}
+                      <select class="form-select" id="claude-model" name="claude-model" data-search-select data-create="true" data-ai-config-control required>
+                        {% if setup.claude.model not in claude_models %}<option selected>{{ setup.claude.model }}</option>{% endif %}
+                        {% for option in claude_models %}<option{% if option == setup.claude.model %} selected{% endif %}>{{ option }}</option>{% endfor %}
+                      </select>
+                    </label>
+                    <div class="form-check form-switch mt-3">
+                      <input class="form-check-input" id="claude-thinking-enabled" name="claude-thinking-enabled" type="checkbox" role="switch" data-ai-config-control{% if setup.claude.thinking_enabled %} checked{% endif %}>
+                      <label class="form-check-label" for="claude-thinking-enabled">Claude Code thinking</label>
+                      <span class="form-text d-block">Allow Claude to think before answering.</span>
+                    </div>
+                  </div>
+                  <label>
+                    <span class="field-label">Claude Code effort</span>
+                    <select class="form-select" id="claude-effort" name="claude-effort" data-ai-config-control>
+                      <option{% if setup.claude.effort == 'low' %} selected{% endif %}>low</option>
+                      <option{% if setup.claude.effort == 'medium' %} selected{% endif %}>medium</option>
+                      <option{% if setup.claude.effort == 'high' %} selected{% endif %}>high</option>
+                    </select>
+                  </label>
+                </div>
+                {% set selected_api = namespace(provider=none) %}
+                {% for provider in ai_providers if setup.ai_runtime == 'api:' ~ provider.id %}{% set selected_api.provider = provider %}{% endfor %}
+                <div class="field-wide api-model-summary" id="api-model-settings"{% if selected_api.provider is none %} hidden{% endif %}>
+                  <span class="ai-provider-mark" aria-hidden="true">AI</span>
+                  <div>
+                    <span class="field-label d-block">Selected API model</span>
+                    <strong id="api-model-summary">{% if selected_api.provider %}{{ selected_api.provider.display_name }} · {{ selected_api.provider.model }}{% endif %}</strong>
+                    <span class="form-text d-block" id="api-model-effort">{% if selected_api.provider %}Effort: {{ selected_api.provider.reasoning_effort }} · Anthropic-compatible API{% endif %}</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <fieldset class="form-section ai-config-section" id="ai-config">
+              <legend>AI configuration</legend>
+              <div class="ai-config-heading">
+                <p>Connect Anthropic-compatible API models. API keys stay on this computer.</p>
+                <button class="btn btn-outline-secondary" type="button" data-add-ai-provider data-ai-config-control>+ Add AI configuration</button>
+              </div>
+              <div class="ai-provider-list" aria-label="Saved AI configurations">
+                {% for provider in ai_providers %}
+                <article class="ai-provider-row" data-ai-provider="{{ provider.id }}">
+                  <div class="ai-provider-mark" aria-hidden="true">AI</div>
+                  <div class="ai-provider-copy">
+                    <div class="ai-provider-title"><strong>{{ provider.display_name }}</strong></div>
+                    <p>{{ provider.model }} · Effort: {{ provider.reasoning_effort }}</p>
+                    <small>{{ provider.base_url }}</small>
+                  </div>
+                  <div class="ai-provider-actions">
+                    <button class="btn btn-outline-secondary" type="button" data-edit-ai-provider data-ai-config-control>Edit</button>
+                    <button class="btn btn-outline-danger" type="button" data-delete-ai-provider data-ai-config-control aria-label="Delete {{ provider.display_name }} AI configuration">Delete</button>
+                  </div>
+                </article>
+                {% else %}
+                <p class="ai-provider-empty">No API models configured. Claude Code CLI remains available.</p>
+                {% endfor %}
+              </div>
+              <div class="ai-provider-editor" id="ai-provider-editor" hidden>
+                <header>
+                  <div>
+                    <p class="eyebrow" id="ai-editor-mode">New API model</p>
+                    <h3 id="ai-editor-title">Connect a provider</h3>
+                  </div>
+                  <span class="fixed-scope">Anthropic protocol</span>
+                </header>
+                <div class="field-grid">
+                  <label><span class="field-label">Provider name</span><input class="form-control" id="ai-provider-name" name="ai-provider-name" data-ai-config-control></label>
+                  <label><span class="field-label">Base URL</span><input class="form-control" id="ai-provider-base-url" name="ai-provider-base-url" type="url" data-ai-config-control placeholder="https://api.example.com/anthropic"></label>
+                  <label><span class="field-label">API key</span><input class="form-control" id="ai-provider-api-key" name="ai-provider-api-key" type="password" autocomplete="off" data-ai-config-control placeholder="Required for a new configuration"></label>
+                  <label>
+                    <span class="field-label">Model</span>
+                    <select class="form-select" id="ai-provider-model" name="ai-provider-model" data-search-select data-create="true" data-ai-config-control></select>
+                    <span class="form-text">Fetch models or type a model name.</span>
+                  </label>
+                  <label>
+                    <span class="field-label">Reasoning effort</span>
+                    <select class="form-select" id="ai-provider-effort" name="ai-provider-effort" data-ai-config-control>
+                      <option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
+                    </select>
+                  </label>
+                </div>
+                <p class="ai-editor-feedback" id="ai-editor-feedback" role="status" aria-live="polite"></p>
+                <div class="ai-editor-actions">
+                  <button class="btn btn-outline-secondary" type="button" data-discover-ai-models data-ai-config-control>Fetch models</button>
+                  <span></span>
+                  <button class="btn btn-outline-secondary" type="button" data-cancel-ai-provider>Cancel</button>
+                  <button class="btn btn-primary" type="button" data-save-ai-provider data-ai-config-control>Save AI configuration</button>
+                </div>
+              </div>
+            </fieldset>
+          </div>
+          <footer class="modal-footer">
+            <span class="form-text me-auto" id="ai-selection-feedback" role="status" aria-live="polite"></span>
+            <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Close</button>
+            <button class="btn btn-primary" type="button" data-save-ai-selection data-ai-config-control>Save AI selection</button>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <nav class="group-nav flow-nav" aria-label="Workflow">
+      <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
+      <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
+      <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
+      <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>4</span></a>
+      <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>5</span></a>
+    </nav>
+
+    <main>
+      <article class="job-card console-card card">
+        <div class="card-body console-body">
+          <section id="setup" aria-labelledby="setup-title">
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 1 of 5</p>
+                <h2 id="setup-title">What should we look for?</h2>
+                <p>These values map to the current <code>job-scan setup</code> questions.</p>
+              </div>
+              <span class="fixed-scope">DE · Sponsorship required</span>
+            </header>
+
+            <form id="setup-form">
+              <fieldset class="form-section">
+                <legend>Candidate</legend>
+                <label for="resume">
+                  <span class="field-label">Resume</span>
+                  <input class="form-control" id="resume" name="resume" type="file" accept=".pdf,.docx" required>
+                </label>
+                <div class="d-flex align-items-center gap-2 mt-2">
+                  <button class="btn btn-sm btn-outline-secondary" id="analyze-resume" type="button" disabled>Analyze resume with AI</button>
+                  <span class="form-text" id="analyze-resume-help">Click this button to let AI analyze your resume. Job title suggestions will appear under Search terms below.</span>
+                  <span class="form-text" id="resume-suggestion-status" aria-live="polite"></span>
+                </div>
+                <label class="mt-3">
+                  <span class="field-label">German certificate or level</span>
+                  {% set german_options = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2', 'Native / fluent'] %}
+                  <select class="form-select" id="german-level" name="german-level" data-search-select data-create="true" required>
+                    {% if setup.german_level not in german_options %}<option selected>{{ setup.german_level }}</option>{% endif %}
+                    {% for option in german_options %}<option{% if option == setup.german_level %} selected{% endif %}>{{ option }}</option>{% endfor %}
+                  </select>
+                </label>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Search</legend>
+                <div class="field-grid">
+                  <div class="field-wide">
+                    <label>
+                      <span class="field-label">Search terms</span>
+                      {% set search_options = ['Backend Engineer', 'Platform Engineer', 'Software Engineer', 'Java Developer', 'Python Developer', 'DevOps Engineer', 'Site Reliability Engineer', 'Cloud Engineer', 'Full Stack Engineer', 'Data Engineer', 'Machine Learning Engineer', 'Engineering Manager'] %}
+                      <select class="form-select" id="search-terms" name="search-terms" multiple data-search-select data-create="true" required>
+                        {% for option in setup.search_terms %}<option selected>{{ option }}</option>{% endfor %}
+                        {% for option in search_options if option not in setup.search_terms %}<option>{{ option }}</option>{% endfor %}
+                      </select>
+                      <small id="search-term-suggestion-help" hidden>Choose suggestions or type your own. Press Enter to add.</small>
+                    </label>
+                    <div class="d-flex flex-wrap gap-2 mt-2" id="search-term-suggestions" aria-label="Suggested search terms" hidden></div>
+                  </div>
+                  <label>
+                    <span class="field-label">Locations</span>
+                    {% set location_options = ['Berlin', 'Hamburg', 'Munich', 'Frankfurt am Main', 'Cologne', 'Düsseldorf', 'Stuttgart', 'Leipzig', 'Dresden', 'Hanover', 'Bremen', 'Nuremberg'] %}
+                    <select class="form-select" id="locations" name="locations" multiple data-search-select data-create="true">
+                      {% for option in setup.locations %}<option selected>{{ option }}</option>{% endfor %}
+                      {% for option in location_options if option not in setup.locations %}<option>{{ option }}</option>{% endfor %}
+                    </select>
+                    <span class="form-text" id="locations-help">Leave blank to search all of Germany.</span>
+                  </label>
+                  <label>
+                    <span class="field-label">Posted within</span>
+                    <select class="form-select" id="posted-within-days" name="posted-within-days">
+                      <option value="0"{% if setup.posted_within_days == 0 %} selected{% endif %}>Today</option>
+                      <option value="1"{% if setup.posted_within_days == 1 %} selected{% endif %}>Last 1 day</option>
+                      <option value="3"{% if setup.posted_within_days == 3 %} selected{% endif %}>Last 3 days</option>
+                      <option value="7"{% if setup.posted_within_days == 7 %} selected{% endif %}>Last 7 days</option>
+                      <option value="14"{% if setup.posted_within_days == 14 %} selected{% endif %}>Last 14 days</option>
+                      <option value=""{% if setup.posted_within_days is none %} selected{% endif %}>No limit</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="field-label">Minimum company size</span>
+                    <select class="form-select" id="minimum-company-size" name="minimum-company-size">
+                      <option value="0"{% if setup.minimum_company_size == 0 %} selected{% endif %}>Any size</option>
+                      <option value="50"{% if setup.minimum_company_size == 50 %} selected{% endif %}>50+ employees</option>
+                      <option value="250"{% if setup.minimum_company_size == 250 %} selected{% endif %}>250+ employees</option>
+                      <option value="1000"{% if setup.minimum_company_size == 1000 %} selected{% endif %}>1,000+ employees</option>
+                      <option value="10000"{% if setup.minimum_company_size == 10000 %} selected{% endif %}>10,000+ employees</option>
+                    </select>
+                    <span class="form-text">Any size disables filtering only. Company-size lookup and display stay enabled, with results reused for 90 days.</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section" id="target-companies-config">
+                <legend>Target companies <span>Optional</span></legend>
+                <p class="form-text">Search selected companies directly. Locations shape official searches when supported; other company sources filter locations from job details.</p>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-bosch" name="target-company-bosch" type="checkbox" role="switch" value="bosch"{% if 'bosch' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-bosch">
+                    <span class="field-label">Bosch</span>
+                    <span class="form-text">Search current German jobs through Bosch's official career search.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-telekom" name="target-company-telekom" type="checkbox" role="switch" value="telekom"{% if 'telekom' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-telekom">
+                    <span class="field-label">Deutsche Telekom</span>
+                    <span class="form-text">Search current German jobs through Telekom's official career search.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-rohde-schwarz" name="target-company-rohde-schwarz" type="checkbox" role="switch" value="rohde-schwarz"{% if 'rohde-schwarz' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-rohde-schwarz">
+                    <span class="field-label">Rohde &amp; Schwarz</span>
+                    <span class="form-text">Search current German jobs through Rohde &amp; Schwarz's official career page.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-siemens" name="target-company-siemens" type="checkbox" role="switch" value="siemens"{% if 'siemens' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-siemens">
+                    <span class="field-label">Siemens</span>
+                    <span class="form-text">Search current German jobs through Siemens's official career page.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-dhl" name="target-company-dhl" type="checkbox" role="switch" value="dhl"{% if 'dhl' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-dhl">
+                    <span class="field-label">DHL</span>
+                    <span class="form-text">Search current German jobs through DHL's official career page.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-thyssenkrupp" name="target-company-thyssenkrupp" type="checkbox" role="switch" value="thyssenkrupp"{% if 'thyssenkrupp' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-thyssenkrupp">
+                    <span class="field-label">thyssenkrupp</span>
+                    <span class="form-text">Search current German jobs through thyssenkrupp's official career search.</span>
+                  </label>
+                </div>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-dallmeier" name="target-company-dallmeier" type="checkbox" role="switch" value="dallmeier"{% if 'dallmeier' in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-dallmeier">
+                    <span class="field-label">Dallmeier</span>
+                    <span class="form-text">Read current German jobs directly from Dallmeier's official careers page. Posting dates are unavailable.</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section" id="api-config">
+                <legend>API</legend>
+                <p class="form-text">Choose API sources for this scan.</p>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="arbeitsagentur-enabled" name="arbeitsagentur-enabled" type="checkbox" role="switch"{% if setup.arbeitsagentur_enabled %} checked{% endif %}>
+                  <label class="form-check-label" for="arbeitsagentur-enabled">
+                    <span class="field-label">Arbeitsagentur</span>
+                    <span class="form-text">Use the Bundesagentur für Arbeit Jobsuche API.</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section" id="opencli-config">
+                <legend>OpenCLI</legend>
+                <p class="form-text">Website sources connect through OpenCLI Browser Bridge. Each limit applies to every search term. For example, with 3 search terms and a limit of 10, that source searches for up to 30 jobs per location.</p>
+                <div class="field-grid">
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="linkedin-limit">LinkedIn</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="linkedin-enabled" name="linkedin-enabled" type="checkbox" role="switch" aria-label="Enable LinkedIn" aria-controls="linkedin-limit"{% if setup.linkedin_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="linkedin-limit" name="linkedin-limit" type="number" value="{{ setup.linkedin_limit }}" min="1" max="100" required{% if not setup.linkedin_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="indeed-de-limit">Indeed Deutschland</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="indeed-de-enabled" name="indeed-de-enabled" type="checkbox" role="switch" aria-label="Enable Indeed Deutschland" aria-controls="indeed-de-limit"{% if setup.indeed_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="indeed-de-limit" name="indeed-de-limit" type="number" value="{{ setup.indeed_de_limit }}" min="1" max="100" required{% if not setup.indeed_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="stepstone-de-limit">StepStone</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="stepstone-de-enabled" name="stepstone-de-enabled" type="checkbox" role="switch" aria-label="Enable StepStone" aria-controls="stepstone-de-limit"{% if setup.stepstone_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="stepstone-de-limit" name="stepstone-de-limit" type="number" value="{{ setup.stepstone_de_limit }}" min="1" max="100" required{% if not setup.stepstone_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="glassdoor-de-limit">Glassdoor DE</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="glassdoor-de-enabled" name="glassdoor-de-enabled" type="checkbox" role="switch" aria-label="Enable Glassdoor DE" aria-controls="glassdoor-de-limit"{% if setup.glassdoor_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="glassdoor-de-limit" name="glassdoor-de-limit" type="number" value="{{ setup.glassdoor_de_limit }}" min="1" max="100" required{% if not setup.glassdoor_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="simplify-de-limit">Simplify DE</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="simplify-de-enabled" name="simplify-de-enabled" type="checkbox" role="switch" aria-label="Enable Simplify DE" aria-controls="simplify-de-limit"{% if setup.simplify_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="simplify-de-limit" name="simplify-de-limit" type="number" value="{{ setup.simplify_de_limit }}" min="1" max="100" required{% if not setup.simplify_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                </div>
+              </fieldset>
+
+              <div class="accordion advanced-settings" id="advanced-settings">
+                <div class="accordion-item">
+                  <h2 class="accordion-header">
+                    <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#advanced-settings-body" aria-expanded="true" aria-controls="advanced-settings-body">Advanced settings</button>
+                  </h2>
+                  <div id="advanced-settings-body" class="accordion-collapse collapse show" data-bs-parent="#advanced-settings">
+                    <div class="accordion-body">
+                      <div class="field-grid details-body">
+                        <label>
+                          <span class="field-label">Batch size</span>
+                          <input class="form-control" id="claude-batch-size" name="claude-batch-size" type="number" value="{{ setup.claude.batch_size }}" min="1" required>
+                        </label>
+                        <label>
+                          <span class="field-label">Daily scan time</span>
+                          <input class="form-control" id="scan-time" name="scan-time" type="time"{% if setup.scheduler.local_time %} value="{{ setup.scheduler.local_time }}"{% endif %}>
+                          <span class="form-text">Optional. Leave blank for manual scans only.</span>
+                        </label>
+                        <div class="field-wide d-flex flex-column flex-sm-row align-items-start align-items-sm-center justify-content-between gap-3 border rounded p-3">
+                          <div>
+                            <span class="field-label d-block">Schedule status</span>
+                            <strong id="schedule-status" aria-live="polite">Not scheduled</strong>
+                            <span class="form-text d-block" id="schedule-note">No automatic scans. Run manually anytime.</span>
+                          </div>
+                          <button class="btn btn-outline-secondary flex-shrink-0" id="remove-schedule" type="button" disabled>Delete schedule</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <p id="form-error" class="form-error" role="alert" hidden></p>
+              <footer class="form-footer">
+                <p><strong>Next:</strong> Build profile, scan sources, review matching jobs.</p>
+                <button class="btn btn-primary primary-button" type="submit">Save and run scan</button>
+              </footer>
+            </form>
+          </section>
+
+          <section id="run-view" aria-labelledby="run-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 2 of 5</p>
+                <h2 id="run-title">Scanning for matching jobs</h2>
+                <p id="run-message" aria-live="polite">Preparing your factual profile...</p>
+              </div>
+              <span id="run-percent" class="run-percent">0%</span>
+            </header>
+
+            <div class="progress" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar" class="progress-bar"></div></div>
+            <ol class="run-log" aria-label="Run activity">
+              <li data-run-item="profile"><span class="run-mark"></span><strong>Candidate profile</strong><small>Waiting</small></li>
+              <li data-run-item="sources"><span class="run-mark"></span><strong>Job sources</strong><small>Waiting</small></li>
+              <li data-run-item="review"><span class="run-mark"></span><strong>Claude review</strong><small>Waiting</small></li>
+              <li data-run-item="company_size"><span class="run-mark"></span><strong>Company size check</strong><small>Waiting</small></li>
+              <li data-run-item="publish"><span class="run-mark"></span><strong>Publish review queue</strong><small>Waiting</small></li>
+            </ol>
+
+            <div id="run-summary" class="run-summary" hidden>
+              <div><strong id="found-count">0</strong><span>found</span></div>
+              <div><strong id="reviewed-count">0</strong><span>reviewed</span></div>
+              <div><strong id="eligible-count">0</strong><span>eligible</span></div>
+              <div><strong id="warning-count">0</strong><span>source warnings</span></div>
+            </div>
+
+            <footer class="form-footer run-footer">
+              <button id="back-button" class="btn btn-outline-secondary secondary-button" type="button">Back to setup</button>
+              <a id="review-link" class="btn btn-primary primary-button" href="#review" hidden>Open review desk</a>
+            </footer>
+          </section>
+
+          <section id="review-view" aria-labelledby="review-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 3 of 5</p>
+                <h2 id="review-title">Review queue</h2>
+                <p>Review current jobs without leaving this workflow.</p>
+              </div>
+              <span class="fixed-scope ready-badge">Data revision {{ revision }}</span>
+            </header>
+            <details class="form-section scan-history-section" id="scan-history">
+              <summary class="scan-history-heading">
+                <span class="scan-history-heading-copy">
+                  <strong id="scan-history-title">Search history</strong>
+                  <span>Each search keeps its own resume and review results.</span>
+                </span>
+              </summary>
+              <div class="scan-history-list">
+                {% for entry in scan_history %}
+                  <article class="ai-provider-row{% if entry.run_id == selected_run_id %} is-selected{% endif %}" data-scan-history-id="{{ entry.run_id }}">
+                    <div class="ai-provider-mark" aria-hidden="true">{{ entry.candidate_name[:2] | upper }}</div>
+                    <div class="ai-provider-copy">
+                      <div class="ai-provider-title"><strong>{{ entry.candidate_name }}</strong></div>
+                      <p>{{ entry.job_count }} jobs · {{ entry.recommended_count }} recommended</p>
+                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                    </div>
+                    <div class="ai-provider-actions scan-history-actions">
+                      <a class="btn btn-outline-secondary" data-scan-download href="/api/scan-history/{{ entry.run_id }}/resume">Download resume</a>
+                      <a class="btn btn-outline-secondary" data-scan-view href="/setup?run_id={{ entry.run_id }}#review" aria-label="View {{ entry.candidate_name }} search results">👁 View</a>
+                      <button class="btn btn-outline-danger" type="button" data-scan-delete aria-label="Delete {{ entry.candidate_name }} search history">Delete</button>
+                    </div>
+                  </article>
+                {% else %}
+                  <p class="ai-provider-empty">No completed searches yet.</p>
+                {% endfor %}
+              </div>
+            </details>
+            <div class="embedded-review">
+              <div class="review-filters">
+                <div class="source-filter">
+                  <label for="source-filter">
+                    <span class="field-label">Search sources</span>
+                    <select class="form-select" id="source-filter" name="source-filter" multiple aria-describedby="source-filter-help"></select>
+                  </label>
+                </div>
+                <label class="posted-within-filter" for="review-posted-within-days">
+                  <span class="field-label">Posted within</span>
+                  <select class="form-select" id="review-posted-within-days" name="review-posted-within-days">
+                    <option value="0"{% if setup.posted_within_days == 0 %} selected{% endif %}>Today</option>
+                    <option value="1"{% if setup.posted_within_days == 1 %} selected{% endif %}>Last 1 day</option>
+                    <option value="3"{% if setup.posted_within_days == 3 %} selected{% endif %}>Last 3 days</option>
+                    <option value="7"{% if setup.posted_within_days == 7 %} selected{% endif %}>Last 7 days</option>
+                    <option value="14"{% if setup.posted_within_days == 14 %} selected{% endif %}>Last 14 days</option>
+                    <option value=""{% if setup.posted_within_days is none %} selected{% endif %}>No limit</option>
+                  </select>
+                </label>
+                <label class="minimum-score-filter" for="review-minimum-score">
+                  <span class="field-label">Minimum score</span>
+                  <select class="form-select" id="review-minimum-score" name="review-minimum-score">
+                    <option value="" selected>Any score</option>
+                    <option value="50">50+ score</option>
+                    <option value="60">60+ score</option>
+                    <option value="70">70+ score</option>
+                    <option value="80">80+ score</option>
+                    <option value="90">90+ score</option>
+                  </select>
+                </label>
+                <label class="company-size-filter" for="review-company-size">
+                  <span class="field-label">Company size</span>
+                  <select class="form-select" id="review-company-size" name="review-company-size">
+                    <option value="0" selected>Any size</option>
+                    <option value="50">50+ employees</option>
+                    <option value="250">250+ employees</option>
+                    <option value="1000">1,000+ employees</option>
+                    <option value="10000">10,000+ employees</option>
+                  </select>
+                </label>
+                <label class="company-industry-filter" for="review-company-industry">
+                  <span class="field-label">Company industry</span>
+                  <select class="form-select" id="review-company-industry" name="review-company-industry">
+                    <option value="" selected>Any industry</option>
+                  </select>
+                </label>
+                <label class="language-requirement-filter" for="review-language-requirement">
+                  <span class="field-label">Language requirement</span>
+                  <select class="form-select" id="review-language-requirement" name="review-language-requirement">
+                    <option value="">Any requirement</option>
+                    <option value="required">German required</option>
+                    <option value="not-required" selected>No German requirement</option>
+                  </select>
+                </label>
+              </div>
+              <section class="review-block" data-review-block="current">
+                <header class="review-block-heading">
+                  <div>
+                    <p class="eyebrow">Current search</p>
+                    <h3>Current history</h3>
+                  </div>
+                </header>
+                <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
+                  {{ navigation(current_dashboard, 'Current history job groups') }}
+                  <div class="review-groups">{{ groups(current_dashboard, true, true, 'current') }}</div>
+                </div>
+              </section>
+              <section class="review-block" data-review-block="global">
+                <header class="review-block-heading review-block-heading-actions">
+                  <div>
+                    <p class="eyebrow">All searches</p>
+                    <h3>Global job status</h3>
+                  </div>
+                  {{ manual_job_import() }}
+                </header>
+                <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
+                  {{ navigation(global_dashboard, 'Global job status groups') }}
+                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>
+                </div>
+              </section>
+            </div>
+            <footer class="form-footer">
+              <div class="review-ats-controls">
+                <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
+                <label class="ats-resume-picker" for="ats-resume">
+                  <span class="field-label">ATS resume</span>
+                  <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
+                  <small>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
+                </label>
+                <button class="btn btn-primary primary-button" type="button" data-open-ats data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
+              </div>
+            </footer>
+          </section>
+
+          <section id="ats-running" aria-labelledby="ats-running-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 4 of 5</p>
+                <h2 id="ats-running-title">ATS run</h2>
+                <p>Follow the current ATS check from Review to completion.</p>
+              </div>
+              <span class="fixed-scope ready-badge" id="ats-run-badge">Idle</span>
+            </header>
+
+            <section class="form-section ats-running-card" aria-labelledby="ats-running-progress-title">
+              <header class="ats-running-heading">
+                <div>
+                  <p class="eyebrow">One job per AI request</p>
+                  <h3 id="ats-running-progress-title">ATS check progress</h3>
+                  <p id="ats-run-message" aria-live="polite">No ATS check is running. Start one from Review.</p>
+                </div>
+                <strong class="run-percent" id="ats-run-percent">Idle</strong>
+              </header>
+
+              <div class="progress" id="ats-run-progress" role="progressbar" aria-label="ATS check progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="No ATS check is running">
+                <div class="progress-bar" id="ats-run-progress-bar"></div>
+              </div>
+
+              <ol class="run-log ats-run-log" aria-label="ATS check activity" data-ats-task-list></ol>
+
+              <p class="ats-running-note"><strong>Parallel job checks:</strong> each AI request contains the same resume and one complete job description.</p>
+            </section>
+
+            <footer class="form-footer ats-running-footer">
+              <a class="btn btn-outline-secondary secondary-button" href="#review" data-back-to-review>Back to review</a>
+              <a class="btn btn-primary primary-button" id="ats-results-link" href="#ats-check" hidden>Open ATS results</a>
+            </footer>
+          </section>
+
+          <section id="ats-check" aria-labelledby="ats-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 5 of 5</p>
+                <h2 id="ats-title">ATS check</h2>
+                <p>Check resume readability once, then compare the resume with each selected job.</p>
+              </div>
+              <span class="fixed-scope ready-badge" id="ats-result-scope">{% if selected_ats %}Saved check · {{ selected_ats.jobs | length }} jobs{% else %}No saved checks{% endif %}</span>
+            </header>
+
+            <details class="form-section scan-history-section" id="ats-history">
+              <summary class="scan-history-heading">
+                <span class="scan-history-heading-copy">
+                  <strong id="ats-history-title">ATS history</strong>
+                  <span>Each check keeps its resume and per-job ATS results.</span>
+                </span>
+              </summary>
+              <div class="scan-history-list">
+                {% for entry in ats_history %}
+                  <article class="ai-provider-row{% if selected_ats and entry.run_id == selected_ats.run_id %} is-selected{% endif %}" data-ats-history-id="{{ entry.run_id }}">
+                    <div class="ai-provider-mark" aria-hidden="true">ATS</div>
+                    <div class="ai-provider-copy">
+                      <div class="ai-provider-title"><strong>{{ entry.resume_filename }}</strong></div>
+                      <p>{{ entry.job_count }} jobs · {{ entry.readiness_score }} resume readiness{% if entry.failed_job_count %} · {{ entry.failed_job_count }} failed{% endif %}</p>
+                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                    </div>
+                    <div class="ai-provider-actions scan-history-actions">
+                      <a class="btn btn-outline-secondary" data-ats-history-view href="/setup?ats_run_id={{ entry.run_id }}#ats-check">👁 View</a>
+                      <button class="btn btn-outline-danger" type="button" data-ats-history-delete aria-label="Delete ATS check for {{ entry.resume_filename }}">Delete</button>
+                    </div>
+                  </article>
+                {% else %}
+                  <p class="ai-provider-empty">No completed ATS checks yet.</p>
+                {% endfor %}
+              </div>
+            </details>
+
+            {% if selected_ats %}
+              <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing {{ selected_ats.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ selected_ats.jobs | length }} jobs</p>
+
+              <section class="form-section ats-readiness" id="resume-readiness" aria-labelledby="resume-readiness-title">
+                <div class="ats-readiness-score" aria-label="Resume readiness score {{ selected_ats.resume.readiness_score }} out of 100">
+                  <strong id="resume-readiness-score">{{ selected_ats.resume.readiness_score }}</strong>
+                  <span>resume readiness</span>
+                </div>
+                <div class="ats-readiness-body">
+                  <header>
+                    <div>
+                      <p class="eyebrow">Checked once for this resume</p>
+                      <h3 id="resume-readiness-title">{{ selected_ats.resume.title }}</h3>
+                      <p>{{ selected_ats.resume.summary }}</p>
+                    </div>
+                    <span class="ats-status{% if selected_ats.resume.verdict == 'ready' %} is-strong{% endif %}">{{ selected_ats.resume.verdict | replace('_', ' ') | title }}</span>
+                  </header>
+                  <ul class="ats-check-list">
+                    {% for finding in selected_ats.resume.findings %}
+                      <li data-status="{{ finding.status }}"><strong>{{ finding.label }}</strong><span>{{ finding.detail }}</span></li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              </section>
+
+              <div class="ats-workspace">
+                <aside class="form-section ats-job-list" aria-labelledby="ats-jobs-title">
+                  <header>
+                    <div>
+                      <h3 id="ats-jobs-title">Selected jobs</h3>
+                      <p>Select a job to see its resume match.</p>
+                    </div>
+                  </header>
+                  {% for job in selected_ats.jobs %}
+                    <button class="ats-job-option{% if loop.first %} is-active{% endif %}" type="button" data-ats-job="{{ job.job_key }}" aria-pressed="{{ 'true' if loop.first else 'false' }}">
+                      <span><strong>{{ job.title }}</strong><small>{{ job.company }} · {{ job.location }}</small></span>
+                      {% if job.assessment %}<b data-ats-job-score>{{ job.assessment.match_score }}%</b>{% else %}<b>Check failed</b>{% endif %}
+                    </button>
+                  {% endfor %}
+                </aside>
+
+                <div class="ats-report-list" aria-live="polite">
+                  {% for job in selected_ats.jobs %}
+                    <article class="form-section ats-report" data-ats-report="{{ job.job_key }}"{% if not loop.first %} hidden{% endif %}>
+                      <header class="ats-report-header">
+                        <div>
+                          <p class="company">{{ job.company }}</p>
+                          <h3>{{ job.title }}</h3>
+                          <p class="location">{{ job.location }}</p>
+                        </div>
+                        {% if job.assessment %}
+                          <div class="ats-match-score{% if job.assessment.match_label == 'weak' %} is-weak{% endif %}"><strong data-ats-report-score>{{ job.assessment.match_score }}%</strong><span>{{ job.assessment.match_label | title }} match</span></div>
+                        {% else %}
+                          <div class="ats-match-score is-weak"><span>Check failed</span></div>
+                        {% endif %}
+                      </header>
+                      {% if job.assessment %}
+                        <dl class="ats-metrics">
+                          <div><dt>Required skills</dt><dd><progress value="{{ job.assessment.required_skills_score }}" max="100">{{ job.assessment.required_skills_score }}%</progress><span>{{ job.assessment.required_skills_score }}%</span></dd></div>
+                          <div><dt>Experience and seniority</dt><dd><progress value="{{ job.assessment.experience_score }}" max="100">{{ job.assessment.experience_score }}%</progress><span>{{ job.assessment.experience_score }}%</span></dd></div>
+                          <div><dt>JD keywords</dt><dd><progress value="{{ job.assessment.keyword_score }}" max="100">{{ job.assessment.keyword_score }}%</progress><span>{{ job.assessment.keyword_score }}%</span></dd></div>
+                        </dl>
+                        <div class="ats-findings">
+                          <section>
+                            <h4>Matched</h4>
+                            <ul>{% for item in job.assessment.matched %}<li>{{ item }}</li>{% else %}<li>No confirmed matches.</li>{% endfor %}</ul>
+                          </section>
+                          <section class="has-attention">
+                            <h4>Needs attention</h4>
+                            <ul>{% for item in job.assessment.needs_attention %}<li>{{ item }}</li>{% else %}<li>No specific gaps found.</li>{% endfor %}</ul>
+                          </section>
+                        </div>
+                        <details class="ats-suggestions" open>
+                          <summary>Suggested resume changes</summary>
+                          <ol>{% for item in job.assessment.suggestions %}<li>{{ item }}</li>{% else %}<li>No changes suggested.</li>{% endfor %}</ol>
+                        </details>
+                      {% else %}
+                        <p class="form-error">{{ job.failure.message }}</p>
+                      {% endif %}
+                    </article>
+                  {% endfor %}
+                </div>
+              </div>
+            {% else %}
+              <p class="ai-provider-empty" id="ats-history-context">No saved ATS check selected.</p>
+            {% endif %}
+
+            <footer class="form-footer ats-footer">
+              <a class="btn btn-outline-secondary secondary-button" href="#review" data-back-to-review>Back to review</a>
+              <p>Scores estimate resume-to-JD fit. They do not guarantee screening results.</p>
+            </footer>
+          </section>
+        </div>
+      </article>
+    </main>
+
+    <script>{{ bootstrap_js | safe }}</script>
+    <script>{{ tom_select_js | safe }}</script>
+    <script>{{ dashboard_js | safe }}</script>
+    <script>{{ console_js | safe }}</script>
+  </body>
+</html>

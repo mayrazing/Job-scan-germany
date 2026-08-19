@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Job scan local console mock</title>
+    <link rel="stylesheet" href="../../node_modules/bootstrap/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="../../node_modules/tom-select/dist/css/tom-select.bootstrap5.min.css">
+    <link rel="stylesheet" href="../../src/job_scan/dashboard/static/dashboard.css">
+    <link rel="stylesheet" href="mock.css">
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Local scan console</p>
+        <h1>Job scan</h1>
+        <p>Set preferences once. Run the search. Review the queue. Check resume fit.</p>
+      </div>
+      <p class="revision console-state">Status <strong id="header-status">Ready</strong></p>
+    </header>
+
+    <nav class="group-nav flow-nav" aria-label="Workflow">
+      <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
+      <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
+      <a class="btn btn-outline-secondary" href="#review-preview" data-nav-step="review">Review <span>3</span></a>
+      <a class="btn btn-outline-secondary" href="#ats-running" data-nav-step="ats">ATS Check <span>4</span></a>
+    </nav>
+
+    <main>
+      <article class="job-card console-card card">
+        <aside class="status-rail workflow-rail" aria-label="Scan progress">
+          <div class="rail-intro">
+            <strong>Today’s run</strong>
+            <span>Germany · Visa needed</span>
+          </div>
+          <ol class="step-list">
+            <li data-step="setup" data-state="active">
+              <span class="step-dot">1</span>
+              <span><strong>Setup</strong><small>Resume + search</small></span>
+            </li>
+            <li data-step="profile">
+              <span class="step-dot">2</span>
+              <span><strong>Profile</strong><small>Read the resume</small></span>
+            </li>
+            <li data-step="sources">
+              <span class="step-dot">3</span>
+              <span><strong>Sources</strong><small>Find open roles</small></span>
+            </li>
+            <li data-step="review">
+              <span class="step-dot">4</span>
+              <span><strong>AI review</strong><small>Score full JDs</small></span>
+            </li>
+            <li data-step="ats">
+              <span class="step-dot">5</span>
+              <span><strong>ATS check</strong><small>Match resume to roles</small></span>
+            </li>
+          </ol>
+          <p class="privacy-note"><strong>Private by default.</strong> This page and your data stay on this computer.</p>
+        </aside>
+
+        <div class="card-body console-body">
+          <section id="setup" aria-labelledby="setup-title">
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 1 of 4</p>
+                <h2 id="setup-title">What should we look for?</h2>
+                <p>These values map to the current <code>job-scan setup</code> questions.</p>
+              </div>
+              <span class="fixed-scope">DE · Sponsorship required</span>
+            </header>
+
+            <form id="setup-form">
+              <fieldset class="form-section">
+                <legend>Candidate</legend>
+                <label for="resume">
+                  <span class="field-label">Resume</span>
+                  <input class="form-control" id="resume" name="resume" type="file" accept=".pdf,.docx" required>
+                </label>
+                <label>
+                  <span class="field-label">German certificate or level</span>
+                  <select class="form-select" id="german-level" name="german-level" data-search-select data-create="true" required>
+                    <option>A1</option>
+                    <option selected>A2</option>
+                    <option>B1</option>
+                    <option>B2</option>
+                    <option>C1</option>
+                    <option>C2</option>
+                    <option>Native / fluent</option>
+                  </select>
+                </label>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Search</legend>
+                <div class="field-grid">
+                  <label class="field-wide">
+                    <span class="field-label">Search terms</span>
+                    <select class="form-select" id="search-terms" name="search-terms" multiple data-search-select data-create="true" required>
+                      <option selected>Backend Engineer</option>
+                      <option selected>Platform Engineer</option>
+                      <option>Software Engineer</option>
+                      <option>Java Developer</option>
+                      <option>Python Developer</option>
+                      <option>DevOps Engineer</option>
+                      <option>Site Reliability Engineer</option>
+                      <option>Cloud Engineer</option>
+                      <option>Full Stack Engineer</option>
+                      <option>Data Engineer</option>
+                      <option>Machine Learning Engineer</option>
+                      <option>Engineering Manager</option>
+                    </select>
+                    <small>Choose suggestions or type your own. Press Enter to add.</small>
+                  </label>
+                  <label>
+                    <span class="field-label">Locations</span>
+                    <select class="form-select" id="locations" name="locations" multiple data-search-select data-create="true">
+                      <option selected>Berlin</option>
+                      <option selected>Hamburg</option>
+                      <option>Munich</option>
+                      <option>Frankfurt am Main</option>
+                      <option>Cologne</option>
+                      <option>Düsseldorf</option>
+                      <option>Stuttgart</option>
+                      <option>Leipzig</option>
+                      <option>Dresden</option>
+                      <option>Hanover</option>
+                      <option>Bremen</option>
+                      <option>Nuremberg</option>
+                    </select>
+                    <span class="form-text" id="locations-help">Leave blank to search all of Germany.</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section ai-config-section" id="ai-config">
+                <legend>AI configuration</legend>
+                <div class="ai-config-heading">
+                  <p>Connect Anthropic-compatible API models. API keys stay on this computer.</p>
+                  <button class="btn btn-outline-secondary" type="button" data-add-ai-provider>+ Add AI configuration</button>
+                </div>
+
+                <div class="ai-provider-list" aria-label="Saved AI configurations">
+                  <article class="ai-provider-row" data-ai-provider="deepseek">
+                    <div class="ai-provider-mark" aria-hidden="true">DS</div>
+                    <div class="ai-provider-copy">
+                      <div class="ai-provider-title">
+                        <strong data-provider-name>DeepSeek</strong>
+                      </div>
+                      <p data-provider-summary>deepseek-v4-flash · Effort: low</p>
+                      <small data-provider-url>https://api.deepseek.com/anthropic</small>
+                    </div>
+                    <div class="ai-provider-actions">
+                      <button class="btn btn-outline-secondary" type="button" data-edit-ai-provider>Edit</button>
+                    </div>
+                  </article>
+                </div>
+
+                <div class="ai-provider-editor" id="ai-provider-editor" hidden>
+                  <header>
+                    <div>
+                      <p class="eyebrow" id="ai-editor-mode">Edit API model</p>
+                      <h3 id="ai-editor-title">DeepSeek</h3>
+                    </div>
+                    <span class="fixed-scope">Anthropic protocol</span>
+                  </header>
+                  <div class="field-grid">
+                    <label>
+                      <span class="field-label">Provider name</span>
+                      <input class="form-control" id="ai-provider-name" name="ai-provider-name" value="DeepSeek">
+                    </label>
+                    <label>
+                      <span class="field-label">Base URL</span>
+                      <input class="form-control" id="ai-provider-base-url" name="ai-provider-base-url" type="url" value="https://api.deepseek.com/anthropic" placeholder="https://api.example.com/anthropic">
+                    </label>
+                    <label>
+                      <span class="field-label">API key</span>
+                      <input class="form-control" id="ai-provider-api-key" name="ai-provider-api-key" type="password" placeholder="Configured · enter to replace">
+                    </label>
+                    <label>
+                      <span class="field-label">Model</span>
+                      <select class="form-select" id="ai-provider-model" name="ai-provider-model" data-search-select data-create="true">
+                        <option selected>deepseek-v4-flash</option>
+                      </select>
+                      <span class="form-text">Fetch models or type a model name.</span>
+                    </label>
+                    <label>
+                      <span class="field-label">Reasoning effort</span>
+                      <select class="form-select" id="ai-provider-effort" name="ai-provider-effort">
+                        <option selected>low</option>
+                        <option>medium</option>
+                        <option>high</option>
+                        <option>max</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p class="ai-editor-feedback" id="ai-editor-feedback" role="status" aria-live="polite"></p>
+                  <div class="ai-editor-actions">
+                    <button class="btn btn-outline-secondary" type="button" data-discover-ai-models>Fetch models</button>
+                    <span></span>
+                    <button class="btn btn-outline-secondary" type="button" data-cancel-ai-provider>Cancel</button>
+                    <button class="btn btn-primary" type="button" data-save-ai-provider>Save AI configuration</button>
+                  </div>
+                </div>
+              </fieldset>
+
+              <div class="accordion advanced-settings" id="advanced-settings">
+                <div class="accordion-item">
+                  <h2 class="accordion-header">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#advanced-settings-body" aria-expanded="false" aria-controls="advanced-settings-body">Advanced settings</button>
+                  </h2>
+                  <div id="advanced-settings-body" class="accordion-collapse collapse" data-bs-parent="#advanced-settings">
+                    <div class="accordion-body">
+                      <div class="field-grid details-body">
+                        <label class="field-wide runtime-picker">
+                          <span class="field-label">AI runtime and model</span>
+                          <select class="form-select" id="ai-runtime" name="ai-runtime">
+                            <option value="claude-code" selected>Claude Code CLI · sonnet</option>
+                            <option value="api:deepseek">DeepSeek API · deepseek-v4-flash</option>
+                          </select>
+                          <span class="form-text">Choose which runtime builds the profile and reviews job descriptions.</span>
+                        </label>
+                        <label>
+                          <span class="field-label">LinkedIn limit</span>
+                          <input class="form-control" id="linkedin-limit" name="linkedin-limit" type="number" value="50" min="0" max="100" required>
+                          <span class="form-text">Jobs per search term and location. Use 0 to disable LinkedIn. Maximum 100.</span>
+                        </label>
+                        <div class="field-wide runtime-settings field-grid" id="claude-code-settings">
+                          <label>
+                            <span class="field-label">Claude Code model</span>
+                            <select class="form-select" id="claude-model" name="claude-model" data-search-select data-create="true" required>
+                              <option selected>sonnet</option>
+                              <option>opus</option>
+                              <option>haiku</option>
+                            </select>
+                          </label>
+                          <label>
+                            <span class="field-label">Claude Code effort</span>
+                            <select class="form-select" id="claude-effort" name="claude-effort">
+                              <option>low</option>
+                              <option selected>medium</option>
+                              <option>high</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div class="field-wide api-model-summary" id="api-model-settings" hidden>
+                          <span class="ai-provider-mark" aria-hidden="true">DS</span>
+                          <div>
+                            <span class="field-label d-block">Selected API model</span>
+                            <strong id="api-model-summary">DeepSeek · deepseek-v4-flash</strong>
+                            <span class="form-text d-block">Effort: low · Anthropic-compatible API</span>
+                          </div>
+                        </div>
+                        <label>
+                          <span class="field-label">Batch size</span>
+                          <input class="form-control" id="claude-batch-size" name="claude-batch-size" type="number" value="10" min="1" required>
+                        </label>
+                        <label>
+                          <span class="field-label">Daily scan time</span>
+                          <input class="form-control" id="scan-time" name="scan-time" type="time">
+                          <span class="form-text">Optional. Leave blank for manual scans only.</span>
+                        </label>
+                        <div class="field-wide d-flex flex-column flex-sm-row align-items-start align-items-sm-center justify-content-between gap-3 border rounded p-3">
+                          <div>
+                            <span class="field-label d-block">Schedule status</span>
+                            <strong id="schedule-status" aria-live="polite">Not scheduled</strong>
+                            <span class="form-text d-block" id="schedule-note">No automatic scans. Run manually anytime.</span>
+                          </div>
+                          <button class="btn btn-outline-secondary flex-shrink-0" id="remove-schedule" type="button" disabled>Delete schedule</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <p id="form-error" class="form-error" role="alert" hidden></p>
+              <footer class="form-footer">
+                <p><strong>Next:</strong> Build profile, scan sources, review matching jobs.</p>
+                <button class="btn btn-primary primary-button" type="submit">Save and run scan</button>
+              </footer>
+            </form>
+          </section>
+
+          <section id="run-view" aria-labelledby="run-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 2 of 4</p>
+                <h2 id="run-title">Scanning for matching jobs</h2>
+                <p id="run-message" aria-live="polite">Preparing your factual profile...</p>
+              </div>
+              <span id="run-percent" class="run-percent">0%</span>
+            </header>
+
+            <div class="progress" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-bar" class="progress-bar"></div></div>
+            <ol class="run-log" aria-label="Run activity">
+              <li data-run-item="profile"><span class="run-mark"></span><strong>Candidate profile</strong><small>Waiting</small></li>
+              <li data-run-item="sources"><span class="run-mark"></span><strong>Job sources</strong><small>Waiting</small></li>
+              <li data-run-item="review"><span class="run-mark"></span><strong>Claude review</strong><small>Waiting</small></li>
+              <li data-run-item="publish"><span class="run-mark"></span><strong>Publish review queue</strong><small>Waiting</small></li>
+            </ol>
+
+            <div id="run-summary" class="run-summary" hidden>
+              <div><strong>142</strong><span>found</span></div>
+              <div><strong>24</strong><span>reviewed</span></div>
+              <div><strong>9</strong><span>eligible</span></div>
+              <div><strong>2</strong><span>source warnings</span></div>
+            </div>
+
+            <footer class="form-footer run-footer">
+              <button id="back-button" class="btn btn-outline-secondary secondary-button" type="button">Back to setup</button>
+              <a id="review-link" class="btn btn-primary primary-button" href="#review-preview" hidden>Open review desk</a>
+            </footer>
+          </section>
+
+          <section id="review-preview" aria-labelledby="review-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 3 of 4</p>
+                <h2 id="review-title">Review queue</h2>
+                <p>Review current jobs without leaving this workflow.</p>
+              </div>
+              <span class="fixed-scope ready-badge">Data revision 12</span>
+            </header>
+
+            <details class="form-section scan-history-section" id="scan-history">
+              <summary class="scan-history-heading">
+                <span class="scan-history-heading-copy">
+                  <strong id="scan-history-title">Search history</strong>
+                  <span>Each search keeps its own resume and review results.</span>
+                </span>
+              </summary>
+              <div class="scan-history-list">
+                <article class="ai-provider-row is-selected" data-scan-history-id="run-12">
+                  <div class="ai-provider-mark" aria-hidden="true">ZZ</div>
+                  <div class="ai-provider-copy">
+                    <div class="ai-provider-title"><strong>Zhiyong Zhou</strong></div>
+                    <p>8 jobs · 3 recommended</p>
+                    <small><time datetime="2026-08-09T09:40:00Z">2026-08-09 09:40 UTC</time></small>
+                  </div>
+                  <div class="ai-provider-actions scan-history-actions">
+                    <a class="btn btn-outline-secondary" data-scan-download href="#">Download resume</a>
+                    <a class="btn btn-outline-secondary" data-scan-view href="#recommended" aria-label="View Zhiyong Zhou search results">👁 View</a>
+                    <button class="btn btn-outline-danger" type="button" data-scan-delete aria-label="Delete Zhiyong Zhou search history">Delete</button>
+                  </div>
+                </article>
+                <article class="ai-provider-row" data-scan-history-id="run-11">
+                  <div class="ai-provider-mark" aria-hidden="true">ZZ</div>
+                  <div class="ai-provider-copy">
+                    <div class="ai-provider-title"><strong>Zhiyong Zhou</strong></div>
+                    <p>5 jobs · 1 recommended</p>
+                    <small><time datetime="2026-08-08T17:15:00Z">2026-08-08 17:15 UTC</time></small>
+                  </div>
+                  <div class="ai-provider-actions scan-history-actions">
+                    <a class="btn btn-outline-secondary" data-scan-download href="#">Download resume</a>
+                    <a class="btn btn-outline-secondary" data-scan-view href="#recommended" aria-label="View Zhiyong Zhou prior search results">👁 View</a>
+                    <button class="btn btn-outline-danger" type="button" data-scan-delete aria-label="Delete Zhiyong Zhou prior search history">Delete</button>
+                  </div>
+                </article>
+              </div>
+            </details>
+
+            <div class="embedded-review">
+              <div class="review-filters">
+                <div class="source-filter">
+                  <label for="source-filter">
+                    <span class="field-label">Search sources</span>
+                    <select class="form-select" id="source-filter" name="source-filter" multiple aria-describedby="source-filter-help"></select>
+                  </label>
+                  <span class="form-text" id="source-filter-help">Show jobs from any checked source.</span>
+                </div>
+                <label class="posted-within-filter" for="review-posted-within-days">
+                  <span class="field-label">Posted within</span>
+                  <select class="form-select" id="review-posted-within-days" name="review-posted-within-days">
+                    <option value="0">Today</option>
+                    <option value="1">Last 1 day</option>
+                    <option value="3" selected>Last 3 days</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="14">Last 14 days</option>
+                    <option value="">No limit</option>
+                  </select>
+                </label>
+                <label class="company-size-filter" for="review-company-size">
+                  <span class="field-label">Company size</span>
+                  <select class="form-select" id="review-company-size" name="review-company-size">
+                    <option value="0" selected>Any size</option>
+                    <option value="50">50+ employees</option>
+                    <option value="250">250+ employees</option>
+                    <option value="1000">1,000+ employees</option>
+                    <option value="10000">10,000+ employees</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="review-workspace">
+                <nav class="group-nav review-group-nav" aria-label="Job groups">
+                  <a href="#recommended" data-review-group-tab="recommended" draggable="true" aria-current="page"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Recommended</span><span>3</span></a>
+                  <a href="#shortlisted" data-review-group-tab="shortlisted" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Shortlisted</span><span>0</span></a>
+                  <a href="#pending" data-review-group-tab="pending" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Pending</span><span>0</span></a>
+                  <a href="#excluded" data-review-group-tab="excluded" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Excluded</span><span>1</span></a>
+                  <a href="#applied" data-review-group-tab="applied" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Applied</span><span>0</span></a>
+                  <a href="#rejected" data-review-group-tab="rejected" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Rejected</span><span>0</span></a>
+                  <a href="#ignored" data-review-group-tab="ignored" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Ignored</span><span>0</span></a>
+                </nav>
+
+                <div class="review-groups">
+                <section class="job-group" id="recommended" aria-labelledby="recommended-title">
+                  <header class="section-header">
+                    <h2 id="recommended-title">Recommended</h2>
+                    <span class="count">3</span>
+                  </header>
+                  <div class="card-grid">
+                    <article class="job-card" data-availability="active" data-company-size-maximum="1000" data-company-size-minimum="501" data-job-key="linkedin:example-backend" data-posted-at="2026-08-09" data-posted-days-ago="0" data-sources="linkedin,simplify">
+                      <div class="status-rail" aria-label="Job status">
+                        <span data-user-status><strong>User status:</strong> new</span>
+                        <span data-machine-status><strong>Machine:</strong> eligible</span>
+                        <span data-effective-status><strong>Effective:</strong> eligible</span>
+                        <span><strong>Availability:</strong> active</span>
+                      </div>
+                      <div class="card-body">
+                        <header class="card-header">
+                          <div>
+                            <p class="company">Example GmbH</p>
+                            <h3><a href="https://example.com/jobs/backend" target="_blank" rel="noopener noreferrer">Senior Backend Engineer</a></h3>
+                            <p class="location">Berlin · Hybrid</p>
+                          </div>
+                          <p class="score"><strong>86</strong><span>score</span></p>
+                        </header>
+                        <p class="reason">Strong backend match. English working environment. Sponsorship not ruled out.</p>
+                        <ul class="labels" aria-label="Labels"><li>backend</li><li>Python</li><li>visa uncertain</li></ul>
+                        <dl class="facts">
+                          <div><dt>Sources</dt><dd>LinkedIn, Simplify</dd></div>
+                          <div class="company-size"><dt>Company size</dt><dd>501–1,000 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div>
+                          <div><dt>Posted</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                          <div><dt>First seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                          <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                        </dl>
+                        <details class="evidence"><summary>Evidence</summary><ul><li>Backend ownership with Python and PostgreSQL.</li><li>English is the team language.</li></ul></details>
+                        <div class="job-actions">
+                          <form class="job-action" data-job-action="status" data-job-key="linkedin:example-backend">
+                            <label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
+                            <button type="submit">Save status</button>
+                          </form>
+                        </div>
+                        <label class="form-check ats-job-selector">
+                          <input class="form-check-input" type="checkbox" value="linkedin:example-backend" data-ats-select-job aria-label="Select Senior Backend Engineer at Example GmbH for ATS Check">
+                          <span class="form-check-label">Select for ATS Check</span>
+                        </label>
+                      </div>
+                    </article>
+
+                    <article class="job-card" data-availability="active" data-company-size-maximum="5000" data-company-size-minimum="1001" data-job-key="indeed:northstar-platform" data-posted-at="2026-08-08" data-posted-days-ago="1" data-sources="indeed">
+                      <div class="status-rail" aria-label="Job status">
+                        <span data-user-status><strong>User status:</strong> new</span>
+                        <span data-machine-status><strong>Machine:</strong> eligible</span>
+                        <span data-effective-status><strong>Effective:</strong> eligible</span>
+                        <span><strong>Availability:</strong> active</span>
+                      </div>
+                      <div class="card-body">
+                        <header class="card-header"><div><p class="company">Northstar Systems</p><h3><a href="https://example.com/jobs/platform" target="_blank" rel="noopener noreferrer">Platform Engineer</a></h3><p class="location">Hamburg · Hybrid</p></div><p class="score"><strong>81</strong><span>score</span></p></header>
+                        <p class="reason">Good infrastructure overlap and relevant backend systems experience.</p>
+                        <ul class="labels" aria-label="Labels"><li>AWS</li><li>CI/CD</li><li>platform</li></ul>
+                        <dl class="facts">
+                          <div><dt>Sources</dt><dd>Indeed</dd></div>
+                          <div class="company-size"><dt>Company size</dt><dd>1,001–5,000 employees · No reliable source · Checked 2026-08-09</dd></div>
+                          <div><dt>Posted</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div>
+                          <div><dt>First seen</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div>
+                          <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                        </dl>
+                        <details class="evidence"><summary>Evidence</summary><ul><li>Own cloud platform services and CI/CD tooling.</li></ul></details>
+                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="indeed:northstar-platform"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
+                        <label class="form-check ats-job-selector">
+                          <input class="form-check-input" type="checkbox" value="indeed:northstar-platform" data-ats-select-job aria-label="Select Platform Engineer at Northstar Systems for ATS Check">
+                          <span class="form-check-label">Select for ATS Check</span>
+                        </label>
+                      </div>
+                    </article>
+
+                    <article class="job-card" data-availability="active" data-company-size-maximum="200" data-company-size-minimum="51" data-job-key="simplify:rhein-python" data-posted-at="2026-08-06" data-posted-days-ago="3" data-sources="simplify">
+                      <div class="status-rail" aria-label="Job status">
+                        <span data-user-status><strong>User status:</strong> new</span>
+                        <span data-machine-status><strong>Machine:</strong> eligible</span>
+                        <span data-effective-status><strong>Effective:</strong> eligible</span>
+                        <span><strong>Availability:</strong> active</span>
+                      </div>
+                      <div class="card-body">
+                        <header class="card-header"><div><p class="company">Rhein Data AG</p><h3><a href="https://example.com/jobs/python" target="_blank" rel="noopener noreferrer">Python Developer</a></h3><p class="location">Germany · Remote</p></div><p class="score"><strong>74</strong><span>score</span></p></header>
+                        <p class="reason">Strong Python match. Data-pipeline experience needs confirmation.</p>
+                        <ul class="labels" aria-label="Labels"><li>Python</li><li>SQL</li><li>remote</li></ul>
+                        <dl class="facts">
+                          <div><dt>Sources</dt><dd>Simplify</dd></div>
+                          <div class="company-size"><dt>Company size</dt><dd>51–200 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div>
+                          <div><dt>Posted</dt><dd><time datetime="2026-08-06">2026-08-06</time></dd></div>
+                          <div><dt>First seen</dt><dd><time datetime="2026-08-06">2026-08-06</time></dd></div>
+                          <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                        </dl>
+                        <details class="evidence"><summary>Evidence</summary><ul><li>Build Python services and SQL-based data workflows.</li></ul></details>
+                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="simplify:rhein-python"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
+                        <label class="form-check ats-job-selector">
+                          <input class="form-check-input" type="checkbox" value="simplify:rhein-python" data-ats-select-job aria-label="Select Python Developer at Rhein Data AG for ATS Check">
+                          <span class="form-check-label">Select for ATS Check</span>
+                        </label>
+                      </div>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="job-group" id="shortlisted" aria-labelledby="shortlisted-title" hidden><header class="section-header"><h2 id="shortlisted-title">Shortlisted</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="pending" aria-labelledby="pending-title" hidden><header class="section-header"><h2 id="pending-title">Pending</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+
+                <section class="job-group" id="excluded" aria-labelledby="excluded-title" hidden>
+                  <header class="section-header"><h2 id="excluded-title">Excluded</h2><span class="count">1</span></header>
+                  <div class="card-grid">
+                    <article class="job-card" data-availability="active" data-company-size-maximum="50" data-company-size-minimum="11" data-job-key="linkedin:small-startup" data-posted-at="2026-08-08" data-posted-days-ago="1" data-sources="linkedin">
+                      <div class="status-rail" aria-label="Job status"><span data-user-status><strong>User status:</strong> new</span><span data-machine-status><strong>Machine:</strong> excluded</span><span data-effective-status><strong>Effective:</strong> excluded</span><span><strong>Availability:</strong> active</span></div>
+                      <div class="card-body">
+                        <header class="card-header"><div><p class="company">Tiny Labs</p><h3><a href="https://example.com/jobs/api" target="_blank" rel="noopener noreferrer">API Engineer</a></h3><p class="location">Munich · On-site</p></div><p class="score"><strong>62</strong><span>score</span></p></header>
+                        <p class="reason">Technical match exists, but company-size policy excluded this role.</p>
+                        <div class="exclusions"><strong>Exclusion reasons</strong><ul><li>Company size is below the configured minimum.</li></ul></div>
+                        <dl class="facts"><div><dt>Sources</dt><dd>LinkedIn</dd></div><div class="company-size"><dt>Company size</dt><dd>11–50 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div><div><dt>Posted</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div><div><dt>First seen</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div><div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div></dl>
+                        <details class="evidence"><summary>Evidence</summary><ul><li>Company profile reports fewer than 50 employees.</li></ul></details>
+                        <div class="job-actions">
+                          <form class="job-action" data-job-action="status" data-job-key="linkedin:small-startup"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form>
+                          <form class="job-action" data-job-action="restore" data-job-key="linkedin:small-startup"><button type="submit">Restore job</button></form>
+                        </div>
+                      </div>
+                    </article>
+                  </div>
+                </section>
+
+                <section class="job-group" id="applied" aria-labelledby="applied-title" hidden><header class="section-header"><h2 id="applied-title">Applied</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="rejected" aria-labelledby="rejected-title" hidden><header class="section-header"><h2 id="rejected-title">Rejected</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="ignored" aria-labelledby="ignored-title" hidden><header class="section-header"><h2 id="ignored-title">Ignored</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                </div>
+              </div>
+            </div>
+
+            <footer class="form-footer">
+              <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
+              <button class="btn btn-primary primary-button" type="button" data-open-ats disabled>Check 0 selected jobs</button>
+            </footer>
+          </section>
+
+          <section id="ats-running" aria-labelledby="ats-running-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 4 of 4</p>
+                <h2 id="ats-running-title">Running ATS checks</h2>
+                <p>Check the resume once, then compare it with each recommended job in parallel.</p>
+              </div>
+              <span class="fixed-scope ready-badge" id="ats-run-badge">Running</span>
+            </header>
+
+            <section class="form-section ats-running-card" aria-labelledby="ats-running-progress-title">
+              <header class="ats-running-heading">
+                <div>
+                  <p class="eyebrow">One job per AI request</p>
+                  <h3 id="ats-running-progress-title">Checking 1 resume against 0 jobs</h3>
+                  <p id="ats-run-message" aria-live="polite">Preparing the resume readability check...</p>
+                </div>
+                <strong class="run-percent" id="ats-run-percent">0%</strong>
+              </header>
+
+              <div class="progress" id="ats-run-progress" role="progressbar" aria-label="ATS check progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="progress-bar" id="ats-run-progress-bar"></div>
+              </div>
+
+              <ol class="run-log ats-run-log" aria-label="ATS check activity">
+                <li data-ats-task="resume" data-state="waiting">
+                  <span class="run-mark"></span>
+                  <strong>Resume readability</strong>
+                  <small data-ats-task-status>Waiting</small>
+                </li>
+              </ol>
+
+              <p class="ats-running-note"><strong>Parallel job checks:</strong> each AI request contains the same resume and one complete job description.</p>
+            </section>
+
+            <footer class="form-footer ats-running-footer">
+              <a class="btn btn-outline-secondary secondary-button" href="#review-preview" data-back-to-review>Back to review</a>
+              <a class="btn btn-primary primary-button" id="ats-results-link" href="#ats-check" hidden>Open ATS results</a>
+            </footer>
+          </section>
+
+          <section id="ats-check" aria-labelledby="ats-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 4 of 4</p>
+                <h2 id="ats-title">ATS check</h2>
+                <p>Check resume readability once, then compare the resume with each recommended job.</p>
+              </div>
+              <span class="fixed-scope ready-badge" id="ats-result-scope">Latest check · 3 jobs</span>
+            </header>
+
+            <details class="form-section scan-history-section" id="ats-history">
+              <summary class="scan-history-heading">
+                <span class="scan-history-heading-copy">
+                  <strong id="ats-history-title">ATS history</strong>
+                  <span>Each check keeps its resume and per-job ATS results.</span>
+                </span>
+              </summary>
+              <div class="scan-history-list">
+                <article
+                  class="ai-provider-row is-selected"
+                  data-ats-history-id="ats-12"
+                  data-ats-history-label="Latest check · 2026-08-09 10:05 UTC"
+                  data-ats-history-readiness="92"
+                  data-ats-history-scores="84,76,63"
+                >
+                  <div class="ai-provider-mark" aria-hidden="true">ATS</div>
+                  <div class="ai-provider-copy">
+                    <div class="ai-provider-title"><strong>Zhiyong-Zhou-Resume.pdf</strong></div>
+                    <p>3 jobs · 92 resume readiness</p>
+                    <small><time datetime="2026-08-09T10:05:00Z">2026-08-09 10:05 UTC</time></small>
+                  </div>
+                  <div class="ai-provider-actions scan-history-actions">
+                    <button class="btn btn-outline-secondary" type="button" data-ats-history-view>👁 View</button>
+                    <button class="btn btn-outline-danger" type="button" data-ats-history-delete>Delete</button>
+                  </div>
+                </article>
+                <article
+                  class="ai-provider-row"
+                  data-ats-history-id="ats-11"
+                  data-ats-history-label="Previous check · 2026-08-04 16:20 UTC"
+                  data-ats-history-readiness="89"
+                  data-ats-history-scores="81,72,59"
+                >
+                  <div class="ai-provider-mark" aria-hidden="true">ATS</div>
+                  <div class="ai-provider-copy">
+                    <div class="ai-provider-title"><strong>Zhiyong-Zhou-Resume.pdf</strong></div>
+                    <p>3 jobs · 89 resume readiness</p>
+                    <small><time datetime="2026-08-04T16:20:00Z">2026-08-04 16:20 UTC</time></small>
+                  </div>
+                  <div class="ai-provider-actions scan-history-actions">
+                    <button class="btn btn-outline-secondary" type="button" data-ats-history-view>👁 View</button>
+                    <button class="btn btn-outline-danger" type="button" data-ats-history-delete>Delete</button>
+                  </div>
+                </article>
+              </div>
+            </details>
+
+            <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing latest check · 2026-08-09 10:05 UTC</p>
+
+            <section class="form-section ats-readiness" id="resume-readiness" aria-labelledby="resume-readiness-title">
+              <div class="ats-readiness-score" aria-label="Resume readiness score 92 out of 100">
+                <strong id="resume-readiness-score">92</strong>
+                <span>resume readiness</span>
+              </div>
+              <div class="ats-readiness-body">
+                <header>
+                  <div>
+                    <p class="eyebrow">Checked once for this resume</p>
+                    <h3 id="resume-readiness-title">Resume can be read by an ATS</h3>
+                  </div>
+                  <span class="ats-status is-strong">Ready</span>
+                </header>
+                <ul class="ats-check-list">
+                  <li data-status="pass"><strong>Text extraction</strong><span>All resume text was extracted.</span></li>
+                  <li data-status="pass"><strong>Core sections</strong><span>Contact, experience, education, and skills found.</span></li>
+                  <li data-status="warning"><strong>Layout risk</strong><span>One two-column skills section may parse out of order.</span></li>
+                </ul>
+              </div>
+            </section>
+
+            <div class="ats-workspace">
+              <aside class="form-section ats-job-list" aria-labelledby="ats-jobs-title">
+                <header>
+                  <div>
+                    <h3 id="ats-jobs-title">Recommended jobs</h3>
+                    <p>Select a job to see its resume match.</p>
+                  </div>
+                </header>
+                <button class="ats-job-option is-active" type="button" data-ats-job="backend" aria-pressed="true">
+                  <span><strong>Senior Backend Engineer</strong><small>Example GmbH · Berlin</small></span>
+                  <b data-ats-job-score>84%</b>
+                </button>
+                <button class="ats-job-option" type="button" data-ats-job="platform" aria-pressed="false">
+                  <span><strong>Platform Engineer</strong><small>Northstar Systems · Hamburg</small></span>
+                  <b data-ats-job-score>76%</b>
+                </button>
+                <button class="ats-job-option" type="button" data-ats-job="python" aria-pressed="false">
+                  <span><strong>Python Developer</strong><small>Rhein Data AG · Remote</small></span>
+                  <b data-ats-job-score>63%</b>
+                </button>
+              </aside>
+
+              <div class="ats-report-list" aria-live="polite">
+                <article class="form-section ats-report" data-ats-report="backend">
+                  <header class="ats-report-header">
+                    <div>
+                      <p class="company">Example GmbH</p>
+                      <h3>Senior Backend Engineer</h3>
+                      <p class="location">Berlin · Hybrid</p>
+                    </div>
+                    <div class="ats-match-score"><strong data-ats-report-score>84%</strong><span>Strong match</span></div>
+                  </header>
+                  <dl class="ats-metrics">
+                    <div><dt>Required skills</dt><dd><progress value="88" max="100">88%</progress><span>88%</span></dd></div>
+                    <div><dt>Experience and seniority</dt><dd><progress value="82" max="100">82%</progress><span>82%</span></dd></div>
+                    <div><dt>JD keywords</dt><dd><progress value="76" max="100">76%</progress><span>76%</span></dd></div>
+                  </dl>
+                  <div class="ats-findings">
+                    <section>
+                      <h4>Matched</h4>
+                      <ul><li>Python and FastAPI delivery experience</li><li>PostgreSQL and REST API work</li><li>6 years of backend experience</li></ul>
+                    </section>
+                    <section class="has-attention">
+                      <h4>Needs attention</h4>
+                      <ul><li>Kubernetes is required but not named</li><li>No measurable production-scale result</li></ul>
+                    </section>
+                  </div>
+                  <details class="ats-suggestions" open>
+                    <summary>Suggested resume changes</summary>
+                    <ol><li>Add Kubernetes only if it reflects real experience.</li><li>Quantify API traffic, latency, or reliability improvements.</li><li>Use the exact phrase “distributed systems” where supported.</li></ol>
+                  </details>
+                </article>
+
+                <article class="form-section ats-report" data-ats-report="platform" hidden>
+                  <header class="ats-report-header">
+                    <div>
+                      <p class="company">Northstar Systems</p>
+                      <h3>Platform Engineer</h3>
+                      <p class="location">Hamburg · Hybrid</p>
+                    </div>
+                    <div class="ats-match-score"><strong data-ats-report-score>76%</strong><span>Possible match</span></div>
+                  </header>
+                  <dl class="ats-metrics">
+                    <div><dt>Required skills</dt><dd><progress value="72" max="100">72%</progress><span>72%</span></dd></div>
+                    <div><dt>Experience and seniority</dt><dd><progress value="84" max="100">84%</progress><span>84%</span></dd></div>
+                    <div><dt>JD keywords</dt><dd><progress value="69" max="100">69%</progress><span>69%</span></dd></div>
+                  </dl>
+                  <div class="ats-findings">
+                    <section><h4>Matched</h4><ul><li>AWS infrastructure experience</li><li>CI/CD ownership</li><li>Backend systems background</li></ul></section>
+                    <section class="has-attention"><h4>Needs attention</h4><ul><li>Terraform is not shown</li><li>Limited Kubernetes evidence</li></ul></section>
+                  </div>
+                  <details class="ats-suggestions" open><summary>Suggested resume changes</summary><ol><li>Move infrastructure work into the latest role.</li><li>Add CI/CD outcome metrics.</li><li>Do not add Terraform without real experience.</li></ol></details>
+                </article>
+
+                <article class="form-section ats-report" data-ats-report="python" hidden>
+                  <header class="ats-report-header">
+                    <div>
+                      <p class="company">Rhein Data AG</p>
+                      <h3>Python Developer</h3>
+                      <p class="location">Germany · Remote</p>
+                    </div>
+                    <div class="ats-match-score is-weak"><strong data-ats-report-score>63%</strong><span>Weak match</span></div>
+                  </header>
+                  <dl class="ats-metrics">
+                    <div><dt>Required skills</dt><dd><progress value="64" max="100">64%</progress><span>64%</span></dd></div>
+                    <div><dt>Experience and seniority</dt><dd><progress value="81" max="100">81%</progress><span>81%</span></dd></div>
+                    <div><dt>JD keywords</dt><dd><progress value="45" max="100">45%</progress><span>45%</span></dd></div>
+                  </dl>
+                  <div class="ats-findings">
+                    <section><h4>Matched</h4><ul><li>Strong Python experience</li><li>SQL and API development</li></ul></section>
+                    <section class="has-attention"><h4>Needs attention</h4><ul><li>Pandas and data pipelines are required</li><li>No data quality experience shown</li></ul></section>
+                  </div>
+                  <details class="ats-suggestions" open><summary>Suggested resume changes</summary><ol><li>Use a different resume only if data work exists.</li><li>Do not apply based on keyword similarity alone.</li></ol></details>
+                </article>
+              </div>
+            </div>
+
+            <footer class="form-footer ats-footer">
+              <a class="btn btn-outline-secondary secondary-button" href="#review-preview" data-back-to-review>Back to review</a>
+              <p>Scores estimate resume-to-JD fit. They do not guarantee screening results.</p>
+            </footer>
+          </section>
+        </div>
+      </article>
+    </main>
+
+    <script src="../../node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="../../node_modules/tom-select/dist/js/tom-select.complete.min.js"></script>
+    <script src="mock.js"></script>
+  </body>
+</html>

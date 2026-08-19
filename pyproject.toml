@@ -1,0 +1,53 @@
+[project]
+name = "job-scan-germany"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "httpcore>=1.0.7,<2",
+  "jinja2>=3.1,<4",
+  "pydantic>=2.9,<3",
+  "pypdf>=5.0,<6",
+  "python-multipart>=0.0.20,<1",
+  "python-docx>=1.1,<2",
+  "tomli-w>=1.1,<2",
+  "typer>=0.12,<1",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.54,<2"]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.11,<2",
+  "pytest>=8.3,<9",
+  "respx>=0.21,<1",
+  "ruff>=0.6,<1",
+]
+
+[project.scripts]
+job-scan = "job_scan.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/job_scan"]
+artifacts = [
+  "src/job_scan/dashboard/templates/*.html",
+  "src/job_scan/dashboard/static/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
