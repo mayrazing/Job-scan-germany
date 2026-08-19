@@ -24,6 +24,8 @@ class AppPaths:
     ats_history_lock_file: Path
     global_jobs_jsonl: Path
     global_jobs_lock_file: Path
+    resume_catalog_dir: Path
+    resume_catalog_lock_file: Path
     cache_dir: Path
     logs_dir: Path
 
@@ -48,6 +50,8 @@ class AppPaths:
             ats_history_lock_file=root / "ats-history" / ".ats-history.lock",
             global_jobs_jsonl=root / "global-jobs.jsonl",
             global_jobs_lock_file=root / ".global-jobs.lock",
+            resume_catalog_dir=root / "global-resumes",
+            resume_catalog_lock_file=root / ".global-resumes.lock",
             cache_dir=root / "cache",
             logs_dir=root / "logs",
         )
@@ -64,6 +68,7 @@ class AppPaths:
             self.jobs_jsonl.parent,
             self.history_dir,
             self.ats_history_dir,
+            self.resume_catalog_dir,
             self.cache_dir,
             self.logs_dir,
         ):

@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
 
@@ -31,6 +32,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.resume_catalog import ResumeCatalogEntry
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -1131,6 +1133,453 @@ def test_global_job_delete_confirms_and_uses_the_global_endpoint(
     assert request_info.value.method == "DELETE"
 
 
+def test_status_change_updates_review_without_page_navigation(
+    setup_page: object,
+) -> None:
+    updated_global = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={"user_status": UserStatus.APPLIED}
+            )
+        ],
+    )
+    status_saved = False
+
+    def respond_after_status_change(route: object) -> None:
+        nonlocal status_saved
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-shortlisted/status"):
+            status_saved = True
+            route.fulfill(status=204, body="")
+            return
+        if status_saved and request.method == "GET" and "/setup" in request.url:
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    SOURCE_FILTER_SNAPSHOT,
+                    global_snapshot=updated_global,
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_after_status_change)
+    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.evaluate(
+        "document.querySelector('#source-filter').tomselect.setValue(['linkedin'])"
+    )
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+    global_review = setup_page.locator('[data-review-block="global"]')
+    status_form = global_review.locator(
+        'article[data-job-key="global-shortlisted"] [data-job-action="status"]'
+    )
+
+    status_form.locator('select[name="status"]').select_option("applied")
+    status_form.locator('button[type="submit"]').click()
+
+    applied_card = global_review.locator(
+        '#applied article[data-job-key="global-shortlisted"]'
+    )
+    applied_card.wait_for(state="attached")
+    assert navigations == []
+    assert setup_page.evaluate(
+        "document.querySelector('#source-filter').tomselect.items"
+    ) == ["linkedin"]
+    assert global_review.locator(
+        '[data-review-group-tab="shortlisted"]'
+    ).get_attribute("aria-current") == "page"
+    assert global_review.locator(
+        '[data-review-group-count="shortlisted"]'
+    ).text_content() == "0"
+    assert global_review.locator(
+        '[data-review-group-count="applied"]'
+    ).text_content() == "1"
+    global_review.locator('[data-review-group-tab="applied"]').click()
+    applied_card.locator("[data-ats-select-job]").check()
+    assert setup_page.locator("[data-open-ats]").text_content() == (
+        "Check 1 selected jobs"
+    )
+
+
+def test_global_resume_selection_updates_only_global_review(
+    setup_page: object,
+) -> None:
+    first_resume_id = "sha256:" + "a" * 64
+    second_resume_id = "sha256:" + "b" * 64
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=first_resume_id,
+            profile_hash="sha256:" + "c" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+        ),
+        ResumeCatalogEntry(
+            resume_id=second_resume_id,
+            profile_hash="sha256:" + "d" * 64,
+            candidate_name="Platform CV",
+            filename="platform.pdf",
+            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+        ),
+    ]
+    second_global_snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            source_job(
+                "global-applied",
+                (SourceKind.STEPSTONE,),
+                score=90,
+                german_requirement="none",
+            ).model_copy(update={"user_status": UserStatus.APPLIED})
+        ],
+    )
+
+    def respond_to_resume_selection(route: object) -> None:
+        request = route.request
+        if request.method == "GET" and "/setup" in request.url:
+            selected_resume_id = parse_qs(urlparse(request.url).query).get(
+                "resume_id", [first_resume_id]
+            )[0]
+            selected_second = selected_resume_id == second_resume_id
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    SOURCE_FILTER_SNAPSHOT,
+                    global_snapshot=(
+                        second_global_snapshot
+                        if selected_second
+                        else GLOBAL_STATUS_SNAPSHOT
+                    ),
+                    resume_catalog=resumes,
+                    selected_resume_id=selected_resume_id,
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_to_resume_selection)
+    setup_page.goto(
+        f"http://draft.test/setup?resume_id={quote(first_resume_id)}#review"
+    )
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.evaluate(
+        "document.querySelector('#source-filter').tomselect.setValue(['linkedin'])"
+    )
+    current_review = setup_page.locator('[data-review-block="current"]')
+    global_review = setup_page.locator('[data-review-block="global"]')
+    current_review.locator('[data-review-group-tab="excluded"]').click()
+    global_review.locator('[data-review-group-tab="applied"]').click()
+    setup_page.locator("body").evaluate(
+        "body => { body.dataset.resumeLocalMarker = 'preserved'; }"
+    )
+
+    resume_select = global_review.locator("[data-global-resume-select]")
+    resume_select.select_option(second_resume_id)
+
+    global_review.locator(
+        'article[data-job-key="global-applied"]'
+    ).wait_for(state="visible")
+    assert global_review.locator(
+        "[data-global-resume-select]"
+    ).input_value() == second_resume_id
+    assert setup_page.locator("body").get_attribute(
+        "data-resume-local-marker"
+    ) == "preserved"
+    assert setup_page.evaluate(
+        "document.querySelector('#source-filter').tomselect.items"
+    ) == ["linkedin"]
+    assert current_review.locator(
+        '[data-review-group-tab="excluded"]'
+    ).get_attribute("aria-current") == "page"
+    assert global_review.locator(
+        '[data-review-group-tab="applied"]'
+    ).get_attribute("aria-current") == "page"
+    assert global_review.locator(
+        'article[data-job-key="global-shortlisted"]'
+    ).count() == 0
+    assert global_review.locator(
+        '[data-review-group-count="shortlisted"]'
+    ).text_content() == "0"
+    assert global_review.locator(
+        '[data-review-group-count="applied"]'
+    ).text_content() == "1"
+    assert setup_page.locator("body").get_attribute(
+        "data-selected-resume-id"
+    ) == second_resume_id
+    assert parse_qs(urlparse(setup_page.url).query)["resume_id"] == [
+        second_resume_id
+    ]
+
+
+def test_status_change_preserves_ats_selection_when_card_changes_blocks(
+    setup_page: object,
+) -> None:
+    current_job = source_job(
+        "current-status-local",
+        (SourceKind.LINKEDIN,),
+        german_requirement="none",
+    )
+    shortlisted_job = current_job.model_copy(
+        update={"user_status": UserStatus.SHORTLISTED}
+    )
+    status_saved = False
+
+    def respond_after_status_change(route: object) -> None:
+        nonlocal status_saved
+        request = route.request
+        if request.url.endswith("/api/jobs/current-status-local/status"):
+            status_saved = True
+            route.fulfill(status=204, body="")
+            return
+        if request.method == "GET" and "/setup" in request.url:
+            visible_job = shortlisted_job if status_saved else current_job
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    Snapshot(
+                        meta=StoreMeta(data_revision=51 if status_saved else 50),
+                        jobs=[visible_job],
+                    ),
+                    global_snapshot=Snapshot(
+                        meta=StoreMeta(data_revision=51),
+                        jobs=[shortlisted_job] if status_saved else [],
+                    ),
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_after_status_change)
+    setup_page.goto("http://draft.test/setup?status-block-local=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    current_card = setup_page.locator(
+        '[data-review-block="current"] '
+        'article[data-job-key="current-status-local"]'
+    )
+    current_card.locator("[data-ats-select-job]").check()
+    status_form = current_card.locator('[data-job-action="status"]')
+    status_form.locator('select[name="status"]').select_option("shortlisted")
+
+    status_form.locator('button[type="submit"]').click()
+
+    global_card = setup_page.locator(
+        '[data-review-block="global"] '
+        '#shortlisted article[data-job-key="current-status-local"]'
+    )
+    global_card.wait_for(state="attached")
+    assert current_card.count() == 0
+    assert global_card.locator("[data-ats-select-job]").is_checked()
+    assert setup_page.locator("[data-open-ats]").text_content() == (
+        "Check 1 selected jobs"
+    )
+
+
+def test_restore_updates_only_the_affected_review_card(
+    setup_page: object,
+) -> None:
+    excluded = source_job(
+        "excluded-local",
+        (SourceKind.LINKEDIN,),
+        german_requirement="none",
+    ).model_copy(
+        update={
+            "machine_status": MachineStatus.EXCLUDED,
+            "last_successful_review_profile_hash": "sha256:profile",
+        }
+    )
+    restored = excluded.model_copy(update={"manual_override": "show"})
+    restore_saved = False
+
+    def respond_to_restore(route: object) -> None:
+        nonlocal restore_saved
+        request = route.request
+        if request.url.endswith("/api/jobs/excluded-local/restore"):
+            restore_saved = True
+            route.fulfill(status=204, body="")
+            return
+        if request.method == "GET" and "/setup" in request.url:
+            snapshot = Snapshot(
+                meta=StoreMeta(data_revision=46 if restore_saved else 45),
+                jobs=[restored if restore_saved else excluded],
+            )
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    snapshot,
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_to_restore)
+    setup_page.goto("http://draft.test/setup?restore-local=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    current_review = setup_page.locator('[data-review-block="current"]')
+    current_review.locator('[data-review-group-tab="excluded"]').click()
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+
+    current_review.locator(
+        '#excluded article[data-job-key="excluded-local"] '
+        '[data-job-action="restore"] button'
+    ).click()
+
+    restored_card = current_review.locator(
+        '#recommended article[data-job-key="excluded-local"]'
+    )
+    restored_card.wait_for(state="attached")
+    assert navigations == []
+    assert restored_card.locator(".restored-label").text_content() == "Restored"
+    assert restored_card.locator('[data-job-action="restore"]').count() == 0
+    assert current_review.locator(
+        '[data-review-group-count="recommended"]'
+    ).text_content() == "1"
+    assert current_review.locator(
+        '[data-review-group-count="excluded"]'
+    ).text_content() == "0"
+
+
+def test_company_size_search_updates_only_the_affected_review_card(
+    setup_page: object,
+) -> None:
+    job = source_job(
+        "company-size-local",
+        (SourceKind.LINKEDIN,),
+        german_requirement="none",
+    )
+    company_size = reported_company_size("501-1,000 employees", 501, 1000)
+    refreshed_job = job.model_copy(update={"company_size": company_size})
+    company_size_saved = False
+
+    def respond_to_company_size(route: object) -> None:
+        nonlocal company_size_saved
+        request = route.request
+        if request.url.endswith("/api/jobs/company-size-local/company-size"):
+            company_size_saved = True
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=company_size.model_dump_json(),
+            )
+            return
+        if request.method == "GET" and "/setup" in request.url:
+            snapshot = Snapshot(
+                meta=StoreMeta(data_revision=48 if company_size_saved else 47),
+                jobs=[refreshed_job if company_size_saved else job],
+            )
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    snapshot,
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_to_company_size)
+    setup_page.goto("http://draft.test/setup?company-size-local=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+    card = setup_page.locator(
+        'article[data-job-key="company-size-local"]'
+    ).first
+
+    card.locator("[data-company-size-search]").click()
+
+    refreshed_card = setup_page.locator(
+        'article[data-job-key="company-size-local"]'
+    ).first
+    refreshed_card.locator(".company-size a").wait_for(state="attached")
+    assert navigations == []
+    assert "501-1,000 employees" in refreshed_card.locator(
+        ".company-size"
+    ).text_content()
+    assert refreshed_card.get_attribute("data-company-size-minimum") == "501"
+    assert refreshed_card.get_attribute("data-company-size-maximum") == "1000"
+    setup_page.evaluate("document.querySelector('#source-filter').tomselect.clear()")
+    assert refreshed_card.is_hidden()
+
+
+def test_global_job_delete_updates_review_without_page_navigation(
+    setup_page: object,
+) -> None:
+    job_deleted = False
+
+    def respond_to_delete(route: object) -> None:
+        nonlocal job_deleted
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-shortlisted"):
+            job_deleted = True
+            route.fulfill(status=204, body="")
+            return
+        if job_deleted and request.method == "GET" and "/setup" in request.url:
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    SOURCE_FILTER_SNAPSHOT,
+                    global_snapshot=Snapshot(
+                        meta=StoreMeta(data_revision=49),
+                        jobs=[],
+                    ),
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                    ats_source_run_id="search-1",
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_to_delete)
+    setup_page.on("dialog", lambda dialog: dialog.accept())
+    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+    global_review = setup_page.locator('[data-review-block="global"]')
+
+    global_review.locator(
+        'article[data-job-key="global-shortlisted"] [data-global-job-delete]'
+    ).click()
+
+    card = global_review.locator('article[data-job-key="global-shortlisted"]')
+    card.wait_for(state="detached")
+    assert navigations == []
+    assert global_review.locator(
+        '[data-review-group-count="shortlisted"]'
+    ).text_content() == "0"
+
+
 def test_global_job_delete_cancel_keeps_the_card(setup_page: object) -> None:
     requested: list[str] = []
     setup_page.route(
@@ -1168,7 +1617,11 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
 
     setup_page.route("**/api/global-jobs/import", import_job)
     setup_page.locator('[data-nav-step="review"]').click()
-    setup_page.evaluate("document.body.dataset.reviewRunId = 'run-a'")
+    resume_id = "sha256:" + "a" * 64
+    setup_page.evaluate(
+        "resumeId => { document.body.dataset.selectedResumeId = resumeId; }",
+        resume_id,
+    )
     dialog = setup_page.locator("#manual-job-dialog")
 
     setup_page.locator("[data-open-manual-job]").click()
@@ -1181,8 +1634,53 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
     dialog.wait_for(state="hidden")
 
     assert posted == [
-        {"url": "https://careers.example/jobs/42", "run_id": "run-a"}
+        {"url": "https://careers.example/jobs/42", "resume_id": resume_id}
     ]
+
+
+def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
+    posted: list[tuple[str, str]] = []
+
+    def import_job(route: object) -> None:
+        posted.append(
+            (
+                route.request.headers.get("content-type", ""),
+                route.request.post_data or "",
+            )
+        )
+        route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "job_key": "manual-42",
+                    "status": "shortlisted",
+                    "resume_id": "sha256:" + "b" * 64,
+                }
+            ),
+        )
+
+    setup_page.route("**/api/global-jobs/import-with-resume", import_job)
+    setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("[data-open-manual-job]").click()
+    dialog = setup_page.locator("#manual-job-dialog")
+    dialog.locator("#manual-job-url").fill("https://careers.example/jobs/42")
+    dialog.locator("#manual-job-resume").set_input_files(
+        {
+            "name": "backend.pdf",
+            "mimeType": "application/pdf",
+            "buffer": b"PDF resume",
+        }
+    )
+
+    dialog.locator("[data-submit-manual-job]").click()
+    dialog.wait_for(state="hidden")
+
+    assert len(posted) == 1
+    assert posted[0][0].startswith("multipart/form-data;")
+    assert 'name="url"' in posted[0][1]
+    assert "https://careers.example/jobs/42" in posted[0][1]
+    assert "backend.pdf" in posted[0][1]
 
 
 def test_manual_job_dialog_keeps_url_and_shows_import_failure(

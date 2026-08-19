@@ -390,3 +390,113 @@ def test_reimporting_unchanged_snapshot_does_not_write_a_new_revision(
     second = store.import_snapshots([snapshot])
 
     assert second.meta == first.meta
+
+
+def test_reimporting_unchanged_manual_job_does_not_write_a_new_revision(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("manual", external_ids=("same",))
+    resume_id = "sha256:" + "1" * 64
+    profile_hash = "sha256:" + "a" * 64
+    store.upsert_with_default_status(
+        job,
+        UserStatus.SHORTLISTED,
+        NOW,
+        resume_id=resume_id,
+        profile_hash=profile_hash,
+    )
+    first = store.load()
+
+    store.upsert_with_default_status(
+        job,
+        UserStatus.SHORTLISTED,
+        NOW,
+        resume_id=resume_id,
+        profile_hash=profile_hash,
+    )
+    second = store.load()
+
+    assert second.meta == first.meta
+
+
+def test_same_job_keeps_one_status_but_distinct_resume_matches(
+    store: GlobalJobStore,
+) -> None:
+    resume_a = _job("from-a", external_ids=("shared",))
+    resume_a.score = 91
+    resume_a.reason = "Strong Java match"
+    resume_a.last_successful_review_profile_hash = "sha256:" + "a" * 64
+    resume_b = _job(
+        "from-b",
+        external_ids=("shared",),
+        last_seen=NOW + timedelta(minutes=1),
+    )
+    resume_b.score = 63
+    resume_b.reason = "Missing Kotlin experience"
+    resume_b.last_successful_review_profile_hash = "sha256:" + "b" * 64
+
+    store.set_status(
+        resume_a,
+        UserStatus.SHORTLISTED,
+        NOW,
+        resume_id="sha256:" + "1" * 64,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    store.set_status(
+        resume_b,
+        UserStatus.APPLIED,
+        NOW + timedelta(minutes=2),
+        resume_id="sha256:" + "2" * 64,
+        profile_hash="sha256:" + "b" * 64,
+    )
+
+    shown_for_a = store.load_for_resume("sha256:" + "1" * 64)
+    shown_for_b = store.load_for_resume("sha256:" + "2" * 64)
+
+    assert len(store.load().jobs) == 1
+    assert shown_for_a.jobs[0].user_status is UserStatus.APPLIED
+    assert shown_for_a.jobs[0].score == 91
+    assert shown_for_a.jobs[0].reason == "Strong Java match"
+    assert shown_for_b.jobs[0].user_status is UserStatus.APPLIED
+    assert shown_for_b.jobs[0].score == 63
+    assert shown_for_b.jobs[0].reason == "Missing Kotlin experience"
+
+
+def test_existing_global_job_can_be_associated_by_profile_hash(
+    store: GlobalJobStore,
+) -> None:
+    existing = _job("job-1", external_ids=("shared",))
+    existing.score = 88
+    existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
+    store.set_status(existing, UserStatus.SHORTLISTED, NOW)
+
+    store.associate_profile(
+        resume_id="sha256:" + "1" * 64,
+        profile_hash="sha256:" + "a" * 64,
+    )
+
+    associated = store.load_for_resume("sha256:" + "1" * 64)
+    assert [job.canonical_job_key for job in associated.jobs] == ["job-1"]
+    assert associated.jobs[0].score == 88
+
+
+def test_reassociating_known_profiles_does_not_write_new_revisions(
+    store: GlobalJobStore,
+) -> None:
+    existing = _job("job-1", external_ids=("shared",))
+    existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
+    existing.last_review_attempt_profile_hash = "sha256:" + "b" * 64
+    store.set_status(existing, UserStatus.SHORTLISTED, NOW)
+    associations = (
+        ("sha256:" + "1" * 64, "sha256:" + "a" * 64),
+        ("sha256:" + "2" * 64, "sha256:" + "b" * 64),
+    )
+    for resume_id, profile_hash in associations:
+        store.associate_profile(resume_id=resume_id, profile_hash=profile_hash)
+    first = store.load()
+
+    for resume_id, profile_hash in associations:
+        store.associate_profile(resume_id=resume_id, profile_hash=profile_hash)
+    second = store.load()
+
+    assert second.meta == first.meta

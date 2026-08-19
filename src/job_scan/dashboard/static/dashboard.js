@@ -104,15 +104,17 @@
   };
 
   const updateReviewGroupCounts = () => {
-    document.querySelectorAll(".review-groups > .job-group").forEach((group) => {
-      const visibleCount = [...group.querySelectorAll(".job-card")].filter(
-        (card) => !card.hidden,
-      ).length;
-      document
-        .querySelectorAll(`[data-review-group-count="${group.id}"]`)
-        .forEach((count) => {
-          count.textContent = String(visibleCount);
-        });
+    document.querySelectorAll("[data-review-workspace]").forEach((workspace) => {
+      workspace.querySelectorAll(".review-groups > .job-group").forEach((group) => {
+        const visibleCount = [...group.querySelectorAll(".job-card")].filter(
+          (card) => !card.hidden,
+        ).length;
+        workspace
+          .querySelectorAll(`[data-review-group-count="${group.id}"]`)
+          .forEach((count) => {
+            count.textContent = String(visibleCount);
+          });
+      });
     });
   };
 
@@ -142,7 +144,7 @@
   const initializeSourceFilter = () => {
     const select = document.querySelector("#source-filter");
     if (!select) return;
-    const cards = [
+    const currentCards = () => [
       ...document.querySelectorAll(
         '[data-review-block="current"] .review-groups [data-sources]',
       ),
@@ -154,6 +156,7 @@
     const languageRequirementSelect = document.querySelector(
       "#review-language-requirement",
     );
+    const cards = currentCards();
     const sources = [...new Set(cards.flatMap(cardSources))].sort();
     if (sources.length === 0) {
       select.closest(".source-filter").hidden = true;
@@ -224,7 +227,7 @@
         const selected = Array.isArray(values) ? values : [values].filter(Boolean);
         saveSourceFilter(sources, selected);
         applyReviewFilters(
-          cards,
+          currentCards(),
           selected,
           postedWithinSelect?.value ?? "",
           minimumScoreSelect?.value ?? "",
@@ -253,7 +256,7 @@
     updateSourceSummary();
     const applyCurrentFilters = () => {
       applyReviewFilters(
-        cards,
+        currentCards(),
         control.items,
         postedWithinSelect?.value ?? "",
         minimumScoreSelect?.value ?? "",
@@ -274,6 +277,7 @@
     handleFilterSelectChange(companySizeSelect, "companySize");
     handleFilterSelectChange(companyIndustrySelect, "companyIndustry");
     handleFilterSelectChange(languageRequirementSelect, "languageRequirement");
+    document.addEventListener("job-scan:review-updated", applyCurrentFilters);
   };
 
   const reviewGroupOrderKey = "job-scan.review-group-order.v1";
@@ -539,11 +543,183 @@
     });
   };
 
+  const reviewCardForJob = (root, jobKey) => [
+    ...root.querySelectorAll("article.job-card[data-job-key]"),
+  ].find((card) => card.dataset.jobKey === jobKey);
+
+  const reviewGroupById = (block, groupId) => [
+    ...block.querySelectorAll(".review-groups > .job-group"),
+  ].find((group) => group.id === groupId);
+
+  const syncReviewGroupEmptyState = (group) => {
+    const grid = group.querySelector(":scope > .card-grid");
+    if (!grid) return;
+    const cards = grid.querySelectorAll(":scope > .job-card");
+    const empty = grid.querySelector(":scope > .empty");
+    if (cards.length > 0) {
+      empty?.remove();
+      return;
+    }
+    if (!empty) {
+      const message = document.createElement("p");
+      message.className = "empty";
+      message.textContent = "No jobs in this group.";
+      grid.append(message);
+    }
+  };
+
+  const insertRefreshedCard = (liveBlock, refreshedCard, replacement) => {
+    const refreshedGroup = refreshedCard.closest(".job-group");
+    const liveGroup = refreshedGroup
+      ? reviewGroupById(liveBlock, refreshedGroup.id)
+      : null;
+    if (!liveGroup) return;
+    const liveGrid = liveGroup.querySelector(":scope > .card-grid");
+    if (!liveGrid) return;
+    const refreshedCards = [
+      ...refreshedGroup.querySelectorAll(":scope > .card-grid > .job-card"),
+    ];
+    const refreshedIndex = refreshedCards.indexOf(refreshedCard);
+    const nextLiveCard = refreshedCards
+      .slice(refreshedIndex + 1)
+      .map((card) => reviewCardForJob(liveGroup, card.dataset.jobKey))
+      .find(Boolean);
+    liveGrid.insertBefore(replacement, nextLiveCard || null);
+    syncReviewGroupEmptyState(liveGroup);
+  };
+
+  const reconcileReviewJob = (refreshedDocument, jobKey) => {
+    const selectedForAts = [
+      ...document.querySelectorAll("article.job-card[data-job-key]"),
+    ].some(
+      (card) =>
+        card.dataset.jobKey === jobKey
+        && card.querySelector("[data-ats-select-job]")?.checked,
+    );
+    document.querySelectorAll("[data-review-block]").forEach((liveBlock) => {
+      const blockName = liveBlock.dataset.reviewBlock;
+      const refreshedBlock = [
+        ...refreshedDocument.querySelectorAll("[data-review-block]"),
+      ].find((block) => block.dataset.reviewBlock === blockName);
+      if (!refreshedBlock) return;
+      const liveCard = reviewCardForJob(liveBlock, jobKey);
+      const refreshedCard = reviewCardForJob(refreshedBlock, jobKey);
+      const previousGroup = liveCard?.closest(".job-group");
+      if (!refreshedCard) {
+        liveCard?.remove();
+        if (previousGroup) syncReviewGroupEmptyState(previousGroup);
+        return;
+      }
+      const replacement = document.importNode(refreshedCard, true);
+      const replacementAts = replacement.querySelector("[data-ats-select-job]");
+      if (replacementAts) replacementAts.checked = selectedForAts;
+      liveCard?.remove();
+      insertRefreshedCard(liveBlock, refreshedCard, replacement);
+      if (previousGroup) syncReviewGroupEmptyState(previousGroup);
+    });
+    updateReviewGroupCounts();
+    document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+  };
+
+  const fetchReviewDocument = async (url) => {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      headers: { Accept: "text/html" },
+    });
+    if (!response.ok) {
+      throw new Error(`Could not refresh Review (${response.status}).`);
+    }
+    return new DOMParser().parseFromString(
+      await response.text(),
+      "text/html",
+    );
+  };
+
+  const refreshReviewJob = async (jobKey) => {
+    const refreshedDocument = await fetchReviewDocument(window.location.href);
+    reconcileReviewJob(refreshedDocument, jobKey);
+  };
+
+  const reconcileGlobalResumeSelection = (refreshedDocument) => {
+    const liveBlock = document.querySelector('[data-review-block="global"]');
+    const refreshedBlock = refreshedDocument.querySelector(
+      '[data-review-block="global"]',
+    );
+    const liveResumeSection = liveBlock?.querySelector(".global-resume-section");
+    const refreshedResumeSection = refreshedBlock?.querySelector(
+      ".global-resume-section",
+    );
+    const liveGroups = liveBlock?.querySelector(
+      "[data-review-workspace] > .review-groups",
+    );
+    const refreshedGroups = refreshedBlock?.querySelector(
+      "[data-review-workspace] > .review-groups",
+    );
+    if (
+      !liveBlock
+      || !refreshedBlock
+      || !liveResumeSection
+      || !refreshedResumeSection
+      || !liveGroups
+      || !refreshedGroups
+    ) {
+      throw new Error("Could not refresh this resume's Global jobs.");
+    }
+
+    const selectedForAts = new Set(
+      [...liveBlock.querySelectorAll("[data-ats-select-job]:checked")]
+        .map((checkbox) => checkbox.closest("[data-job-key]")?.dataset.jobKey)
+        .filter(Boolean),
+    );
+    const refreshedPanels = new Map(
+      reviewGroupPanels(refreshedGroups).map((panel) => [panel.id, panel]),
+    );
+    const scrollTop = liveGroups.scrollTop;
+    reviewGroupPanels(liveGroups).forEach((livePanel) => {
+      const refreshedPanel = refreshedPanels.get(livePanel.id);
+      if (!refreshedPanel) {
+        livePanel.remove();
+        return;
+      }
+      const replacement = document.importNode(refreshedPanel, true);
+      replacement.hidden = livePanel.hidden;
+      replacement.querySelectorAll("[data-ats-select-job]").forEach((checkbox) => {
+        const jobKey = checkbox.closest("[data-job-key]")?.dataset.jobKey;
+        checkbox.checked = selectedForAts.has(jobKey);
+      });
+      livePanel.replaceWith(replacement);
+      refreshedPanels.delete(livePanel.id);
+    });
+    refreshedPanels.forEach((panel) => {
+      const replacement = document.importNode(panel, true);
+      replacement.hidden = true;
+      liveGroups.append(replacement);
+    });
+    liveGroups.scrollTop = scrollTop;
+    liveResumeSection.replaceWith(
+      document.importNode(refreshedResumeSection, true),
+    );
+    document.body.dataset.selectedResumeId =
+      refreshedDocument.body.dataset.selectedResumeId || "";
+    updateReviewGroupCounts();
+    document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+  };
+
+  const responseError = async (response, fallback) => {
+    try {
+      const payload = await response.json();
+      return typeof payload.detail === "string" ? payload.detail : fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  };
+
   const initializeManualJobImport = () => {
     const dialog = document.querySelector("#manual-job-dialog");
     const opener = document.querySelector("[data-open-manual-job]");
     const form = dialog?.querySelector("[data-manual-job-form]");
     const urlInput = dialog?.querySelector("#manual-job-url");
+    const resumeInput = dialog?.querySelector("#manual-job-resume");
     const errorMessage = dialog?.querySelector("[data-manual-job-error]");
     const closeButton = dialog?.querySelector("[data-close-manual-job]");
     const submitButton = dialog?.querySelector("[data-submit-manual-job]");
@@ -574,15 +750,31 @@
       submitButton.textContent = "Importing...";
       errorMessage.hidden = true;
       try {
-        const payload = { url: urlInput.value };
-        const runId = document.body.dataset.reviewRunId?.trim();
-        if (runId) payload.run_id = runId;
-        const response = await fetch("/api/global-jobs/import", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
+        const uploadedResume = resumeInput?.files?.[0];
+        let endpoint = "/api/global-jobs/import";
+        let options;
+        if (uploadedResume) {
+          const data = new FormData();
+          data.append("url", urlInput.value);
+          data.append("resume", uploadedResume);
+          endpoint = "/api/global-jobs/import-with-resume";
+          options = {
+            method: "POST",
+            credentials: "same-origin",
+            body: data,
+          };
+        } else {
+          const payload = { url: urlInput.value };
+          const resumeId = document.body.dataset.selectedResumeId?.trim();
+          if (resumeId) payload.resume_id = resumeId;
+          options = {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          };
+        }
+        const response = await fetch(endpoint, options);
         if (!response.ok) {
           let message = `Request failed (${response.status}).`;
           try {
@@ -593,7 +785,20 @@
           }
           throw new Error(message);
         }
-        window.location.reload();
+        let imported = null;
+        try {
+          imported = await response.json();
+        } catch (_error) {
+          // Older local responses can still reload the current selection.
+        }
+        if (typeof imported?.resume_id === "string") {
+          const destination = new URL(window.location.href);
+          destination.searchParams.set("resume_id", imported.resume_id);
+          destination.hash = "review";
+          window.location.assign(destination.toString());
+        } else {
+          window.location.reload();
+        }
       } catch (error) {
         errorMessage.textContent = error.message || "Could not import this job page.";
         errorMessage.hidden = false;
@@ -621,94 +826,130 @@
     initializeReview();
   }
 
-  document.querySelectorAll("form[data-job-action]").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const action = form.dataset.jobAction;
-      const jobKey = encodeURIComponent(form.dataset.jobKey);
-      const runId = document.body.dataset.reviewRunId;
-      const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
-      const endpoint = action === "status" && statusScope === "global"
-        ? `/api/global-jobs/${jobKey}/status`
-        : runId
-          ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${action}`
-          : `/api/jobs/${jobKey}/${action}`;
-      const response = await fetch(
-        endpoint,
-        requestOptions(action, form),
-      );
-      if (response.ok) {
-        window.location.reload();
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("form[data-job-action]");
+    if (!form) return;
+    event.preventDefault();
+    const action = form.dataset.jobAction;
+    const rawJobKey = form.dataset.jobKey;
+    const jobKey = encodeURIComponent(rawJobKey);
+    const runId = document.body.dataset.reviewRunId;
+    const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
+    const endpoint = action === "status" && statusScope === "global"
+      ? `/api/global-jobs/${jobKey}/status`
+      : runId
+        ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${action}`
+        : `/api/jobs/${jobKey}/${action}`;
+    const button = form.querySelector('button[type="submit"]');
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    try {
+      const response = await fetch(endpoint, requestOptions(action, form));
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Could not update this job."));
       }
-    });
+      await refreshReviewJob(rawJobKey);
+    } catch (error) {
+      window.alert(error.message);
+      if (button) button.disabled = false;
+    }
   });
 
-  document.querySelectorAll("[data-global-job-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (!window.confirm("Delete this job from Global job status?")) return;
-      const card = button.closest("[data-job-key]");
-      const jobKey = encodeURIComponent(card.dataset.jobKey);
-      button.disabled = true;
-      try {
-        const response = await fetch(`/api/global-jobs/${jobKey}`, {
-          method: "DELETE",
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          let message = "Could not delete this job from Global job status.";
-          try {
-            const payload = await response.json();
-            if (typeof payload.detail === "string") message = payload.detail;
-          } catch (_error) {
-            // Keep the short fallback when the server response is not JSON.
-          }
-          throw new Error(message);
-        }
-        window.location.reload();
-      } catch (error) {
+  let globalResumeRequestVersion = 0;
+  document.addEventListener("change", async (event) => {
+    const select = event.target.closest("[data-global-resume-select]");
+    if (!select || select.disabled) return;
+    const selectedOption = select.selectedOptions[0];
+    const destinationUrl = selectedOption?.dataset.reviewUrl;
+    if (!destinationUrl) return;
+    if (selectedOption.dataset.globalResumeId === document.body.dataset.selectedResumeId) {
+      return;
+    }
+
+    const requestVersion = ++globalResumeRequestVersion;
+    const resumeSection = select.closest(".global-resume-section");
+    const destination = new URL(destinationUrl, window.location.href);
+    destination.hash = window.location.hash || destination.hash;
+    select.disabled = true;
+    resumeSection?.setAttribute("aria-busy", "true");
+    try {
+      const refreshedDocument = await fetchReviewDocument(destination.href);
+      if (requestVersion !== globalResumeRequestVersion) return;
+      reconcileGlobalResumeSelection(refreshedDocument);
+      window.history.replaceState(null, "", destination.href);
+    } catch (error) {
+      if (requestVersion === globalResumeRequestVersion) {
+        select.value = document.body.dataset.selectedResumeId || "";
         window.alert(error.message);
-        button.disabled = false;
       }
-    });
+    } finally {
+      if (requestVersion === globalResumeRequestVersion) {
+        select.disabled = false;
+        resumeSection?.removeAttribute("aria-busy");
+      }
+    }
   });
 
-  document.querySelectorAll("[data-company-size-search]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const card = button.closest("[data-job-key]");
-      const errorMessage = card.querySelector(".company-size-search-error");
-      const jobKey = encodeURIComponent(card.dataset.jobKey);
-      const runId = document.body.dataset.reviewRunId;
-      const endpoint = card.dataset.statusScope === "global"
-        ? `/api/global-jobs/${jobKey}/company-size`
-        : runId
-          ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/company-size`
-          : `/api/jobs/${jobKey}/company-size`;
-      button.disabled = true;
-      button.textContent = "Searching...";
-      errorMessage.hidden = true;
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          let message = "Could not verify this company's employee count.";
-          try {
-            const payload = await response.json();
-            if (typeof payload.detail === "string") message = payload.detail;
-          } catch (_error) {
-            // Keep the short fallback when the server response is not JSON.
-          }
-          throw new Error(message);
-        }
-        window.location.reload();
-      } catch (error) {
-        errorMessage.textContent = error.message;
-        errorMessage.hidden = false;
-        button.disabled = false;
-        button.textContent = "AI Search";
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-global-job-delete]");
+    if (!button) return;
+    if (!window.confirm("Delete this job from Global job status?")) return;
+    const card = button.closest("[data-job-key]");
+    const rawJobKey = card.dataset.jobKey;
+    const jobKey = encodeURIComponent(rawJobKey);
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/global-jobs/${jobKey}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not delete this job from Global job status.",
+        ));
       }
-    });
+      await refreshReviewJob(rawJobKey);
+    } catch (error) {
+      window.alert(error.message);
+      button.disabled = false;
+    }
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-company-size-search]");
+    if (!button || button.disabled) return;
+    const card = button.closest("[data-job-key]");
+    const errorMessage = card.querySelector(".company-size-search-error");
+    const rawJobKey = card.dataset.jobKey;
+    const jobKey = encodeURIComponent(rawJobKey);
+    const runId = document.body.dataset.reviewRunId;
+    const endpoint = card.dataset.statusScope === "global"
+      ? `/api/global-jobs/${jobKey}/company-size`
+      : runId
+        ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/company-size`
+        : `/api/jobs/${jobKey}/company-size`;
+    button.disabled = true;
+    button.textContent = "Searching...";
+    errorMessage.hidden = true;
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not verify this company's employee count.",
+        ));
+      }
+      await refreshReviewJob(rawJobKey);
+    } catch (error) {
+      errorMessage.textContent = error.message;
+      errorMessage.hidden = false;
+      button.disabled = false;
+      button.textContent = "AI Search";
+    }
   });
 
 })();

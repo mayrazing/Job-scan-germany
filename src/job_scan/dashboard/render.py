@@ -21,6 +21,7 @@ from job_scan.domain import Snapshot, StoreMeta
 from job_scan.setup_service import SetupAnswers
 
 if TYPE_CHECKING:
+    from job_scan.resume_catalog import ResumeCatalogEntry
     from job_scan.search_history import SearchHistoryEntry
 
 
@@ -39,7 +40,13 @@ def _asset_text(name: str) -> str:
     return files("job_scan.dashboard").joinpath("static", name).read_text(encoding="utf-8")
 
 
-def render_dashboard(snapshot: Snapshot, global_snapshot: Snapshot | None = None) -> str:
+def render_dashboard(
+    snapshot: Snapshot,
+    global_snapshot: Snapshot | None = None,
+    *,
+    resume_catalog: list[ResumeCatalogEntry] | None = None,
+    selected_resume_id: str | None = None,
+) -> str:
     """Render one self-contained HTML page derived from a snapshot."""
     template = _environment().get_template("index.html")
     return template.render(
@@ -48,6 +55,8 @@ def render_dashboard(snapshot: Snapshot, global_snapshot: Snapshot | None = None
         global_dashboard=build_global_dashboard(
             global_snapshot or Snapshot(meta=StoreMeta(data_revision=0))
         ),
+        resume_catalog=resume_catalog or [],
+        selected_resume_id=selected_resume_id,
         dashboard_css=_asset_text("dashboard.css"),
         dashboard_js=_asset_text("dashboard.js"),
     )
@@ -65,6 +74,8 @@ def render_console(
     selected_ats: AtsCheckBundle | None = None,
     ats_source_run_id: str | None = None,
     ats_default_resume_filename: str | None = None,
+    resume_catalog: list[ResumeCatalogEntry] | None = None,
+    selected_resume_id: str | None = None,
 ) -> str:
     """Render the packaged setup page served by the local review server."""
     snapshot = snapshot or Snapshot(meta=StoreMeta(data_revision=0))
@@ -99,6 +110,8 @@ def render_console(
         selected_ats=selected_ats,
         ats_source_run_id=ats_source_run_id,
         ats_default_resume_filename=ats_default_resume_filename,
+        resume_catalog=resume_catalog or [],
+        selected_resume_id=selected_resume_id,
         bootstrap_css=_asset_text("bootstrap.min.css"),
         tom_select_css=_asset_text("tom-select.bootstrap5.min.css"),
         dashboard_css=_asset_text("dashboard.css"),

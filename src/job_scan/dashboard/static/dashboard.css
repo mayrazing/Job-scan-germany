@@ -247,6 +247,42 @@ main {
   align-items: center;
 }
 
+.global-resume-section {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+}
+
+.global-resume-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.global-resume-heading h4,
+.global-resume-heading span {
+  margin: 0;
+}
+
+.global-resume-heading span {
+  color: var(--muted);
+}
+
+.global-resume-select {
+  width: min(100%, 32rem);
+  min-height: 42px;
+  padding: 0.5rem 2.25rem 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+
 .manual-job-button,
 .manual-job-dialog button {
   min-height: 44px;

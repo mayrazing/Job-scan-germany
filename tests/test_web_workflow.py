@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any
@@ -17,17 +18,19 @@ from job_scan.domain import SourceKind
 from job_scan.locking import FileRWLock
 from job_scan.normalization import content_hash
 from job_scan.paths import AppPaths
-from job_scan.resume import ResumeError
+from job_scan.resume import ResumeError, ResumeReadError
 from job_scan.reviewer import ReviewBatchOutcome, ReviewBatchProgress
 from job_scan.scan_service import ScanError, ScanProgress, ScanService, SourceProgress
 from job_scan.scheduler import BackendName, SchedulerState
 from job_scan.setup_service import SetupAnswers, SetupService
 from job_scan.sources.base import FetchedOccurrence, JobReference
 from job_scan.web_workflow import (
+    MAX_RESUME_BYTES,
     WebWorkflow,
     WebWorkflowBusy,
     _progress_message,
     _progress_percent,
+    read_resume_upload,
 )
 
 RESUME = Path(__file__).parent / "fixtures" / "resume" / "sample.docx"
@@ -49,6 +52,15 @@ Needs visa sponsorship
 # Preferences
 Berlin or remote
 """
+
+
+def test_resume_upload_reader_stops_at_the_size_limit() -> None:
+    stream = BytesIO(b"x" * (MAX_RESUME_BYTES + 2))
+
+    with pytest.raises(ResumeReadError, match="20 MB"):
+        read_resume_upload(stream)
+
+    assert stream.tell() == MAX_RESUME_BYTES + 1
 
 
 class FakeClaude:

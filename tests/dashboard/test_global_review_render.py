@@ -16,6 +16,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.resume_catalog import ResumeCatalogEntry
 
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 
@@ -207,6 +208,42 @@ def test_console_global_status_has_manual_job_url_dialog() -> None:
     assert form.select_one('[data-manual-job-error][role="alert"]') is not None
 
 
+def test_console_global_status_lists_resumes_and_accepts_a_new_upload() -> None:
+    resume_id = "sha256:" + "a" * 64
+    resume = ResumeCatalogEntry(
+        resume_id=resume_id,
+        profile_hash="sha256:" + "b" * 64,
+        candidate_name="Backend CV",
+        filename="backend.pdf",
+        created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+    )
+
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            resume_catalog=[resume],
+            selected_resume_id=resume_id,
+        ),
+        "html.parser",
+    )
+
+    global_block = page.select_one('[data-review-block="global"]')
+    assert global_block is not None
+    selector = global_block.select_one("select[data-global-resume-select]")
+    assert selector is not None
+    selected = selector.select_one(
+        f'option[data-global-resume-id="{resume_id}"][selected]'
+    )
+    assert selected is not None
+    assert "Backend CV" in selected.get_text(" ", strip=True)
+    assert "backend.pdf" in selected.get_text(" ", strip=True)
+    upload = global_block.select_one(
+        'input#manual-job-resume[name="resume"][type="file"][accept=".pdf,.docx"]'
+    )
+    assert upload is not None
+    assert page.body.get("data-selected-resume-id") == resume_id
+
+
 def test_standalone_review_has_manual_job_url_dialog() -> None:
     page = BeautifulSoup(
         render_dashboard(
@@ -218,5 +255,6 @@ def test_standalone_review_has_manual_job_url_dialog() -> None:
 
     global_block = page.select_one('[data-review-block="global"]')
     assert global_block is not None
+    assert global_block.get("id") == "review"
     assert global_block.select_one("[data-open-manual-job]") is not None
     assert global_block.select_one("#manual-job-dialog [data-manual-job-form]") is not None

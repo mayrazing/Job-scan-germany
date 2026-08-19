@@ -356,6 +356,30 @@ class ReviewHistoryEntry(BaseModel):
     failure_category: str | None = None
 
 
+class ResumeMatch(BaseModel):
+    """Keep the review fields shown for one resume on a global job."""
+
+    resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    profile_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    machine_status: MachineStatus
+    manual_override: Literal["show"] | None = None
+    manual_override_content_hash: str | None = None
+    manual_override_profile_hash: str | None = None
+    ai_review: AIReview | None = None
+    score: int | None = Field(default=None, ge=0, le=100)
+    reason: str = ""
+    review_model: str | None = None
+    reviewed_at: datetime | None = None
+    last_review_attempt_content_hash: str | None = None
+    last_review_attempt_profile_hash: str | None = None
+    last_review_attempt_at: datetime | None = None
+    last_successful_review_content_hash: str | None = None
+    last_successful_review_profile_hash: str | None = None
+    exclusion_reasons: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
+    last_error: str | None = None
+
+
 class JobRecord(BaseModel):
     record_type: Literal["job"] = "job"
     canonical_job_key: str
@@ -383,6 +407,10 @@ class JobRecord(BaseModel):
     manual_override_profile_hash: str | None = None
     ai_review: AIReview | None = None
     review_history: list[ReviewHistoryEntry] = Field(default_factory=list)
+    resume_matches: list[ResumeMatch] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
     possible_duplicates: list[DuplicateEvidence] = Field(default_factory=list)
     score: int | None = Field(default=None, ge=0, le=100)
     reason: str = ""

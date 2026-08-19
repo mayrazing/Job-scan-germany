@@ -10,7 +10,9 @@
   const atsResultsLink = document.querySelector("#ats-results-link");
   const atsStartButton = document.querySelector("[data-open-ats]");
   const atsResumeInput = document.querySelector("#ats-resume");
-  const atsJobSelectors = [...document.querySelectorAll("[data-ats-select-job]")];
+  const atsJobSelectors = () => [
+    ...document.querySelectorAll("[data-ats-select-job]"),
+  ];
   const atsRunBadge = document.querySelector("#ats-run-badge");
   const atsRunProgress = document.querySelector("#ats-run-progress");
   const atsRunProgressBar = document.querySelector("#ats-run-progress-bar");
@@ -843,7 +845,7 @@
   };
 
   const selectedAtsJobKeys = () => [...new Set(
-    atsJobSelectors
+    atsJobSelectors()
       .filter((control) => control.checked)
       .map((control) => control.value),
   )];
@@ -857,7 +859,7 @@
     );
     atsStartButton.disabled =
       atsStartInFlight || count === 0 || !hasResume;
-    atsJobSelectors.forEach((control) => {
+    atsJobSelectors().forEach((control) => {
       control.closest(".job-card").classList.toggle("is-ats-selected", control.checked);
     });
   };
@@ -1084,7 +1086,13 @@
 
   initializeSearchSelects();
   initializeTooltips();
-  atsJobSelectors.forEach((control) => control.addEventListener("change", syncAtsSelection));
+  reviewView.addEventListener("change", (event) => {
+    if (event.target.matches("[data-ats-select-job]")) syncAtsSelection();
+  });
+  document.addEventListener("job-scan:review-updated", () => {
+    initializeTooltips(reviewView);
+    syncAtsSelection();
+  });
   atsResumeInput?.addEventListener("change", syncAtsSelection);
   atsStartButton.addEventListener("click", () => startAts(atsStartButton));
   syncAtsSelection();

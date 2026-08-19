@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -47,13 +48,16 @@ from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock, LockUnavailable
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
+from job_scan.resume_catalog import ResumeCatalogStore
 from job_scan.review_server import create_review_app
 from job_scan.search_history import SearchHistoryStore
+from job_scan.setup_service import SetupAnswers, SetupPreparation
 
 NOW = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
 ORIGIN = "http://127.0.0.1:8765"
 TOKEN = "test-token"
 HEADERS = {"Origin": ORIGIN, "Host": "127.0.0.1:8765"}
+SAMPLE_RESUME = Path(__file__).parent / "fixtures" / "resume" / "sample.docx"
 
 
 class ReliableCompanySizeLookup:
@@ -274,6 +278,196 @@ def test_history_status_appears_in_global_block_of_another_history(tmp_path: Pat
     assert page.select_one('[data-review-block="current"] [data-job-key="b"]') is None
     assert history.load("run-a").jobs[0].user_status is UserStatus.NEW
     assert history.load("run-b").jobs[0].user_status is UserStatus.NEW
+
+
+def test_same_global_job_shows_each_history_resumes_own_match(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    repository = _repository(paths)
+    history = SearchHistoryStore(paths)
+    resume_a_bytes = b"RESUME A"
+    resume_b_bytes = b"RESUME B"
+    resume_a_id = "sha256:" + hashlib.sha256(resume_a_bytes).hexdigest()
+    resume_b_id = "sha256:" + hashlib.sha256(resume_b_bytes).hexdigest()
+    profile_a = "sha256:" + "c" * 64
+    profile_b = "sha256:" + "d" * 64
+    base = load_config(paths.config_toml)
+    config_a = base.model_copy(
+        update={
+            "candidate_name": "History A",
+            "resume_sha256": resume_a_id,
+            "profile_sha256": profile_a,
+        }
+    )
+    config_b = base.model_copy(
+        update={
+            "candidate_name": "History B",
+            "resume_sha256": resume_b_id,
+            "profile_sha256": profile_b,
+        }
+    )
+    job_a = _job("a", external_id="shared")
+    job_a.score = 91
+    job_a.reason = "Strong Java match"
+    job_a.last_successful_review_profile_hash = profile_a
+    job_b = _job("b", external_id="shared")
+    job_b.score = 63
+    job_b.reason = "Missing Kotlin experience"
+    job_b.last_successful_review_profile_hash = profile_b
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(job_a),
+        resume_bytes=resume_a_bytes,
+        profile_bytes=b"# Profile A",
+        config_bytes=serialize_config(config_a).encode("utf-8"),
+    )
+    _archive(
+        history,
+        tmp_path,
+        "run-b",
+        _snapshot(job_b),
+        resume_bytes=resume_b_bytes,
+        profile_bytes=b"# Profile B",
+        config_bytes=serialize_config(config_b).encode("utf-8"),
+    )
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        history_store=history,
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        assert client.post(
+            "/api/scan-history/run-a/jobs/a/status",
+            json={"status": "shortlisted"},
+            headers=HEADERS,
+        ).status_code == 204
+        assert client.post(
+            "/api/scan-history/run-b/jobs/b/status",
+            json={"status": "applied"},
+            headers=HEADERS,
+        ).status_code == 204
+        page_a = BeautifulSoup(
+            client.get(f"/setup?resume_id={resume_a_id}#review").text,
+            "html.parser",
+        )
+        page_b = BeautifulSoup(
+            client.get(f"/setup?resume_id={resume_b_id}#review").text,
+            "html.parser",
+        )
+
+    card_a = page_a.select_one('[data-review-block="global"] [data-job-key]')
+    card_b = page_b.select_one('[data-review-block="global"] [data-job-key]')
+    assert len(page_a.select("[data-global-resume-id]")) == 3
+    assert len(global_jobs.load().jobs) == 1
+    assert card_a is not None
+    assert card_a.get("data-score") == "91"
+    assert "Strong Java match" in card_a.get_text(" ", strip=True)
+    assert card_b is not None
+    assert card_b.get("data-score") == "63"
+    assert "Missing Kotlin experience" in card_b.get_text(" ", strip=True)
+    assert "applied" in card_a.get_text(" ", strip=True).lower()
+
+
+def test_completed_history_appears_in_resume_list_without_server_restart(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    history = SearchHistoryStore(paths)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        history_store=history,
+    )
+    resume_bytes = b"LATER RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    history_config = load_config(paths.config_toml).model_copy(
+        update={
+            "candidate_name": "Later History",
+            "resume_sha256": resume_id,
+            "profile_sha256": "sha256:" + "c" * 64,
+        }
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        _archive(
+            history,
+            tmp_path,
+            "run-later",
+            _snapshot(),
+            resume_bytes=resume_bytes,
+            profile_bytes=b"# Later profile",
+            config_bytes=serialize_config(history_config).encode("utf-8"),
+        )
+        page = BeautifulSoup(
+            client.get("/setup?run_id=run-later#review").text,
+            "html.parser",
+        )
+
+    selected = page.select_one(
+        f'option[data-global-resume-id="{resume_id}"][selected]'
+    )
+    assert selected is not None
+    assert "run-later.pdf" in selected.get_text(" ", strip=True)
+
+
+def test_same_resume_keeps_old_and_new_profile_hash_migrations(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    current_config = load_config(paths.config_toml)
+    old_profile_job = _job("old-profile", external_id="old-profile")
+    old_profile_job.last_successful_review_profile_hash = current_config.profile_sha256
+    new_profile_hash = "sha256:" + "c" * 64
+    new_profile_job = _job("new-profile", external_id="new-profile")
+    new_profile_job.last_successful_review_profile_hash = new_profile_hash
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(old_profile_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(new_profile_job, UserStatus.APPLIED, NOW)
+    history = SearchHistoryStore(paths)
+    history_config = current_config.model_copy(
+        update={"profile_sha256": new_profile_hash}
+    )
+    _archive(
+        history,
+        tmp_path,
+        "run-new-profile",
+        _snapshot(new_profile_job),
+        profile_bytes=b"# New profile",
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+
+    associated = global_jobs.load_for_resume(current_config.resume_sha256)
+    assert {job.canonical_job_key for job in associated.jobs} == {
+        "old-profile",
+        "new-profile",
+    }
 
 
 def test_ats_uses_uploaded_resume_with_current_and_global_jobs(tmp_path: Path) -> None:
@@ -663,7 +857,7 @@ def test_manual_job_import_persists_card_as_shortlisted(tmp_path: Path) -> None:
     assert saved.user_status is UserStatus.SHORTLISTED
 
 
-def test_manual_job_import_uses_selected_history_profile_and_config(
+def test_manual_job_import_uses_selected_resume_profile_and_config(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -718,7 +912,7 @@ def test_manual_job_import_uses_selected_history_profile_and_config(
             "/api/global-jobs/import",
             json={
                 "url": "https://careers.example/jobs/manual",
-                "run_id": "run-a",
+                "resume_id": history_config.resume_sha256,
             },
             headers=HEADERS,
         )
@@ -732,6 +926,83 @@ def test_manual_job_import_uses_selected_history_profile_and_config(
     assert config.ai_runtime == "claude-code"
     assert config.claude.model == "opus"
     assert profile == "# History candidate profile"
+
+
+def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    old_config = paths.config_toml.read_bytes()
+    old_profile = paths.profile_md.read_bytes()
+    uploaded_bytes = SAMPLE_RESUME.read_bytes()
+    resume_id = "sha256:" + hashlib.sha256(uploaded_bytes).hexdigest()
+    profile_hash = "sha256:" + "e" * 64
+    prepared_inputs: list[tuple[Path, SetupAnswers]] = []
+
+    def prepare_resume(resume_path: Path, answers: SetupAnswers) -> SetupPreparation:
+        prepared_inputs.append((resume_path, answers))
+        config = load_config(paths.config_toml).model_copy(
+            update={
+                "candidate_name": answers.candidate_name,
+                "resume_path": resume_path,
+                "resume_sha256": resume_id,
+                "profile_sha256": profile_hash,
+            }
+        )
+        return SetupPreparation(
+            config=config,
+            profile_bytes=b"# Uploaded resume profile",
+            config_bytes=serialize_config(config).encode("utf-8"),
+            profile_hash=profile_hash,
+        )
+
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        manual_resume_preparer=prepare_resume,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/import-with-resume",
+            data={"url": "https://careers.example/jobs/manual"},
+            files={
+                "resume": (
+                    "backend.docx",
+                    uploaded_bytes,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "job_key": "manual",
+        "status": "shortlisted",
+        "resume_id": resume_id,
+    }
+    assert len(prepared_inputs) == 1
+    assert prepared_inputs[0][1].candidate_name == "backend"
+    assert paths.config_toml.read_bytes() == old_config
+    assert paths.profile_md.read_bytes() == old_profile
+    assert ResumeCatalogStore(paths).read(resume_id).profile_bytes == (
+        b"# Uploaded resume profile"
+    )
+    associated = global_jobs.load_for_resume(resume_id)
+    assert [job.canonical_job_key for job in associated.jobs] == ["manual"]
 
 
 def test_manual_job_import_rejects_missing_selected_history(tmp_path: Path) -> None:

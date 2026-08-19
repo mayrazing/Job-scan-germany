@@ -6,7 +6,14 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from job_scan.domain import JobRecord, Snapshot, SourceOccurrence, StoreMeta, UserStatus
+from job_scan.domain import (
+    JobRecord,
+    ResumeMatch,
+    Snapshot,
+    SourceOccurrence,
+    StoreMeta,
+    UserStatus,
+)
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
 from job_scan.repository import parse_snapshot, serialize_snapshot
@@ -33,6 +40,23 @@ class GlobalJobStore:
         """Load the global job snapshot, returning an empty snapshot when absent."""
         with self._lock.shared():
             return _visible_snapshot(self._load_unlocked())
+
+    def load_for_resume(self, resume_id: str) -> Snapshot:
+        """Load global jobs associated with one resume and show its match result."""
+        with self._lock.shared():
+            current = _visible_snapshot(self._load_unlocked())
+        jobs: list[JobRecord] = []
+        for job in current.jobs:
+            match = next(
+                (item for item in job.resume_matches if item.resume_id == resume_id),
+                None,
+            )
+            if match is None:
+                continue
+            shown = job.model_copy(deep=True)
+            _apply_resume_match(shown, match)
+            jobs.append(shown)
+        return Snapshot(meta=current.meta.model_copy(deep=True), jobs=jobs)
 
     def mutate_details(self, mutator: Callable[[Snapshot], Snapshot]) -> Snapshot:
         """Update global job details without changing membership or user decisions."""
@@ -91,6 +115,9 @@ class GlobalJobStore:
         job: JobRecord,
         status: UserStatus,
         now: datetime | None = None,
+        *,
+        resume_id: str | None = None,
+        profile_hash: str | None = None,
     ) -> Snapshot:
         """Persist one selected status for a job, regardless of its source snapshot."""
         try:
@@ -108,6 +135,8 @@ class GlobalJobStore:
             candidate.user_status = selected_status
             candidate.user_status_updated_at = updated_at
             candidate.global_status_deleted_at = None
+            if resume_id is not None and profile_hash is not None:
+                _save_resume_match(candidate, resume_id, profile_hash)
             _restore_deleted_matches(jobs, candidate)
             merged, _changed = _merge_into(jobs, candidate)
             merged.user_status = selected_status
@@ -120,6 +149,9 @@ class GlobalJobStore:
         job: JobRecord,
         default_status: UserStatus,
         now: datetime | None = None,
+        *,
+        resume_id: str | None = None,
+        profile_hash: str | None = None,
     ) -> JobRecord:
         """Insert with a default state, but preserve an existing user decision."""
         try:
@@ -135,6 +167,8 @@ class GlobalJobStore:
             jobs = [item.model_copy(deep=True) for item in current.jobs]
             candidate = job.model_copy(deep=True)
             candidate.global_status_deleted_at = None
+            if resume_id is not None and profile_hash is not None:
+                _save_resume_match(candidate, resume_id, profile_hash)
             _restore_deleted_matches(jobs, candidate)
             existing_status = _newest_status_job(_matching_jobs(jobs, candidate))
             if existing_status is None:
@@ -145,8 +179,24 @@ class GlobalJobStore:
                 candidate.user_status_updated_at = existing_status.user_status_updated_at
             merged, _changed = _merge_into(jobs, candidate)
             merged.global_status_deleted_at = None
-            self._persist_unlocked(current, jobs)
+            if jobs != current.jobs:
+                self._persist_unlocked(current, jobs)
             return merged.model_copy(deep=True)
+
+    def associate_profile(self, *, resume_id: str, profile_hash: str) -> None:
+        """Associate migrated global jobs whose active review used one profile."""
+        with self._lock.exclusive():
+            current = self._load_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            changed = False
+            for job in jobs:
+                if profile_hash not in _active_profile_hashes(job):
+                    continue
+                before = job.resume_matches
+                _save_resume_match(job, resume_id, profile_hash)
+                changed = changed or job.resume_matches != before
+            if changed:
+                self._persist_unlocked(current, jobs)
 
     def delete(self, key: str, now: datetime | None = None) -> None:
         """Hide one global job and prevent passive history imports from restoring it."""
@@ -297,6 +347,7 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         profile.user_status = status_job.user_status
         profile.user_status_updated_at = status_job.user_status_updated_at
     profile.source_occurrences = _merged_occurrences(candidates)
+    profile.resume_matches = _merged_resume_matches(candidates)
     return profile
 
 
@@ -319,6 +370,74 @@ def _merged_occurrences(candidates: Sequence[JobRecord]) -> list[SourceOccurrenc
                 occurrence.model_copy(deep=True),
             )
     return list(occurrences.values())
+
+
+def _save_resume_match(job: JobRecord, resume_id: str, profile_hash: str) -> None:
+    match = ResumeMatch(
+        resume_id=resume_id,
+        profile_hash=profile_hash,
+        machine_status=job.machine_status,
+        manual_override=job.manual_override,
+        manual_override_content_hash=job.manual_override_content_hash,
+        manual_override_profile_hash=job.manual_override_profile_hash,
+        ai_review=job.ai_review.model_copy(deep=True) if job.ai_review else None,
+        score=job.score,
+        reason=job.reason,
+        review_model=job.review_model,
+        reviewed_at=job.reviewed_at,
+        last_review_attempt_content_hash=job.last_review_attempt_content_hash,
+        last_review_attempt_profile_hash=job.last_review_attempt_profile_hash,
+        last_review_attempt_at=job.last_review_attempt_at,
+        last_successful_review_content_hash=job.last_successful_review_content_hash,
+        last_successful_review_profile_hash=job.last_successful_review_profile_hash,
+        exclusion_reasons=list(job.exclusion_reasons),
+        labels=list(job.labels),
+        last_error=job.last_error,
+    )
+    for index, existing in enumerate(job.resume_matches):
+        if existing.resume_id != resume_id:
+            continue
+        if existing == match:
+            return
+        updated = list(job.resume_matches)
+        updated[index] = match
+        job.resume_matches = updated
+        return
+    job.resume_matches = [*job.resume_matches, match]
+
+
+def _apply_resume_match(job: JobRecord, match: ResumeMatch) -> None:
+    for field_name in ResumeMatch.model_fields:
+        if field_name in {"resume_id", "profile_hash"}:
+            continue
+        value = getattr(match, field_name)
+        setattr(
+            job,
+            field_name,
+            value.model_copy(deep=True) if hasattr(value, "model_copy") else value,
+        )
+    job.exclusion_reasons = list(match.exclusion_reasons)
+    job.labels = list(match.labels)
+
+
+def _merged_resume_matches(candidates: Sequence[JobRecord]) -> list[ResumeMatch]:
+    matches: dict[str, ResumeMatch] = {}
+    for candidate in candidates:
+        for match in candidate.resume_matches:
+            matches[match.resume_id] = match.model_copy(deep=True)
+    return list(matches.values())
+
+
+def _active_profile_hashes(job: JobRecord) -> set[str]:
+    return {
+        value
+        for value in (
+            job.last_successful_review_profile_hash,
+            job.last_review_attempt_profile_hash,
+            job.manual_override_profile_hash,
+        )
+        if value is not None
+    }
 
 
 def _visible_snapshot(snapshot: Snapshot) -> Snapshot:

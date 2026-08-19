@@ -1,4 +1,4 @@
-{% from "_review_queue.html" import groups, manual_job_import, navigation %}
+{% from "_review_queue.html" import global_resume_list, groups, manual_job_import, navigation %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -10,7 +10,7 @@
     <style>{{ dashboard_css | safe }}</style>
     <style>{{ console_css | safe }}</style>
   </head>
-  <body data-review-run-id="{{ selected_run_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
+  <body data-review-run-id="{{ selected_run_id or '' }}" data-selected-resume-id="{{ selected_resume_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
     <header class="page-header">
       <div>
         <p class="eyebrow">Local scan console</p>
@@ -551,6 +551,7 @@
                   </div>
                   {{ manual_job_import() }}
                 </header>
+                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id) }}
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Global job status groups') }}
                   <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>

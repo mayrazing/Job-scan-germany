@@ -1,4 +1,4 @@
-{% from "_review_queue.html" import groups, manual_job_import, navigation %}
+{% from "_review_queue.html" import global_resume_list, groups, manual_job_import, navigation %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -8,7 +8,7 @@
     <title>Job scan review desk</title>
     <style>{{ dashboard_css | safe }}</style>
   </head>
-  <body>
+  <body data-selected-resume-id="{{ selected_resume_id or '' }}">
     <header class="page-header">
       <div>
         <p class="eyebrow">Local review desk</p>
@@ -26,11 +26,12 @@
           <div class="review-groups">{{ groups(current_dashboard, false, false, 'current') }}</div>
         </div>
       </section>
-      <section class="review-block" data-review-block="global">
+      <section class="review-block" id="review" data-review-block="global">
         <header class="review-block-heading review-block-heading-actions">
           <div><p class="eyebrow">All searches</p><h2>Global job status</h2></div>
           {{ manual_job_import() }}
         </header>
+        {{ global_resume_list(resume_catalog, selected_resume_id, '/') }}
         <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
           {{ navigation(global_dashboard, 'Global job status groups') }}
           <div class="review-groups">{{ groups(global_dashboard, false, false, 'global') }}</div>

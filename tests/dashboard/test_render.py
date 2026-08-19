@@ -265,7 +265,7 @@ def test_packaged_dashboard_javascript_uses_review_api_request_contract() -> Non
         .read_text(encoding="utf-8")
     )
 
-    assert "encodeURIComponent(form.dataset.jobKey)" in javascript
+    assert "encodeURIComponent(rawJobKey)" in javascript
     assert 'method: "POST"' in javascript
     assert 'credentials: "same-origin"' in javascript
     assert '"Content-Type": "application/json"' in javascript
@@ -273,7 +273,7 @@ def test_packaged_dashboard_javascript_uses_review_api_request_contract() -> Non
     assert 'if (action === "restore")' in javascript
     assert "return options" in javascript
     assert "response.ok" in javascript
-    assert "window.location.reload()" in javascript
+    assert "await refreshReviewJob(rawJobKey)" in javascript
 
 
 def test_render_escapes_raw_text_once_and_hardens_external_links() -> None:

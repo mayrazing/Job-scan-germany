@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Literal
+from typing import BinaryIO, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,7 +30,7 @@ from job_scan.scheduler import SchedulerBackend, SchedulerError, SchedulerState
 from job_scan.search_history import SearchHistoryStore
 from job_scan.setup_service import SetupAnswers, SetupError, SetupResult, SetupService
 
-_MAX_RESUME_BYTES = 20 * 1024 * 1024
+MAX_RESUME_BYTES = 20 * 1024 * 1024
 
 
 class WebWorkflowBusy(RuntimeError):
@@ -212,7 +212,7 @@ class WebWorkflow:
             previous_config = load_config(self._paths.config_toml)
         except (OSError, ValueError):
             previous_config = None
-        resume_path, created = _store_uploaded_resume(
+        resume_path, created = store_uploaded_resume(
             self._paths,
             resume_filename,
             resume_bytes,
@@ -397,7 +397,7 @@ class WebWorkflow:
         )
 
 
-def _store_uploaded_resume(
+def store_uploaded_resume(
     paths: AppPaths,
     filename: str,
     payload: bytes,
@@ -410,7 +410,7 @@ def _store_uploaded_resume(
         )
     if not payload:
         raise ResumeReadError("Uploaded resume is empty.")
-    if len(payload) > _MAX_RESUME_BYTES:
+    if len(payload) > MAX_RESUME_BYTES:
         raise ResumeReadError("Uploaded resume exceeds the 20 MB limit.")
 
     digest = hashlib.sha256(payload).hexdigest()
@@ -442,6 +442,14 @@ def _store_uploaded_resume(
     except OSError:
         raise ResumeReadError("Could not save uploaded resume.") from None
     return target.resolve(), True
+
+
+def read_resume_upload(stream: BinaryIO) -> bytes:
+    """Read at most one byte beyond the accepted upload limit."""
+    payload = stream.read(MAX_RESUME_BYTES + 1)
+    if len(payload) > MAX_RESUME_BYTES:
+        raise ResumeReadError("Uploaded resume exceeds the 20 MB limit.")
+    return payload
 
 
 def _read_optional_bytes(path: Path) -> bytes | None:

@@ -14,6 +14,7 @@ from job_scan.config import (
     ClaudeSettings,
     SchedulerSettings,
     load_config,
+    load_config_bytes,
 )
 from job_scan.paths import AppPaths
 from job_scan.prompts import build_profile_prompt
@@ -207,6 +208,20 @@ def test_setup_publishes_exact_profile_and_round_trippable_config_without_touchi
     assert RESUME.read_bytes() == before_resume
     assert {entry.name for entry in RESUME.parent.iterdir()} == before_siblings
     assert PRIVATE_MARKER not in result.model_dump_json()
+
+
+def test_prepare_builds_profile_without_overwriting_current_setup(tmp_path: Path) -> None:
+    paths = paths_at(tmp_path)
+    seed_old_pair(paths)
+
+    prepared = SetupService(paths, FakeClaude()).prepare(RESUME, valid_answers())
+
+    assert paths.profile_md.read_bytes() == b"old profile\n"
+    assert paths.config_toml.read_bytes() == b"old config\n"
+    assert prepared.profile_bytes == PROFILE.encode("utf-8")
+    assert prepared.profile_hash == PROFILE_HASH
+    assert prepared.config.resume_sha256 == RESUME_HASH
+    assert load_config_bytes(prepared.config_bytes) == prepared.config
 
 
 def test_setup_reuses_profile_for_same_resume_while_updating_config(

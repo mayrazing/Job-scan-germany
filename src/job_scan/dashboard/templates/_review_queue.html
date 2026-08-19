@@ -195,6 +195,22 @@
   {% endfor %}
 {%- endmacro %}
 
+{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none) -%}
+  <section class="global-resume-section" aria-labelledby="global-resume-title">
+    <div class="global-resume-heading">
+      <h4 id="global-resume-title">Resumes</h4>
+      <span>Select a resume to view its matched jobs.</span>
+    </div>
+    <select class="global-resume-select" data-global-resume-select aria-label="Select resume"{% if not resumes %} disabled{% endif %}>
+      {% for resume in resumes %}
+        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#review"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
+      {% else %}
+        <option selected>No resumes associated with Global jobs yet.</option>
+      {% endfor %}
+    </select>
+  </section>
+{%- endmacro %}
+
 {% macro manual_job_import() -%}
   <button class="manual-job-button" type="button" data-open-manual-job aria-controls="manual-job-dialog">Add job from URL</button>
   <dialog class="manual-job-dialog" id="manual-job-dialog" aria-labelledby="manual-job-dialog-title">
@@ -207,6 +223,11 @@
       <label for="manual-job-url">
         <span>Job URL</span>
         <input id="manual-job-url" name="url" type="url" inputmode="url" autocomplete="url" placeholder="https://careers.example/jobs/123" required>
+      </label>
+      <label for="manual-job-resume">
+        <span>New resume, optional</span>
+        <input id="manual-job-resume" name="resume" type="file" accept=".pdf,.docx">
+        <small>Leave empty to use the selected resume above.</small>
       </label>
       <p class="manual-job-error" data-manual-job-error role="alert" hidden></p>
       <div class="manual-job-actions">

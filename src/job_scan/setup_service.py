@@ -113,6 +113,17 @@ class SetupResult(BaseModel):
     profile_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class SetupPreparation(BaseModel):
+    """Carry a generated profile/config pair before it is published."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: AppConfig
+    profile_bytes: bytes
+    config_bytes: bytes
+    profile_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class ClaudeInvoker(Protocol):
     def invoke(self, request: ClaudeRequest) -> ClaudeInvocation: ...
 
@@ -133,6 +144,16 @@ class SetupService:
 
     def run(self, resume_path: Path, answers: SetupAnswers) -> SetupResult:
         """Extract a resume, obtain its profile, then publish a consistent pair."""
+        prepared = self.prepare(resume_path, answers)
+        self._publish_pair(prepared.profile_bytes, prepared.config_bytes)
+        return SetupResult(
+            config=prepared.config,
+            profile_path=self._paths.profile_md,
+            profile_hash=prepared.profile_hash,
+        )
+
+    def prepare(self, resume_path: Path, answers: SetupAnswers) -> SetupPreparation:
+        """Build a profile/config pair without replacing the current setup."""
         extracted = self._extract_resume(resume_path)
         reusable = self._read_reusable_profile(extracted.sha256, answers.ai_runtime)
         if reusable is None:
@@ -178,10 +199,10 @@ class SetupService:
                 "Setup values could not produce a valid configuration; correct them and retry."
             ) from None
 
-        self._publish_pair(profile_bytes, serialized_config)
-        return SetupResult(
+        return SetupPreparation(
             config=config,
-            profile_path=self._paths.profile_md,
+            profile_bytes=profile_bytes,
+            config_bytes=serialized_config,
             profile_hash=profile_hash,
         )
 

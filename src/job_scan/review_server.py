@@ -67,7 +67,7 @@ from job_scan.company_size import (
     CompanySizeStore,
     CompanySizeStoreError,
 )
-from job_scan.config import AppConfig, load_config, load_config_bytes
+from job_scan.config import AppConfig, load_config, load_config_bytes, serialize_config
 from job_scan.dashboard.render import render_console, render_dashboard
 from job_scan.domain import JobRecord, MachineStatus, Snapshot, StoreMeta, UserStatus
 from job_scan.global_jobs import GLOBAL_USER_STATUSES, GlobalJobStore
@@ -80,6 +80,8 @@ from job_scan.manual_job_import import (
     require_public_job_url,
 )
 from job_scan.repository import JsonlRepository
+from job_scan.resume import ResumeError
+from job_scan.resume_catalog import ResumeCatalogEntry, ResumeCatalogStore
 from job_scan.resume_suggestions import (
     ResumeSuggestionError,
     ResumeSuggestions,
@@ -89,12 +91,19 @@ from job_scan.resume_suggestions import (
 from job_scan.reviewer import ClaudeReviewer
 from job_scan.scheduler import SchedulerError
 from job_scan.search_history import SearchHistoryEntry, SearchHistoryStore
-from job_scan.setup_service import SetupAnswers
+from job_scan.setup_service import (
+    SetupAnswers,
+    SetupError,
+    SetupPreparation,
+    SetupService,
+)
 from job_scan.web_workflow import (
     WebRunState,
     WebScheduleState,
     WebWorkflow,
     WebWorkflowBusy,
+    read_resume_upload,
+    store_uploaded_resume,
 )
 
 _SESSION_COOKIE = "job_scan_session"
@@ -142,11 +151,19 @@ class _AiConfigurationState(BaseModel):
 class _ManualJobImportRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2083)
     run_id: str | None = Field(default=None, min_length=1, max_length=100)
+    resume_id: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
 
 class _ManualJobImportResponse(BaseModel):
     job_key: str
     status: UserStatus
+
+
+class _ManualJobImportWithResumeResponse(_ManualJobImportResponse):
+    resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class _JobDisappeared(RuntimeError):
@@ -166,9 +183,12 @@ def create_review_app(
     ats_workflow: AtsWorkflow | None = None,
     ats_history_store: AtsHistoryStore | None = None,
     global_job_store: GlobalJobStore | None = None,
+    resume_catalog_store: ResumeCatalogStore | None = None,
     manual_job_importer: Callable[
         [str, AppConfig, str, datetime], JobRecord
     ]
+    | None = None,
+    manual_resume_preparer: Callable[[Path, SetupAnswers], SetupPreparation]
     | None = None,
     company_size_service: CompanySizeService | None = None,
     current_lan_origin: Callable[[], str | None] | None = None,
@@ -178,6 +198,7 @@ def create_review_app(
     allowed_hosts = frozenset(urlsplit(origin).netloc for origin in allowed_origins)
     history = history_store or SearchHistoryStore(repository.paths)
     global_jobs = global_job_store or GlobalJobStore(repository.paths)
+    resume_catalog = resume_catalog_store or ResumeCatalogStore(repository.paths)
     resume_suggestions = resume_suggestion_service or ResumeSuggestionService(
         AiRuntimeInvoker(repository.paths)
     )
@@ -190,6 +211,100 @@ def create_review_app(
             AiJobExtractor(company_size_invoker),
             ClaudeReviewer(company_size_invoker),
         ).import_url
+    if manual_resume_preparer is None:
+        manual_resume_preparer = SetupService(repository.paths).prepare
+
+    def register_current_resume() -> None:
+        """Copy the current setup profile into the global resume catalog."""
+        try:
+            config = load_config(repository.paths.config_toml)
+            profile_bytes = repository.paths.profile_md.read_bytes()
+            resume_bytes = (
+                config.resume_path.read_bytes() if config.resume_path.is_file() else None
+            )
+            created_at = datetime.fromtimestamp(
+                max(
+                    repository.paths.config_toml.stat().st_mtime,
+                    repository.paths.profile_md.stat().st_mtime,
+                ),
+                UTC,
+            )
+            resume_catalog.register(
+                resume_id=config.resume_sha256,
+                profile_hash=config.profile_sha256,
+                candidate_name=config.candidate_name or config.resume_path.stem or "Candidate",
+                filename=config.resume_path.name,
+                profile_bytes=profile_bytes,
+                config_bytes=repository.paths.config_toml.read_bytes(),
+                resume_bytes=resume_bytes,
+                created_at=created_at,
+            )
+        except (OSError, UnicodeError, ValueError, ValidationError):
+            pass
+
+    def register_history_resumes() -> None:
+        """Copy completed-search resume bundles into the global resume catalog."""
+        for entry in history.list():
+            try:
+                review_input = history.read_review_input(entry.run_id)
+                filename, resume_bytes = history.read_resume(entry.run_id)
+                config = load_config_bytes(review_input.config_bytes)
+                resume_catalog.register(
+                    resume_id=config.resume_sha256,
+                    profile_hash=config.profile_sha256,
+                    candidate_name=entry.candidate_name,
+                    filename=filename,
+                    profile_bytes=review_input.profile_bytes,
+                    config_bytes=review_input.config_bytes,
+                    resume_bytes=resume_bytes,
+                    created_at=entry.finished_at,
+                )
+            except (KeyError, OSError, UnicodeError, ValueError, ValidationError):
+                continue
+
+    def associate_catalog_profiles() -> list[ResumeCatalogEntry]:
+        """Migrate profile-hash-only Global jobs to explicit resume associations."""
+        entries = resume_catalog.list()
+        for entry in entries:
+            for profile_hash in entry.all_profile_hashes:
+                global_jobs.associate_profile(
+                    resume_id=entry.resume_id,
+                    profile_hash=profile_hash,
+                )
+        return entries
+
+    def sync_resume_catalog() -> list[ResumeCatalogEntry]:
+        """Import current and historical resume bundles, then migrate Global jobs."""
+        register_current_resume()
+        register_history_resumes()
+        return associate_catalog_profiles()
+
+    def resume_context(run_id: str | None = None) -> tuple[str, str] | None:
+        """Return the resume and profile hashes for current or historical review data."""
+        try:
+            if run_id is None:
+                config = load_config(repository.paths.config_toml)
+            else:
+                config = load_config_bytes(history.read_review_input(run_id).config_bytes)
+        except (KeyError, OSError, UnicodeError, ValueError, ValidationError):
+            return None
+        return config.resume_sha256, config.profile_sha256
+
+    def selected_resume(
+        entries: list[ResumeCatalogEntry],
+        requested_resume_id: str | None,
+        run_id: str | None = None,
+    ) -> str | None:
+        """Choose an explicit resume, otherwise prefer the visible History resume."""
+        known = {entry.resume_id for entry in entries}
+        if requested_resume_id is not None:
+            if requested_resume_id not in known:
+                raise HTTPException(status.HTTP_404_NOT_FOUND)
+            return requested_resume_id
+        context = resume_context(run_id)
+        if context is not None and context[0] in known:
+            return context[0]
+        return entries[0].resume_id if entries else None
 
     def refresh_global_jobs(
         current: Snapshot | None = None,
@@ -204,7 +319,9 @@ def create_review_app(
                 snapshots.append(history.load(entry.run_id))
             except (KeyError, ValueError):
                 continue
-        return global_jobs.import_snapshots(snapshots)
+        imported = global_jobs.import_snapshots(snapshots)
+        sync_resume_catalog()
+        return imported
 
     def selected_ats_jobs(
         keys: list[str],
@@ -423,6 +540,23 @@ def create_review_app(
             deep=True,
         )
 
+    def uploaded_resume_answers(config: AppConfig, filename: str) -> SetupAnswers:
+        """Reuse current search preferences while naming the uploaded resume."""
+        answers = SetupAnswers.model_validate(
+            config.model_dump(
+                mode="json",
+                include=set(SetupAnswers.model_fields),
+                warnings=False,
+            )
+        )
+        return apply_selection_to_setup(
+            answers.model_copy(
+                update={
+                    "candidate_name": Path(filename).stem.strip() or "Candidate",
+                }
+            )
+        )
+
     @app.post(
         "/api/global-jobs/import",
         status_code=status.HTTP_201_CREATED,
@@ -442,7 +576,17 @@ def create_review_app(
             ), FileRWLock(repository.paths.scan_lock_file).exclusive(
                 blocking=False
             ):
-                if payload.run_id is None:
+                if payload.resume_id is not None:
+                    try:
+                        bundle = resume_catalog.read(payload.resume_id)
+                        base_config = load_config_bytes(bundle.config_bytes)
+                        profile = bundle.profile_bytes.decode("utf-8")
+                    except (KeyError, OSError, UnicodeError, ValueError):
+                        raise HTTPException(
+                            status.HTTP_404_NOT_FOUND,
+                            "The selected resume is unavailable.",
+                        ) from None
+                elif payload.run_id is None:
                     base_config = load_config(repository.paths.config_toml)
                     profile = repository.paths.profile_md.read_text(encoding="utf-8")
                 else:
@@ -475,6 +619,8 @@ def create_review_app(
                 saved_job = global_jobs.upsert_with_default_status(
                     imported.jobs[0],
                     UserStatus.SHORTLISTED,
+                    resume_id=base_config.resume_sha256,
+                    profile_hash=base_config.profile_sha256,
                 )
         except LockUnavailable:
             raise HTTPException(
@@ -494,6 +640,127 @@ def create_review_app(
         return _ManualJobImportResponse(
             job_key=saved_job.canonical_job_key,
             status=saved_job.user_status,
+        )
+
+    @app.post(
+        "/api/global-jobs/import-with-resume",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def import_global_job_with_resume(
+        url: Annotated[str, Form(min_length=1, max_length=2083)],
+        resume: Annotated[UploadFile, File()],
+    ) -> _ManualJobImportWithResumeResponse:
+        try:
+            job_url = require_public_job_url(url)
+        except ManualJobImportError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+
+        resume_path: Path | None = None
+        stored_resume_created = False
+        catalog_created = False
+        completed = False
+        try:
+            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
+                blocking=False
+            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
+                blocking=False
+            ):
+                filename = Path(resume.filename or "").name
+                resume_bytes = read_resume_upload(resume.file)
+                resume_path, stored_resume_created = store_uploaded_resume(
+                    repository.paths,
+                    filename,
+                    resume_bytes,
+                )
+                resume_id = f"sha256:{resume_path.stem}"
+                try:
+                    bundle = resume_catalog.read(resume_id)
+                except KeyError:
+                    base_config = load_config(repository.paths.config_toml)
+                    prepared = manual_resume_preparer(
+                        resume_path,
+                        uploaded_resume_answers(base_config, filename),
+                    )
+                    if prepared.config.resume_sha256 != resume_id:
+                        raise ValueError("prepared resume hash does not match upload")
+                    config = apply_ai_selection_to_config(
+                        prepared.config,
+                        current_ai_selection(),
+                        provider_store,
+                    )
+                    profile_bytes = prepared.profile_bytes
+                    config_bytes = serialize_config(config).encode("utf-8")
+                    new_catalog_entry = True
+                else:
+                    config = apply_ai_selection_to_config(
+                        load_config_bytes(bundle.config_bytes),
+                        current_ai_selection(),
+                        provider_store,
+                    )
+                    profile_bytes = bundle.profile_bytes
+                    config_bytes = bundle.config_bytes
+                    new_catalog_entry = False
+
+                profile = profile_bytes.decode("utf-8")
+                imported_at = datetime.now(UTC)
+                job = manual_job_importer(job_url, config, profile, imported_at)
+                imported = Snapshot(
+                    meta=StoreMeta(data_revision=0),
+                    jobs=[job],
+                )
+                company_sizes().apply(imported, config, imported_at)
+                if new_catalog_entry:
+                    resume_catalog.register(
+                        resume_id=resume_id,
+                        profile_hash=config.profile_sha256,
+                        candidate_name=config.candidate_name or Path(filename).stem,
+                        filename=filename,
+                        profile_bytes=profile_bytes,
+                        config_bytes=config_bytes,
+                        resume_bytes=resume_bytes,
+                        created_at=imported_at,
+                    )
+                    catalog_created = True
+                saved_job = global_jobs.upsert_with_default_status(
+                    imported.jobs[0],
+                    UserStatus.SHORTLISTED,
+                    resume_id=resume_id,
+                    profile_hash=config.profile_sha256,
+                )
+                completed = True
+        except LockUnavailable:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A scan is running; retry the job import after it completes.",
+            ) from None
+        except ManualJobImportError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        except (ResumeError, SetupError, OSError, UnicodeError, ValueError) as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error) or "Could not prepare the uploaded resume.",
+            ) from None
+        finally:
+            if not completed:
+                if catalog_created:
+                    try:
+                        resume_catalog.delete(resume_id)
+                    except (KeyError, OSError, ValueError):
+                        pass
+                if stored_resume_created and resume_path is not None:
+                    resume_path.unlink(missing_ok=True)
+
+        return _ManualJobImportWithResumeResponse(
+            job_key=saved_job.canonical_job_key,
+            status=saved_job.user_status,
+            resume_id=resume_id,
         )
 
     @app.post(
@@ -772,11 +1039,23 @@ def create_review_app(
                 ) from None
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard() -> HTMLResponse:
+    def dashboard(resume_id: str | None = None) -> HTMLResponse:
         current = repository.load()
-        global_snapshot = refresh_global_jobs(current)
+        refresh_global_jobs(current)
+        resumes = resume_catalog.list()
+        selected_resume_id = selected_resume(resumes, resume_id)
+        global_snapshot = (
+            global_jobs.load_for_resume(selected_resume_id)
+            if selected_resume_id is not None
+            else global_jobs.load()
+        )
         response = HTMLResponse(
-            render_dashboard(global_jobs.overlay(current), global_snapshot)
+            render_dashboard(
+                global_jobs.overlay(current),
+                global_snapshot,
+                resume_catalog=resumes,
+                selected_resume_id=selected_resume_id,
+            )
         )
         response.set_cookie(
             _SESSION_COOKIE,
@@ -793,6 +1072,7 @@ def create_review_app(
         def setup_console(
             run_id: str | None = None,
             ats_run_id: str | None = None,
+            resume_id: str | None = None,
         ) -> HTMLResponse:
             try:
                 providers = ai_store.list() if ai_store is not None else []
@@ -806,7 +1086,14 @@ def create_review_app(
                     history.load(run_id) if run_id is not None else repository.load()
                 )
                 entries = history.list()
-                global_snapshot = refresh_global_jobs(raw_snapshot, entries)
+                refresh_global_jobs(raw_snapshot, entries)
+                resumes = resume_catalog.list()
+                selected_resume_id = selected_resume(resumes, resume_id, run_id)
+                global_snapshot = (
+                    global_jobs.load_for_resume(selected_resume_id)
+                    if selected_resume_id is not None
+                    else global_jobs.load()
+                )
                 snapshot = global_jobs.overlay(raw_snapshot)
                 ats_entries = ats_history_store.list() if ats_history_store is not None else []
                 if ats_run_id is not None:
@@ -856,6 +1143,8 @@ def create_review_app(
                     selected_ats=selected_ats,
                     ats_source_run_id=ats_source_run_id,
                     ats_default_resume_filename=ats_default_resume_filename,
+                    resume_catalog=resumes,
+                    selected_resume_id=selected_resume_id,
                 )
             )
             response.set_cookie(
@@ -1207,7 +1496,16 @@ def create_review_app(
                 job = _find_job(repository.load(), key)
                 if job is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND)
-                global_jobs.set_status(job, mutation.status)
+                context = resume_context()
+                if context is None:
+                    global_jobs.set_status(job, mutation.status)
+                else:
+                    global_jobs.set_status(
+                        job,
+                        mutation.status,
+                        resume_id=context[0],
+                        profile_hash=context[1],
+                    )
         except LockUnavailable:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -1262,7 +1560,16 @@ def create_review_app(
                 job = _find_job(snapshot, key)
                 if job is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND)
-                global_jobs.set_status(job, mutation.status)
+                context = resume_context(run_id)
+                if context is None:
+                    global_jobs.set_status(job, mutation.status)
+                else:
+                    global_jobs.set_status(
+                        job,
+                        mutation.status,
+                        resume_id=context[0],
+                        profile_hash=context[1],
+                    )
         except LockUnavailable:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -1318,6 +1625,7 @@ def create_review_app(
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    sync_resume_catalog()
     return app
 
 
