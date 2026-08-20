@@ -88,10 +88,13 @@ def test_mock_review_matches_the_current_review_workspace() -> None:
 
     expected_groups = {
         "recommended",
-        "shortlisted",
+        "saved",
         "pending",
         "excluded",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     }
@@ -106,10 +109,13 @@ def test_mock_review_matches_the_current_review_workspace() -> None:
     group_tabs = workspace.select(".review-group-nav [data-review-group-tab]")
     assert [tab.get("data-review-group-tab") for tab in group_tabs] == [
         "recommended",
-        "shortlisted",
+        "saved",
         "pending",
         "excluded",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     ]
@@ -135,6 +141,53 @@ def test_mock_review_matches_the_current_review_workspace() -> None:
     assert review.select_one("#history") is None
     assert review.select("[data-history-filter], [data-history-kind]") == []
 
+    tracker_statuses = [
+        "saved",
+        "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
+        "rejected",
+        "ignored",
+    ]
+    assert all(
+        [
+            option.get("value")
+            for option in select.select("option")
+            if option.get("value")
+        ]
+        == tracker_statuses
+        for select in review.select('[data-job-action="status"] select[name="status"]')
+    )
+
+
+def test_mock_applied_job_card_shows_lifecycle_summary_and_history() -> None:
+    page = BeautifulSoup(MOCK_PAGE.read_text(encoding="utf-8"), "html.parser")
+
+    lifecycle = page.select_one("#applied .job-card [data-job-lifecycle]")
+    assert lifecycle is not None
+    assert [
+        step.get_text(" ", strip=True)
+        for step in lifecycle.select("[data-lifecycle-step]")
+    ] == [
+        "Saved 08-10",
+        "Applied 08-12",
+    ]
+    assert [step.get("data-state") for step in lifecycle.select("[data-lifecycle-step]")] == [
+        "complete",
+        "current",
+    ]
+
+    history = lifecycle.select_one("details[data-lifecycle-history]")
+    assert history is not None
+    assert history.select_one("summary").get_text(" ", strip=True) == "Lifecycle details"
+    assert [
+        time.get("datetime") for time in history.select("[data-lifecycle-event] time")
+    ] == [
+        "2026-08-10T18:25:00Z",
+        "2026-08-12T08:15:00Z",
+    ]
+
 
 def test_mock_review_and_ats_controls_update_the_visible_workspace() -> None:
     playwright = pytest.importorskip("playwright.sync_api")
@@ -154,23 +207,23 @@ def test_mock_review_and_ats_controls_update_the_visible_workspace() -> None:
         group_tabs = page.locator("[data-review-group-tab]")
         assert group_tabs.evaluate_all(
             "tabs => tabs.map(tab => tab.dataset.reviewGroupTab)"
-        )[:3] == ["recommended", "shortlisted", "pending"]
+        )[:3] == ["recommended", "saved", "pending"]
         page.drag_and_drop(
             '[data-review-group-tab="pending"]',
             '[data-review-group-tab="recommended"]',
         )
         assert group_tabs.evaluate_all(
             "tabs => tabs.map(tab => tab.dataset.reviewGroupTab)"
-        )[:3] == ["pending", "recommended", "shortlisted"]
+        )[:3] == ["pending", "recommended", "saved"]
 
         page.select_option("#review-company-size", "1000")
         assert page.locator("#recommended .job-card:not([hidden])").count() == 2
 
         status_form = page.locator('#recommended [data-job-action="status"]').first
-        status_form.locator('select[name="status"]').select_option("shortlisted")
+        status_form.locator('select[name="status"]').select_option("saved")
         status_form.locator('button[type="submit"]').click()
         status_card = status_form.locator("xpath=ancestor::article[1]")
-        assert "shortlisted" in status_card.locator("[data-user-status]").inner_text()
+        assert "saved" in status_card.locator("[data-user-status]").inner_text()
 
         page.select_option("#review-company-size", "0")
         page.locator('[data-review-group-tab="excluded"]').click()
@@ -196,6 +249,25 @@ def test_mock_review_and_ats_controls_update_the_visible_workspace() -> None:
             "Senior Backend Engineer\nWaiting",
             "Python Developer\nWaiting",
         ]
+
+        browser.close()
+
+
+def test_mock_job_lifecycle_details_expand_on_click() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+
+    with playwright.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(MOCK_PAGE.as_uri())
+        page.evaluate("document.querySelector('#review-preview').hidden = false")
+        page.locator('[data-review-group-tab="applied"]').click()
+
+        history = page.locator("#applied [data-lifecycle-history]")
+        assert history.get_attribute("open") is None
+        history.locator("summary").click()
+        assert history.get_attribute("open") == ""
+        assert history.locator("[data-lifecycle-event]").count() == 2
 
         browser.close()
 

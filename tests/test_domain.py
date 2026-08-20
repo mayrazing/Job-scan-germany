@@ -187,9 +187,13 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
     dumped_occurrence = dumped["jobs"][0]["source_occurrences"][0]
 
     assert set(dumped) == set(Snapshot.model_fields)
-    assert set(dumped["meta"]) == set(StoreMeta.model_fields)
+    assert set(dumped["meta"]) == set(StoreMeta.model_fields) - {
+        "global_job_deletions"
+    }
     assert set(dumped["jobs"][0]) == set(JobRecord.model_fields) - {
-        "global_status_deleted_at"
+        "global_status_deleted_at",
+        "resume_matches",
+        "user_status_history",
     }
     assert set(dumped_occurrence) == set(SourceOccurrence.model_fields)
     assert "source_job_key" not in dumped_occurrence
@@ -294,18 +298,24 @@ def test_domain_enums_accept_only_contract_values() -> None:
     }
     assert {item.value for item in UserStatus} == {
         "new",
-        "shortlisted",
+        "saved",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     }
     assert {item.value for item in AvailabilityStatus} == {"active", "stale", "closed"}
     assert {item.value for item in PrimaryView} == {
         "recommended",
-        "shortlisted",
+        "saved",
         "pending",
         "excluded",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     }
@@ -427,13 +437,14 @@ def test_job_record_applies_independent_status_defaults() -> None:
     assert item.user_status is UserStatus.NEW
 
 
-def test_job_record_migrates_legacy_reviewed_status_to_shortlisted() -> None:
+@pytest.mark.parametrize("legacy_status", ["reviewed", "shortlisted"])
+def test_job_record_migrates_legacy_saved_statuses(legacy_status: str) -> None:
     legacy = job("canonical-1").model_dump(mode="json")
-    legacy["user_status"] = "reviewed"
+    legacy["user_status"] = legacy_status
 
     item = JobRecord.model_validate(legacy)
 
-    assert item.user_status is UserStatus.SHORTLISTED
+    assert item.user_status is UserStatus.SAVED
 
 
 def test_snapshot_rejects_duplicate_canonical_keys() -> None:

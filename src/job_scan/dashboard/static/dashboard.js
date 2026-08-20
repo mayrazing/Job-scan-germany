@@ -286,17 +286,26 @@
     try {
       const saved = JSON.parse(window.localStorage.getItem(storageKey));
       if (!Array.isArray(saved)) return availableIds;
+      const normalized = saved.map((id) => id === "shortlisted" ? "saved" : id);
       const available = new Set(availableIds);
-      const restored = saved.filter(
+      const restored = normalized.filter(
         (id, index) =>
           typeof id === "string" &&
           available.has(id) &&
-          saved.indexOf(id) === index,
+          normalized.indexOf(id) === index,
       );
-      return [
+      const order = [
         ...restored,
         ...availableIds.filter((id) => !restored.includes(id)),
       ];
+      if (saved.includes("shortlisted")) {
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify(order));
+        } catch (_error) {
+          // Keep the migrated in-memory order when browser storage cannot be written.
+        }
+      }
+      return order;
     } catch (_error) {
       return availableIds;
     }
@@ -663,7 +672,7 @@
       || !liveGroups
       || !refreshedGroups
     ) {
-      throw new Error("Could not refresh this resume's Global jobs.");
+      throw new Error("Could not refresh this resume's tracked jobs.");
     }
 
     const selectedForAts = new Set(
@@ -794,7 +803,7 @@
         if (typeof imported?.resume_id === "string") {
           const destination = new URL(window.location.href);
           destination.searchParams.set("resume_id", imported.resume_id);
-          destination.hash = "review";
+          destination.hash = "job-tracker";
           window.location.assign(destination.toString());
         } else {
           window.location.reload();
@@ -807,7 +816,7 @@
         opener.disabled = false;
         closeButton?.removeAttribute("disabled");
         submitButton.disabled = false;
-        submitButton.textContent = "Import to Shortlisted";
+        submitButton.textContent = "Import to Saved";
       }
     });
   };
@@ -893,7 +902,7 @@
   document.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-global-job-delete]");
     if (!button) return;
-    if (!window.confirm("Delete this job from Global job status?")) return;
+    if (!window.confirm("Permanently delete this job and its Job Tracker history?")) return;
     const card = button.closest("[data-job-key]");
     const rawJobKey = card.dataset.jobKey;
     const jobKey = encodeURIComponent(rawJobKey);
@@ -906,7 +915,7 @@
       if (!response.ok) {
         throw new Error(await responseError(
           response,
-          "Could not delete this job from Global job status.",
+          "Could not delete this job from Job Tracker.",
         ));
       }
       await refreshReviewJob(rawJobKey);

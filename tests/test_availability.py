@@ -436,7 +436,7 @@ def test_primary_switches_from_closed_to_active_and_invalidates_old_review() -> 
     }
     old_hash = job.content_hash
     job.machine_status = MachineStatus.ELIGIBLE
-    job.user_status = UserStatus.SHORTLISTED
+    job.user_status = UserStatus.SAVED
     job.ai_review = review(old_job_key)
     job.score = 88
 
@@ -470,7 +470,7 @@ def test_primary_switches_from_closed_to_active_and_invalidates_old_review() -> 
     assert job.machine_status is MachineStatus.PENDING
     assert job.ai_review is None
     assert job.score is None
-    assert job.user_status is UserStatus.SHORTLISTED
+    assert job.user_status is UserStatus.SAVED
     assert job.canonical_job_key == old_job_key
     assert {
         occurrence.source_occurrence_key for occurrence in job.source_occurrences
@@ -537,7 +537,7 @@ def test_noop_availability_refresh_preserves_review_when_primary_is_unchanged() 
     job_key = previous.jobs[0].canonical_job_key
     old_hash = previous.jobs[0].content_hash
     previous.jobs[0].machine_status = MachineStatus.ELIGIBLE
-    previous.jobs[0].user_status = UserStatus.SHORTLISTED
+    previous.jobs[0].user_status = UserStatus.SAVED
     previous.jobs[0].ai_review = review(job_key)
     previous.jobs[0].score = 88
 
@@ -560,7 +560,7 @@ def test_noop_availability_refresh_preserves_review_when_primary_is_unchanged() 
     assert job.machine_status is MachineStatus.ELIGIBLE
     assert job.ai_review == review(job_key)
     assert job.score == 88
-    assert job.user_status is UserStatus.SHORTLISTED
+    assert job.user_status is UserStatus.SAVED
 
 
 def test_complete_reappearance_returns_stale_occurrence_and_canonical_to_active() -> None:
@@ -568,7 +568,7 @@ def test_complete_reappearance_returns_stale_occurrence_and_canonical_to_active(
     previous = snapshot_with(item)
     job_key = previous.jobs[0].canonical_job_key
     previous.jobs[0].machine_status = MachineStatus.ELIGIBLE
-    previous.jobs[0].user_status = UserStatus.SHORTLISTED
+    previous.jobs[0].user_status = UserStatus.SAVED
     previous.jobs[0].manual_override = "show"
     previous.jobs[0].manual_override_content_hash = item.content_hash
     previous.jobs[0].manual_override_profile_hash = "profile"
@@ -603,7 +603,7 @@ def test_complete_reappearance_returns_stale_occurrence_and_canonical_to_active(
     assert active.jobs[0].manual_override is None
     assert active.jobs[0].manual_override_content_hash is None
     assert active.jobs[0].manual_override_profile_hash is None
-    assert active.jobs[0].user_status is UserStatus.SHORTLISTED
+    assert active.jobs[0].user_status is UserStatus.SAVED
 
 
 def test_partial_discovery_keeps_stale_availability_and_review() -> None:

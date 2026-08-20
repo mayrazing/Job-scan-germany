@@ -449,15 +449,15 @@ class PartialFakeClaude:
         if not self._concurrent_update_done:
             self._concurrent_update_done = True
 
-            def shortlist(latest: Snapshot) -> Snapshot:
+            def save_job(latest: Snapshot) -> Snapshot:
                 current = next(
                     item for item in latest.jobs if item.canonical_job_key == "good"
                 )
-                current.user_status = UserStatus.SHORTLISTED
+                current.user_status = UserStatus.SAVED
                 current.user_status_updated_at = NOW + timedelta(minutes=1)
                 return latest
 
-            self._repo.mutate(shortlist)
+            self._repo.mutate(save_job)
 
         results: list[dict[str, object]] = []
         for item in jobs:

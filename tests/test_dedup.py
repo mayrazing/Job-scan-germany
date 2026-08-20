@@ -1156,7 +1156,7 @@ def test_existing_complete_occurrence_ignores_partial_content_but_records_error(
         "existing",
         [occurrence],
         machine_status=MachineStatus.ELIGIBLE,
-        user_status=UserStatus.SHORTLISTED,
+        user_status=UserStatus.SAVED,
         ai_review=existing_review,
         score=88,
     )
@@ -1298,7 +1298,7 @@ def test_new_membership_invalidates_review_even_when_primary_hash_is_unchanged()
                 "existing",
                 [stored_occurrence(primary)],
                 machine_status=MachineStatus.ELIGIBLE,
-                user_status=UserStatus.SHORTLISTED,
+                user_status=UserStatus.SAVED,
                 manual_override="show",
                 manual_override_content_hash=primary.content_hash,
                 manual_override_profile_hash="profile",
@@ -1325,7 +1325,7 @@ def test_new_membership_invalidates_review_even_when_primary_hash_is_unchanged()
     assert job.manual_override is None
     assert job.manual_override_content_hash is None
     assert job.manual_override_profile_hash is None
-    assert job.user_status is UserStatus.SHORTLISTED
+    assert job.user_status is UserStatus.SAVED
     assert job.user_status_updated_at == EARLIER
 
 
@@ -1795,7 +1795,7 @@ def test_first_complete_detail_updates_partial_generation_and_identity_baseline(
                 [stored],
                 availability_status=previous_availability,
                 machine_status=MachineStatus.PENDING_SOURCE,
-                user_status=UserStatus.SHORTLISTED,
+                user_status=UserStatus.SAVED,
             )
         ],
     )
@@ -1819,7 +1819,7 @@ def test_first_complete_detail_updates_partial_generation_and_identity_baseline(
     assert occurrence.identity_baseline_description == complete.description
     assert occurrence.availability_status is AvailabilityStatus.ACTIVE
     assert job.machine_status is MachineStatus.PENDING
-    assert job.user_status is UserStatus.SHORTLISTED
+    assert job.user_status is UserStatus.SAVED
 
 
 def test_similarity_duplicate_evidence_and_labels_are_removed_after_content_change() -> None:

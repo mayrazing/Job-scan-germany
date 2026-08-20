@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Literal, Self
 from urllib.parse import urlsplit
@@ -45,10 +45,34 @@ class MachineStatus(StrEnum):
 
 class UserStatus(StrEnum):
     NEW = "new"
-    SHORTLISTED = "shortlisted"
+    SAVED = "saved"
     APPLIED = "applied"
+    INTERVIEWING = "interviewing"
+    OFFER = "offer"
+    WITHDRAWN = "withdrawn"
     REJECTED = "rejected"
     IGNORED = "ignored"
+
+
+class UserStatusHistoryEntry(BaseModel):
+    """Record one confirmed Job Tracker status change."""
+
+    status: UserStatus
+    changed_at: datetime
+
+    @field_validator("status")
+    @classmethod
+    def require_tracker_status(cls, value: UserStatus) -> UserStatus:
+        if value is UserStatus.NEW:
+            raise ValueError("status history cannot contain new")
+        return value
+
+    @field_validator("changed_at")
+    @classmethod
+    def normalize_changed_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("changed_at must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class AvailabilityStatus(StrEnum):
@@ -59,10 +83,13 @@ class AvailabilityStatus(StrEnum):
 
 class PrimaryView(StrEnum):
     RECOMMENDED = "recommended"
-    SHORTLISTED = "shortlisted"
+    SAVED = "saved"
     PENDING = "pending"
     EXCLUDED = "excluded"
     APPLIED = "applied"
+    INTERVIEWING = "interviewing"
+    OFFER = "offer"
+    WITHDRAWN = "withdrawn"
     REJECTED = "rejected"
     IGNORED = "ignored"
 
@@ -398,6 +425,10 @@ class JobRecord(BaseModel):
     machine_status: MachineStatus = MachineStatus.PENDING
     user_status: UserStatus = UserStatus.NEW
     user_status_updated_at: datetime
+    user_status_history: list[UserStatusHistoryEntry] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
     global_status_deleted_at: datetime | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -429,15 +460,34 @@ class JobRecord(BaseModel):
 
     @field_validator("user_status", mode="before")
     @classmethod
-    def migrate_legacy_reviewed_status(cls, value: object) -> object:
-        """Keep old reviewed jobs visible after the status model is simplified."""
-        return UserStatus.SHORTLISTED if value == "reviewed" else value
+    def migrate_legacy_saved_statuses(cls, value: object) -> object:
+        """Keep old reviewed and shortlisted jobs visible as saved jobs."""
+        return UserStatus.SAVED if value in {"reviewed", "shortlisted"} else value
+
+
+class GlobalJobDeletion(BaseModel):
+    """Keep only job identifiers needed to suppress passive re-imports."""
+
+    canonical_job_keys: list[str]
+    source_job_keys: list[str]
+    deleted_at: datetime
+
+    @field_validator("deleted_at")
+    @classmethod
+    def normalize_deleted_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("deleted_at must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class StoreMeta(BaseModel):
     record_type: Literal["meta"] = "meta"
     data_revision: int
     generated_at: datetime | None = None
+    global_job_deletions: list[GlobalJobDeletion] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
 
 
 class Snapshot(BaseModel):

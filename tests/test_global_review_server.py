@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from pydantic import HttpUrl
@@ -215,7 +216,22 @@ def _open_session(client: TestClient) -> None:
     assert client.get("/").status_code == 200
 
 
-def test_status_change_is_global_and_new_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "selected_status",
+    [
+        "saved",
+        "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
+        "rejected",
+        "ignored",
+    ],
+)
+def test_every_status_change_is_global_and_new_is_rejected(
+    tmp_path: Path,
+    selected_status: str,
+) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     repository = _repository(paths, _job("current", external_id="shared"))
     global_jobs = GlobalJobStore(paths)
@@ -230,7 +246,7 @@ def test_status_change_is_global_and_new_is_rejected(tmp_path: Path) -> None:
         _open_session(client)
         saved = client.post(
             "/api/jobs/current/status",
-            json={"status": "shortlisted"},
+            json={"status": selected_status},
             headers=HEADERS,
         )
         reset = client.post(
@@ -242,7 +258,7 @@ def test_status_change_is_global_and_new_is_rejected(tmp_path: Path) -> None:
     assert saved.status_code == 204
     assert reset.status_code == 422
     assert repository.load().jobs[0].user_status is UserStatus.NEW
-    assert global_jobs.find("current").user_status is UserStatus.SHORTLISTED
+    assert global_jobs.find("current").user_status is UserStatus(selected_status)
 
 
 def test_history_status_appears_in_global_block_of_another_history(tmp_path: Path) -> None:
@@ -348,7 +364,7 @@ def test_same_global_job_shows_each_history_resumes_own_match(tmp_path: Path) ->
         _open_session(client)
         assert client.post(
             "/api/scan-history/run-a/jobs/a/status",
-            json={"status": "shortlisted"},
+            json={"status": "saved"},
             headers=HEADERS,
         ).status_code == 204
         assert client.post(
@@ -438,7 +454,7 @@ def test_same_resume_keeps_old_and_new_profile_hash_migrations(tmp_path: Path) -
     new_profile_job = _job("new-profile", external_id="new-profile")
     new_profile_job.last_successful_review_profile_hash = new_profile_hash
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(old_profile_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(old_profile_job, UserStatus.SAVED, NOW)
     global_jobs.set_status(new_profile_job, UserStatus.APPLIED, NOW)
     history = SearchHistoryStore(paths)
     history_config = current_config.model_copy(
@@ -477,7 +493,7 @@ def test_ats_uses_uploaded_resume_with_current_and_global_jobs(tmp_path: Path) -
     repository = _repository(paths, current)
     _save_config(paths)
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -516,7 +532,7 @@ def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
     history = SearchHistoryStore(paths)
     _archive(history, tmp_path, "run-a", _snapshot(global_job), b"DEFAULT RESUME")
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -569,7 +585,7 @@ def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path)
         config_bytes=serialize_config(history_config).encode("utf-8"),
     )
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -742,7 +758,7 @@ def test_ats_uses_global_ai_selection_instead_of_history_ai(tmp_path: Path) -> N
         config_bytes=serialize_config(history_config).encode("utf-8"),
     )
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -797,7 +813,7 @@ def test_manual_job_import_rejects_non_public_url(tmp_path: Path) -> None:
     }
 
 
-def test_manual_job_import_persists_card_as_shortlisted(tmp_path: Path) -> None:
+def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     imported = _job("manual", external_id="manual")
     imported.url = HttpUrl("https://careers.example/jobs/manual")
@@ -842,7 +858,7 @@ def test_manual_job_import_persists_card_as_shortlisted(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 201
-    assert response.json() == {"job_key": "manual", "status": "shortlisted"}
+    assert response.json() == {"job_key": "manual", "status": "saved"}
     assert len(import_inputs) == 1
     url, config, profile, imported_at = import_inputs[0]
     assert url == "https://careers.example/jobs/manual"
@@ -854,7 +870,7 @@ def test_manual_job_import_persists_card_as_shortlisted(tmp_path: Path) -> None:
     assert imported_at.tzinfo is not None
     saved = global_jobs.find("manual")
     assert saved is not None
-    assert saved.user_status is UserStatus.SHORTLISTED
+    assert saved.user_status is UserStatus.SAVED
 
 
 def test_manual_job_import_uses_selected_resume_profile_and_config(
@@ -991,7 +1007,7 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
     assert response.status_code == 201
     assert response.json() == {
         "job_key": "manual",
-        "status": "shortlisted",
+        "status": "saved",
         "resume_id": resume_id,
     }
     assert len(prepared_inputs) == 1
@@ -1038,7 +1054,7 @@ def test_manual_job_import_rejects_missing_selected_history(tmp_path: Path) -> N
     }
 
 
-def test_manual_job_import_persists_company_size_before_shortlisting(
+def test_manual_job_import_persists_company_size_before_saving(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -1075,7 +1091,7 @@ def test_manual_job_import_persists_company_size_before_shortlisting(
     assert saved.company_size.source_title == "Acme company facts"
 
 
-def test_manual_job_import_stays_shortlisted_when_company_size_is_unknown(
+def test_manual_job_import_stays_saved_when_company_size_is_unknown(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -1106,7 +1122,7 @@ def test_manual_job_import_stays_shortlisted_when_company_size_is_unknown(
     assert response.status_code == 201
     saved = global_jobs.find("manual")
     assert saved is not None
-    assert saved.user_status is UserStatus.SHORTLISTED
+    assert saved.user_status is UserStatus.SAVED
     assert saved.company_size is not None
     assert saved.company_size.band.value == "unknown"
 
@@ -1116,7 +1132,7 @@ def test_global_company_size_search_updates_the_global_job(tmp_path: Path) -> No
     global_jobs = GlobalJobStore(paths)
     global_jobs.upsert_with_default_status(
         _job("manual", external_id="manual"),
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW,
     )
     _save_config(paths)
@@ -1152,7 +1168,7 @@ def test_global_company_size_search_reports_lookup_failure(tmp_path: Path) -> No
     global_jobs = GlobalJobStore(paths)
     global_jobs.upsert_with_default_status(
         _job("manual", external_id="manual"),
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW,
     )
     _save_config(paths)
@@ -1180,7 +1196,7 @@ def test_global_company_size_search_reports_lookup_failure(tmp_path: Path) -> No
     }
     saved = global_jobs.find("manual")
     assert saved is not None
-    assert saved.user_status is UserStatus.SHORTLISTED
+    assert saved.user_status is UserStatus.SAVED
 
 
 def test_delete_global_job_does_not_delete_the_current_search(tmp_path: Path) -> None:
@@ -1188,7 +1204,7 @@ def test_delete_global_job_does_not_delete_the_current_search(tmp_path: Path) ->
     current = _job("manual", external_id="manual")
     repository = _repository(paths, current)
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(current, UserStatus.SHORTLISTED, NOW)
+    global_jobs.set_status(current, UserStatus.SAVED, NOW)
     before = repository.load()
     app = create_review_app(
         repository,

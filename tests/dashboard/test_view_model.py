@@ -78,9 +78,12 @@ def test_build_dashboard_uses_primary_view_for_every_machine_user_combination() 
     assert list(dashboard.active_groups) == [
         PrimaryView.RECOMMENDED,
         PrimaryView.PENDING,
-        PrimaryView.SHORTLISTED,
+        PrimaryView.SAVED,
         PrimaryView.EXCLUDED,
         PrimaryView.APPLIED,
+        PrimaryView.INTERVIEWING,
+        PrimaryView.OFFER,
+        PrimaryView.WITHDRAWN,
         PrimaryView.REJECTED,
         PrimaryView.IGNORED,
     ]
@@ -108,7 +111,7 @@ def test_dashboard_hides_non_active_jobs_except_applied() -> None:
         "stale",
         availability=AvailabilityStatus.STALE,
         machine=MachineStatus.EXCLUDED,
-        user=UserStatus.SHORTLISTED,
+        user=UserStatus.SAVED,
         override="show",
     )
     closed = _job(
@@ -136,10 +139,17 @@ def test_dashboard_hides_non_active_jobs_except_applied() -> None:
     ("view", "machine", "user"),
     [
         (PrimaryView.RECOMMENDED, MachineStatus.ELIGIBLE, UserStatus.NEW),
-        (PrimaryView.SHORTLISTED, MachineStatus.ELIGIBLE, UserStatus.SHORTLISTED),
+        (PrimaryView.SAVED, MachineStatus.ELIGIBLE, UserStatus.SAVED),
         (PrimaryView.PENDING, MachineStatus.PENDING, UserStatus.NEW),
         (PrimaryView.EXCLUDED, MachineStatus.EXCLUDED, UserStatus.NEW),
         (PrimaryView.APPLIED, MachineStatus.ELIGIBLE, UserStatus.APPLIED),
+        (
+            PrimaryView.INTERVIEWING,
+            MachineStatus.ELIGIBLE,
+            UserStatus.INTERVIEWING,
+        ),
+        (PrimaryView.OFFER, MachineStatus.ELIGIBLE, UserStatus.OFFER),
+        (PrimaryView.WITHDRAWN, MachineStatus.ELIGIBLE, UserStatus.WITHDRAWN),
         (PrimaryView.REJECTED, MachineStatus.ELIGIBLE, UserStatus.REJECTED),
         (PrimaryView.IGNORED, MachineStatus.ELIGIBLE, UserStatus.IGNORED),
     ],

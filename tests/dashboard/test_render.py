@@ -106,10 +106,13 @@ def test_render_contains_review_groups_without_availability_history() -> None:
     assert soup.select_one('meta[name="job-scan-revision"][content="42"]') is not None
     for group_id in (
         "recommended",
-        "shortlisted",
+        "saved",
         "pending",
         "excluded",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     ):
@@ -231,8 +234,11 @@ def test_render_exposes_all_user_statuses_and_only_actionable_restore() -> None:
     assert len(soup.find_all("strong", string="User status:")) == 3
     expected_statuses = {
         "",
-        "shortlisted",
+        "saved",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     }
@@ -274,6 +280,8 @@ def test_packaged_dashboard_javascript_uses_review_api_request_contract() -> Non
     assert "return options" in javascript
     assert "response.ok" in javascript
     assert "await refreshReviewJob(rawJobKey)" in javascript
+    assert 'submitButton.textContent = "Import to Saved"' in javascript
+    assert "Import to Shortlisted" not in javascript
 
 
 def test_render_escapes_raw_text_once_and_hardens_external_links() -> None:

@@ -56,6 +56,35 @@
         </div>
       {% endif %}
 
+      {% if job.user_status_history %}
+        <section class="job-lifecycle" data-job-lifecycle aria-label="Job lifecycle">
+          <header class="lifecycle-heading">
+            <strong>Job lifecycle</strong>
+            <span>Current: {{ job.user_status.value | replace('_', ' ') | title }}</span>
+          </header>
+          <ol class="lifecycle-steps" aria-label="Status progress">
+            {% for event in job.user_status_history %}
+              <li data-lifecycle-step data-state="{% if loop.last %}current{% else %}complete{% endif %}"{% if loop.last %} aria-current="step"{% endif %}>
+                <span class="lifecycle-dot" aria-hidden="true"></span>
+                <strong>{{ event.status.value | replace('_', ' ') | title }}</strong>
+                <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
+              </li>
+            {% endfor %}
+          </ol>
+          <details class="lifecycle-history" data-lifecycle-history>
+            <summary>Lifecycle details</summary>
+            <ol>
+              {% for event in job.user_status_history %}
+                <li data-lifecycle-event>
+                  <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                  <span><strong>{{ event.status.value | replace('_', ' ') | title }}</strong></span>
+                </li>
+              {% endfor %}
+            </ol>
+          </details>
+        </section>
+      {% endif %}
+
       <dl class="facts">
         <div><dt>Sources</dt><dd>{{ job.source_names | join(', ') }}</dd></div>
         {% if company_size_searchable or job.company_size_label %}
@@ -139,7 +168,7 @@
             <span>Set user status</span>
             <select name="status">
               {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
-              {% for status in ('shortlisted', 'applied', 'rejected', 'ignored') %}
+              {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
                 <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
               {% endfor %}
             </select>
@@ -151,7 +180,7 @@
             class="btn btn-outline-danger"
             type="button"
             data-global-job-delete
-            aria-label="Delete {{ job.title }} at {{ job.company }} from Global job status"
+            aria-label="Delete {{ job.title }} at {{ job.company }} from Job Tracker"
           >Delete</button>
         {% endif %}
         {% if job.machine_status.value == 'excluded' and not job.restored and job.restorable %}
@@ -195,7 +224,7 @@
   {% endfor %}
 {%- endmacro %}
 
-{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none) -%}
+{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none, review_hash='review') -%}
   <section class="global-resume-section" aria-labelledby="global-resume-title">
     <div class="global-resume-heading">
       <h4 id="global-resume-title">Resumes</h4>
@@ -203,9 +232,9 @@
     </div>
     <select class="global-resume-select" data-global-resume-select aria-label="Select resume"{% if not resumes %} disabled{% endif %}>
       {% for resume in resumes %}
-        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#review"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
+        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
       {% else %}
-        <option selected>No resumes associated with Global jobs yet.</option>
+        <option selected>No resumes associated with tracked jobs yet.</option>
       {% endfor %}
     </select>
   </section>
@@ -232,7 +261,7 @@
       <p class="manual-job-error" data-manual-job-error role="alert" hidden></p>
       <div class="manual-job-actions">
         <button type="button" data-close-manual-job>Cancel</button>
-        <button type="submit" data-submit-manual-job>Import to Shortlisted</button>
+        <button type="submit" data-submit-manual-job>Import to Saved</button>
       </div>
     </form>
   </dialog>

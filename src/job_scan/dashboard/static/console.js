@@ -4,6 +4,8 @@
   const setupView = document.querySelector("#setup");
   const runView = document.querySelector("#run-view");
   const reviewView = document.querySelector("#review-view");
+  const jobTrackerView = document.querySelector("#job-tracker-view");
+  const reviewActions = document.querySelector("#review-actions");
   const atsRunningView = document.querySelector("#ats-running");
   const atsView = document.querySelector("#ats-check");
   const atsTaskList = document.querySelector("[data-ats-task-list]");
@@ -490,6 +492,8 @@
     setupView.hidden = selected !== "setup";
     runView.hidden = selected !== "run";
     reviewView.hidden = selected !== "review";
+    jobTrackerView.hidden = selected !== "job-tracker";
+    reviewActions.hidden = !["review", "job-tracker"].includes(selected);
     atsRunningView.hidden = selected !== "ats-run";
     atsView.hidden = selected !== "ats";
     document.querySelectorAll("[data-nav-step]").forEach((link) => {
@@ -1086,11 +1090,14 @@
 
   initializeSearchSelects();
   initializeTooltips();
-  reviewView.addEventListener("change", (event) => {
-    if (event.target.matches("[data-ats-select-job]")) syncAtsSelection();
+  [reviewView, jobTrackerView].forEach((view) => {
+    view.addEventListener("change", (event) => {
+      if (event.target.matches("[data-ats-select-job]")) syncAtsSelection();
+    });
   });
   document.addEventListener("job-scan:review-updated", () => {
     initializeTooltips(reviewView);
+    initializeTooltips(jobTrackerView);
     syncAtsSelection();
   });
   atsResumeInput?.addEventListener("change", syncAtsSelection);
@@ -1403,6 +1410,21 @@
     headerStatus.textContent = "Reviewing";
   };
 
+  const openJobTracker = () => {
+    if (reviewNeedsRefresh) {
+      if (window.location.search) {
+        window.location.assign("/setup#job-tracker");
+      } else {
+        window.history.replaceState(null, "", "#job-tracker");
+        window.location.reload();
+      }
+      return;
+    }
+    window.history.replaceState(null, "", "#job-tracker");
+    setView("job-tracker");
+    headerStatus.textContent = "Job tracker";
+  };
+
   const openAtsResults = () => {
     window.history.replaceState(null, "", "#ats-check");
     setView("ats");
@@ -1470,6 +1492,8 @@
         window.history.replaceState(null, "", "#run");
       } else if (requested === "review") {
         openReview();
+      } else if (requested === "job-tracker") {
+        openJobTracker();
       } else if (requested === "ats-run") {
         openAtsRun();
         if (activeAtsRunId === null) loadCurrentAts();
@@ -1488,15 +1512,21 @@
   const reviewHashes = new Set([
     "#review",
     "#recommended",
-    "#shortlisted",
     "#pending",
     "#excluded",
-    "#applied",
-    "#rejected",
-    "#ignored",
     "#history",
     "#history-stale",
     "#history-closed",
+  ]);
+  const jobTrackerHashes = new Set([
+    "#job-tracker",
+    "#saved",
+    "#applied",
+    "#interviewing",
+    "#offer",
+    "#withdrawn",
+    "#rejected",
+    "#ignored",
   ]);
   const applyHashView = () => {
     if (window.location.hash === "#run") {
@@ -1520,6 +1550,11 @@
     if (reviewHashes.has(window.location.hash)) {
       setView("review");
       headerStatus.textContent = "Reviewing";
+      return;
+    }
+    if (jobTrackerHashes.has(window.location.hash)) {
+      setView("job-tracker");
+      headerStatus.textContent = "Job tracker";
     }
   };
   window.addEventListener("hashchange", applyHashView);

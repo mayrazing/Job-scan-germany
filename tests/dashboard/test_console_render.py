@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.resources
 from datetime import UTC, date, datetime
 
 from bs4 import BeautifulSoup
@@ -236,7 +237,7 @@ def test_console_renders_setup_run_and_real_review_link() -> None:
     assert page.select_one("#review-preview") is None
 
 
-def test_console_renders_ats_run_and_results_as_separate_workflow_steps() -> None:
+def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None:
     snapshot = review_snapshot(
         review_job("recommended", MachineStatus.ELIGIBLE),
         review_job("pending", MachineStatus.PENDING),
@@ -252,11 +253,25 @@ def test_console_renders_ats_run_and_results_as_separate_workflow_steps() -> Non
         "setup",
         "run",
         "review",
+        "job-tracker",
         "ats-run",
         "ats",
     ]
+    job_tracker_link = page.select_one(
+        '[data-nav-step="job-tracker"][href="#job-tracker"]'
+    )
+    assert job_tracker_link is not None
+    assert job_tracker_link.get_text(" ", strip=True) == "Job Tracker 4"
     assert page.select_one('[data-nav-step="ats-run"][href="#ats-run"]') is not None
     assert page.select_one('[data-nav-step="ats"][href="#ats-check"]') is not None
+    review_view = page.select_one("#review-view[hidden]")
+    job_tracker_view = page.select_one("#job-tracker-view[hidden]")
+    assert review_view is not None
+    assert job_tracker_view is not None
+    assert review_view.select_one('[data-review-block="current"]') is not None
+    assert review_view.select_one('[data-review-block="global"]') is None
+    assert job_tracker_view.select_one('[data-review-block="global"]') is not None
+    assert job_tracker_view.select_one("h2").get_text(strip=True) == "Job Tracker"
     assert page.select_one("#ats-running[hidden]") is not None
     assert page.select_one("#ats-check[hidden]") is not None
     assert "No ATS check is running" in page.select_one("#ats-running").get_text(
@@ -267,10 +282,11 @@ def test_console_renders_ats_run_and_results_as_separate_workflow_steps() -> Non
     assert start.get_text(" ", strip=True) == "Check 0 selected jobs"
     assert page.select_one('#recommended [data-ats-select-job][value="recommended"]')
     assert page.select_one('#pending [data-ats-select-job][value="pending"]')
-    assert "Step 1 of 5" in page.select_one("#setup").get_text(" ", strip=True)
-    assert "Step 3 of 5" in page.select_one("#review-view").get_text(" ", strip=True)
-    assert "Step 4 of 5" in page.select_one("#ats-running").get_text(" ", strip=True)
-    assert "Step 5 of 5" in page.select_one("#ats-check").get_text(" ", strip=True)
+    assert "Step 1 of 6" in page.select_one("#setup").get_text(" ", strip=True)
+    assert "Step 3 of 6" in review_view.get_text(" ", strip=True)
+    assert "Step 4 of 6" in job_tracker_view.get_text(" ", strip=True)
+    assert "Step 5 of 6" in page.select_one("#ats-running").get_text(" ", strip=True)
+    assert "Step 6 of 6" in page.select_one("#ats-check").get_text(" ", strip=True)
 
 
 def test_console_uses_top_workflow_navigation_without_a_duplicate_step_rail() -> None:
@@ -294,7 +310,7 @@ def test_console_places_ats_selectors_only_in_cards_without_group_headers() -> N
 
     assert page.select("[data-ats-select-group]") == []
     assert page.select(".review-groups > details.job-group") == []
-    assert len(page.select(".review-groups > section.job-group")) == 7
+    assert len(page.select(".review-groups > section.job-group")) == 10
     assert page.select(".review-groups > .job-group > summary") == []
     assert page.select_one('#recommended .card-header [data-ats-select-job][value="recommended"]')
     assert page.select_one('#pending .card-header [data-ats-select-job][value="pending"]')
@@ -553,18 +569,29 @@ def test_console_summary_has_empty_targets_for_real_scan_counts() -> None:
 def test_console_embeds_the_real_review_queue_structure() -> None:
     page = BeautifulSoup(render_console(), "html.parser")
     review = page.select_one("#review-view")
+    job_tracker = page.select_one("#job-tracker-view")
 
     assert review is not None
+    assert job_tracker is not None
     for group_id in (
         "recommended",
-        "shortlisted",
         "pending",
         "excluded",
+    ):
+        group = review.select_one(f"section#{group_id}.job-group")
+        assert group is not None
+        assert group.select_one(":scope > summary") is None
+        assert group.select_one(":scope > .card-grid") is not None
+    for group_id in (
+        "saved",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
     ):
-        group = review.select_one(f"section#{group_id}.job-group")
+        group = job_tracker.select_one(f"section#{group_id}.job-group")
         assert group is not None
         assert group.select_one(":scope > summary") is None
         assert group.select_one(":scope > .card-grid") is not None
@@ -587,6 +614,26 @@ def test_console_embeds_the_real_review_queue_structure() -> None:
         option.get_text(strip=True)
         for option in company_industry_filter.select("option")
     ] == ["Any industry"]
+
+
+def test_packaged_console_javascript_recognizes_every_review_group_hash() -> None:
+    javascript = (
+        importlib.resources.files("job_scan.dashboard")
+        .joinpath("static", "console.js")
+        .read_text(encoding="utf-8")
+    )
+
+    for group_hash in (
+        "#saved",
+        "#applied",
+        "#interviewing",
+        "#offer",
+        "#withdrawn",
+        "#rejected",
+        "#ignored",
+    ):
+        assert f'"{group_hash}"' in javascript
+    assert '"#shortlisted"' not in javascript
 
 
 def test_console_is_self_contained_for_local_server_use() -> None:

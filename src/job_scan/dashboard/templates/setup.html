@@ -158,8 +158,9 @@
       <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
       <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
       <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
-      <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>4</span></a>
-      <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>5</span></a>
+      <a class="btn btn-outline-secondary" href="#job-tracker" data-nav-step="job-tracker">Job Tracker <span>4</span></a>
+      <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
+      <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
     </nav>
 
     <main>
@@ -168,7 +169,7 @@
           <section id="setup" aria-labelledby="setup-title">
             <header class="section-heading">
               <div>
-                <p class="eyebrow">Step 1 of 5</p>
+                <p class="eyebrow">Step 1 of 6</p>
                 <h2 id="setup-title">What should we look for?</h2>
                 <p>These values map to the current <code>job-scan setup</code> questions.</p>
               </div>
@@ -411,7 +412,7 @@
           <section id="run-view" aria-labelledby="run-title" hidden>
             <header class="section-heading">
               <div>
-                <p class="eyebrow">Step 2 of 5</p>
+                <p class="eyebrow">Step 2 of 6</p>
                 <h2 id="run-title">Scanning for matching jobs</h2>
                 <p id="run-message" aria-live="polite">Preparing your factual profile...</p>
               </div>
@@ -443,7 +444,7 @@
           <section id="review-view" aria-labelledby="review-title" hidden>
             <header class="section-heading">
               <div>
-                <p class="eyebrow">Step 3 of 5</p>
+                <p class="eyebrow">Step 3 of 6</p>
                 <h2 id="review-title">Review queue</h2>
                 <p>Review current jobs without leaving this workflow.</p>
               </div>
@@ -543,38 +544,52 @@
                   <div class="review-groups">{{ groups(current_dashboard, true, true, 'current') }}</div>
                 </div>
               </section>
+            </div>
+          </section>
+
+          <section id="job-tracker-view" aria-labelledby="job-tracker-title" hidden>
+            <header class="section-heading">
+              <div>
+                <p class="eyebrow">Step 4 of 6</p>
+                <h2 id="job-tracker-title">Job Tracker</h2>
+                <p>Track jobs across all searches in one place.</p>
+              </div>
+              <span class="fixed-scope ready-badge">Data revision {{ revision }}</span>
+            </header>
+            <div class="embedded-review">
               <section class="review-block" data-review-block="global">
                 <header class="review-block-heading review-block-heading-actions">
                   <div>
                     <p class="eyebrow">All searches</p>
-                    <h3>Global job status</h3>
+                    <h3>Tracked jobs</h3>
                   </div>
                   {{ manual_job_import() }}
                 </header>
-                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id) }}
+                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker') }}
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
-                  {{ navigation(global_dashboard, 'Global job status groups') }}
+                  {{ navigation(global_dashboard, 'Job Tracker groups') }}
                   <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>
                 </div>
               </section>
             </div>
-            <footer class="form-footer">
-              <div class="review-ats-controls">
-                <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
-                <label class="ats-resume-picker" for="ats-resume">
-                  <span class="field-label">ATS resume</span>
-                  <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
-                  <small>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
-                </label>
-                <button class="btn btn-primary primary-button" type="button" data-open-ats data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
-              </div>
-            </footer>
           </section>
+
+          <footer class="form-footer" id="review-actions" hidden>
+            <div class="review-ats-controls">
+              <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
+              <label class="ats-resume-picker" for="ats-resume">
+                <span class="field-label">ATS resume</span>
+                <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
+                <small>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
+              </label>
+              <button class="btn btn-primary primary-button" type="button" data-open-ats data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
+            </div>
+          </footer>
 
           <section id="ats-running" aria-labelledby="ats-running-title" hidden>
             <header class="section-heading">
               <div>
-                <p class="eyebrow">Step 4 of 5</p>
+                <p class="eyebrow">Step 5 of 6</p>
                 <h2 id="ats-running-title">ATS run</h2>
                 <p>Follow the current ATS check from Review to completion.</p>
               </div>
@@ -609,7 +624,7 @@
           <section id="ats-check" aria-labelledby="ats-title" hidden>
             <header class="section-heading">
               <div>
-                <p class="eyebrow">Step 5 of 5</p>
+                <p class="eyebrow">Step 6 of 6</p>
                 <h2 id="ats-title">ATS check</h2>
                 <p>Check resume readability once, then compare the resume with each selected job.</p>
               </div>

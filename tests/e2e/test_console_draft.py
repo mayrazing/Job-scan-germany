@@ -361,11 +361,11 @@ GLOBAL_STATUS_SNAPSHOT = Snapshot(
     meta=StoreMeta(data_revision=44),
     jobs=[
         source_job(
-            "global-shortlisted",
+            "global-saved",
             (SourceKind.LINKEDIN,),
             score=85,
             german_requirement="none",
-        ).model_copy(update={"user_status": UserStatus.SHORTLISTED})
+        ).model_copy(update={"user_status": UserStatus.SAVED})
     ],
 )
 
@@ -567,6 +567,30 @@ def test_review_ats_controls_share_height_and_edges(setup_page: object) -> None:
             min(item[edge] for item in rectangles), abs=0.1
         )
     assert file_heights["button"] == pytest.approx(file_heights["control"], abs=0.1)
+
+
+def test_job_tracker_tab_shows_global_jobs_outside_review(setup_page: object) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
+
+    job_tracker = setup_page.locator("#job-tracker-view")
+    job_tracker.wait_for(state="visible")
+
+    assert setup_page.locator("#review-view").is_hidden()
+    assert job_tracker.locator('[data-review-block="current"]').count() == 0
+    assert job_tracker.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    ).is_visible()
+    assert setup_page.locator("#review-actions").is_visible()
+    assert setup_page.locator(
+        '[data-nav-step="job-tracker"][aria-current="step"]'
+    ).count() == 1
+    assert setup_page.url == "http://draft.test/setup?global-status=1#job-tracker"
+
+    setup_page.reload()
+    setup_page.wait_for_load_state("networkidle")
+    assert job_tracker.is_visible()
 
 
 def test_arbeitsagentur_switch_defaults_on_and_restores_disabled_draft(
@@ -827,22 +851,19 @@ def test_source_filter_restores_empty_selection_after_reload(setup_page: object)
 def test_review_filters_do_not_hide_global_status_jobs(setup_page: object) -> None:
     setup_page.goto("http://draft.test/setup?global-status=1#review")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.locator('[data-nav-step="review"]').click()
     global_card = setup_page.locator(
-        '[data-review-block="global"] article[data-job-key="global-shortlisted"]'
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
     )
     global_count = setup_page.locator(
-        '[data-review-block="global"] [data-review-group-count="shortlisted"]'
+        '[data-review-block="global"] [data-review-group-count="saved"]'
     )
-
-    assert global_card.is_visible()
-    assert global_count.text_content() == "1"
 
     setup_page.evaluate("document.querySelector('#source-filter').tomselect.clear()")
 
     assert setup_page.locator(
         '[data-review-block="current"] .review-groups [data-sources]:visible'
     ).count() == 0
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     assert global_card.is_visible()
     assert global_count.text_content() == "1"
 
@@ -1094,43 +1115,48 @@ def test_global_company_size_search_uses_the_global_job_endpoint(
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     setup_page.route("**/company-size", return_company_size)
-    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.locator('[data-nav-step="review"]').click()
     global_card = setup_page.locator(
-        '[data-review-block="global"] article[data-job-key="global-shortlisted"]'
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
     )
 
     global_card.locator("[data-company-size-search]").click()
     setup_page.wait_for_load_state("networkidle")
 
     assert requested == [
-        "http://draft.test/api/global-jobs/global-shortlisted/company-size"
+        "http://draft.test/api/global-jobs/global-saved/company-size"
     ]
 
 
 def test_global_job_delete_confirms_and_uses_the_global_endpoint(
     setup_page: object,
 ) -> None:
+    confirmation_messages: list[str] = []
     setup_page.route(
-        "**/api/global-jobs/global-shortlisted",
+        "**/api/global-jobs/global-saved",
         lambda route: route.fulfill(status=204, body=""),
     )
-    setup_page.on("dialog", lambda dialog: dialog.accept())
-    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.on(
+        "dialog",
+        lambda dialog: (confirmation_messages.append(dialog.message), dialog.accept()),
+    )
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.locator('[data-nav-step="review"]').click()
     delete_button = setup_page.locator(
         '[data-review-block="global"] '
-        'article[data-job-key="global-shortlisted"] [data-global-job-delete]'
+        'article[data-job-key="global-saved"] [data-global-job-delete]'
     )
 
     with setup_page.expect_request(
-        "**/api/global-jobs/global-shortlisted"
+        "**/api/global-jobs/global-saved"
     ) as request_info:
         delete_button.click()
 
     assert request_info.value.method == "DELETE"
+    assert confirmation_messages == [
+        "Permanently delete this job and its Job Tracker history?"
+    ]
 
 
 def test_status_change_updates_review_without_page_navigation(
@@ -1140,7 +1166,7 @@ def test_status_change_updates_review_without_page_navigation(
         meta=StoreMeta(data_revision=45),
         jobs=[
             GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
-                update={"user_status": UserStatus.APPLIED}
+                update={"user_status": UserStatus.INTERVIEWING}
             )
         ],
     )
@@ -1149,7 +1175,7 @@ def test_status_change_updates_review_without_page_navigation(
     def respond_after_status_change(route: object) -> None:
         nonlocal status_saved
         request = route.request
-        if request.url.endswith("/api/global-jobs/global-shortlisted/status"):
+        if request.url.endswith("/api/global-jobs/global-saved/status"):
             status_saved = True
             route.fulfill(status=204, body="")
             return
@@ -1175,35 +1201,36 @@ def test_status_change_updates_review_without_page_navigation(
     setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.setValue(['linkedin'])"
     )
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     global_review = setup_page.locator('[data-review-block="global"]')
     status_form = global_review.locator(
-        'article[data-job-key="global-shortlisted"] [data-job-action="status"]'
+        'article[data-job-key="global-saved"] [data-job-action="status"]'
     )
 
-    status_form.locator('select[name="status"]').select_option("applied")
+    status_form.locator('select[name="status"]').select_option("interviewing")
     status_form.locator('button[type="submit"]').click()
 
-    applied_card = global_review.locator(
-        '#applied article[data-job-key="global-shortlisted"]'
+    interviewing_card = global_review.locator(
+        '#interviewing article[data-job-key="global-saved"]'
     )
-    applied_card.wait_for(state="attached")
+    interviewing_card.wait_for(state="attached")
     assert navigations == []
     assert setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.items"
     ) == ["linkedin"]
     assert global_review.locator(
-        '[data-review-group-tab="shortlisted"]'
+        '[data-review-group-tab="saved"]'
     ).get_attribute("aria-current") == "page"
     assert global_review.locator(
-        '[data-review-group-count="shortlisted"]'
+        '[data-review-group-count="saved"]'
     ).text_content() == "0"
     assert global_review.locator(
-        '[data-review-group-count="applied"]'
+        '[data-review-group-count="interviewing"]'
     ).text_content() == "1"
-    global_review.locator('[data-review-group-tab="applied"]').click()
-    applied_card.locator("[data-ats-select-job]").check()
+    global_review.locator('[data-review-group-tab="interviewing"]').click()
+    interviewing_card.locator("[data-ats-select-job]").check()
     assert setup_page.locator("[data-open-ats]").text_content() == (
         "Check 1 selected jobs"
     )
@@ -1281,6 +1308,7 @@ def test_global_resume_selection_updates_only_global_review(
     current_review = setup_page.locator('[data-review-block="current"]')
     global_review = setup_page.locator('[data-review-block="global"]')
     current_review.locator('[data-review-group-tab="excluded"]').click()
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     global_review.locator('[data-review-group-tab="applied"]').click()
     setup_page.locator("body").evaluate(
         "body => { body.dataset.resumeLocalMarker = 'preserved'; }"
@@ -1308,10 +1336,10 @@ def test_global_resume_selection_updates_only_global_review(
         '[data-review-group-tab="applied"]'
     ).get_attribute("aria-current") == "page"
     assert global_review.locator(
-        'article[data-job-key="global-shortlisted"]'
+        'article[data-job-key="global-saved"]'
     ).count() == 0
     assert global_review.locator(
-        '[data-review-group-count="shortlisted"]'
+        '[data-review-group-count="saved"]'
     ).text_content() == "0"
     assert global_review.locator(
         '[data-review-group-count="applied"]'
@@ -1322,6 +1350,8 @@ def test_global_resume_selection_updates_only_global_review(
     assert parse_qs(urlparse(setup_page.url).query)["resume_id"] == [
         second_resume_id
     ]
+    assert urlparse(setup_page.url).fragment == "applied"
+    assert setup_page.locator("#job-tracker-view").is_visible()
 
 
 def test_status_change_preserves_ats_selection_when_card_changes_blocks(
@@ -1332,8 +1362,8 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
         (SourceKind.LINKEDIN,),
         german_requirement="none",
     )
-    shortlisted_job = current_job.model_copy(
-        update={"user_status": UserStatus.SHORTLISTED}
+    saved_job = current_job.model_copy(
+        update={"user_status": UserStatus.SAVED}
     )
     status_saved = False
 
@@ -1345,7 +1375,7 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
             route.fulfill(status=204, body="")
             return
         if request.method == "GET" and "/setup" in request.url:
-            visible_job = shortlisted_job if status_saved else current_job
+            visible_job = saved_job if status_saved else current_job
             route.fulfill(
                 status=200,
                 content_type="text/html",
@@ -1356,7 +1386,7 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
                     ),
                     global_snapshot=Snapshot(
                         meta=StoreMeta(data_revision=51),
-                        jobs=[shortlisted_job] if status_saved else [],
+                        jobs=[saved_job] if status_saved else [],
                     ),
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
@@ -1376,15 +1406,16 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
     )
     current_card.locator("[data-ats-select-job]").check()
     status_form = current_card.locator('[data-job-action="status"]')
-    status_form.locator('select[name="status"]').select_option("shortlisted")
+    status_form.locator('select[name="status"]').select_option("saved")
 
     status_form.locator('button[type="submit"]').click()
 
     global_card = setup_page.locator(
         '[data-review-block="global"] '
-        '#shortlisted article[data-job-key="current-status-local"]'
+        '#saved article[data-job-key="current-status-local"]'
     )
-    global_card.wait_for(state="attached")
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
+    global_card.wait_for(state="visible")
     assert current_card.count() == 0
     assert global_card.locator("[data-ats-select-job]").is_checked()
     assert setup_page.locator("[data-open-ats]").text_content() == (
@@ -1537,7 +1568,7 @@ def test_global_job_delete_updates_review_without_page_navigation(
     def respond_to_delete(route: object) -> None:
         nonlocal job_deleted
         request = route.request
-        if request.url.endswith("/api/global-jobs/global-shortlisted"):
+        if request.url.endswith("/api/global-jobs/global-saved"):
             job_deleted = True
             route.fulfill(status=204, body="")
             return
@@ -1562,37 +1593,36 @@ def test_global_job_delete_updates_review_without_page_navigation(
 
     setup_page.route("**/*", respond_to_delete)
     setup_page.on("dialog", lambda dialog: dialog.accept())
-    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     global_review = setup_page.locator('[data-review-block="global"]')
 
     global_review.locator(
-        'article[data-job-key="global-shortlisted"] [data-global-job-delete]'
+        'article[data-job-key="global-saved"] [data-global-job-delete]'
     ).click()
 
-    card = global_review.locator('article[data-job-key="global-shortlisted"]')
+    card = global_review.locator('article[data-job-key="global-saved"]')
     card.wait_for(state="detached")
     assert navigations == []
     assert global_review.locator(
-        '[data-review-group-count="shortlisted"]'
+        '[data-review-group-count="saved"]'
     ).text_content() == "0"
 
 
 def test_global_job_delete_cancel_keeps_the_card(setup_page: object) -> None:
     requested: list[str] = []
     setup_page.route(
-        "**/api/global-jobs/global-shortlisted",
+        "**/api/global-jobs/global-saved",
         lambda route: requested.append(route.request.url),
     )
     setup_page.on("dialog", lambda dialog: dialog.dismiss())
-    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.locator('[data-nav-step="review"]').click()
     card = setup_page.locator(
         '[data-review-block="global"] '
-        'article[data-job-key="global-shortlisted"]'
+        'article[data-job-key="global-saved"]'
     )
 
     card.locator("[data-global-job-delete]").click()
@@ -1612,11 +1642,11 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
         route.fulfill(
             status=201,
             content_type="application/json",
-            body=json.dumps({"job_key": "manual-42", "status": "shortlisted"}),
+            body=json.dumps({"job_key": "manual-42", "status": "saved"}),
         )
 
     setup_page.route("**/api/global-jobs/import", import_job)
-    setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     resume_id = "sha256:" + "a" * 64
     setup_page.evaluate(
         "resumeId => { document.body.dataset.selectedResumeId = resumeId; }",
@@ -1654,14 +1684,14 @@ def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
             body=json.dumps(
                 {
                     "job_key": "manual-42",
-                    "status": "shortlisted",
+                    "status": "saved",
                     "resume_id": "sha256:" + "b" * 64,
                 }
             ),
         )
 
     setup_page.route("**/api/global-jobs/import-with-resume", import_job)
-    setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     setup_page.locator("[data-open-manual-job]").click()
     dialog = setup_page.locator("#manual-job-dialog")
     dialog.locator("#manual-job-url").fill("https://careers.example/jobs/42")
@@ -1675,12 +1705,15 @@ def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
 
     dialog.locator("[data-submit-manual-job]").click()
     dialog.wait_for(state="hidden")
+    setup_page.wait_for_load_state("networkidle")
 
     assert len(posted) == 1
     assert posted[0][0].startswith("multipart/form-data;")
     assert 'name="url"' in posted[0][1]
     assert "https://careers.example/jobs/42" in posted[0][1]
     assert "backend.pdf" in posted[0][1]
+    assert urlparse(setup_page.url).fragment == "job-tracker"
+    assert setup_page.locator("#job-tracker-view").is_visible()
 
 
 def test_manual_job_dialog_keeps_url_and_shows_import_failure(
@@ -1696,7 +1729,7 @@ def test_manual_job_dialog_keeps_url_and_shows_import_failure(
             ),
         ),
     )
-    setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
     setup_page.locator("[data-open-manual-job]").click()
     dialog = setup_page.locator("#manual-job-dialog")
     url_input = dialog.locator("#manual-job-url")
@@ -1711,7 +1744,7 @@ def test_manual_job_dialog_keeps_url_and_shows_import_failure(
     assert dialog.is_visible()
     assert url_input.input_value() == "https://careers.example/jobs/empty"
     assert submit.is_enabled()
-    assert submit.text_content() == "Import to Shortlisted"
+    assert submit.text_content() == "Import to Saved"
 
 
 def test_setup_draft_restores_regular_fields_after_reload(setup_page: object) -> None:
@@ -2461,23 +2494,26 @@ def test_review_jobs_scroll_without_moving_the_page(setup_page: object) -> None:
 
 def test_review_group_tabs_switch_the_visible_panel(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    tabs = setup_page.locator("[data-review-group-tab]")
-    assert tabs.count() == 7
+    current_review = setup_page.locator('[data-review-block="current"]')
+    tabs = current_review.locator("[data-review-group-tab]")
+    assert tabs.count() == 3
     assert (
-        setup_page.locator(".review-groups > section.job-group:visible").count()
+        current_review.locator(".review-groups > section.job-group:visible").count()
         == 1
     )
-    assert setup_page.locator("#recommended:not([hidden])").count() == 1
+    assert current_review.locator("#recommended:not([hidden])").count() == 1
     assert (
-        setup_page.locator('[data-review-group-tab="recommended"][aria-current="page"]').count()
+        current_review.locator(
+            '[data-review-group-tab="recommended"][aria-current="page"]'
+        ).count()
         == 1
     )
 
-    setup_page.locator('[data-review-group-tab="excluded"]').click()
+    current_review.locator('[data-review-group-tab="excluded"]').click()
 
-    assert setup_page.locator("#recommended").is_hidden()
-    assert setup_page.locator("#excluded").is_visible()
-    assert setup_page.locator(
+    assert current_review.locator("#recommended").is_hidden()
+    assert current_review.locator("#excluded").is_visible()
+    assert current_review.locator(
         '[data-review-group-tab="excluded"][aria-current="page"]'
     ).count() == 1
     assert setup_page.evaluate("window.location.hash") == "#excluded"
@@ -2485,58 +2521,65 @@ def test_review_group_tabs_switch_the_visible_panel(setup_page: object) -> None:
 
 def test_review_group_drag_reorders_navigation_and_panels(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    assert setup_page.locator("[data-review-group-drag-handle]").count() == 7
+    current_review = setup_page.locator('[data-review-block="current"]')
+    assert current_review.locator("[data-review-group-drag-handle]").count() == 3
 
-    target_tab = setup_page.locator('[data-review-group-tab="recommended"]')
+    target_tab = current_review.locator('[data-review-group-tab="recommended"]')
     target_bounds = target_tab.bounding_box()
     assert target_bounds is not None
-    source_tab = setup_page.locator('[data-review-group-tab="pending"]')
+    source_tab = current_review.locator('[data-review-group-tab="pending"]')
     assert source_tab.get_attribute("draggable") == "true"
     source_tab.drag_to(
         target_tab,
         target_position={"x": 12, "y": 1},
     )
 
-    assert setup_page.locator("[data-review-group-tab]").evaluate_all(
+    assert current_review.locator("[data-review-group-tab]").evaluate_all(
         "items => items.map(item => item.dataset.reviewGroupTab)"
     )[:3] == [
         "pending",
         "recommended",
-        "shortlisted",
+        "excluded",
     ]
-    assert setup_page.locator(
+    assert current_review.locator(
         ".review-groups > section.job-group"
     ).evaluate_all("items => items.map(item => item.id)")[:3] == [
         "pending",
         "recommended",
-        "shortlisted",
+        "excluded",
     ]
 
 
 def test_review_group_keyboard_reorders_navigation_and_panels(setup_page: object) -> None:
-    setup_page.locator('[data-nav-step="review"]').click()
-    shortlisted = setup_page.locator('[data-review-group-tab="shortlisted"]')
-    shortlisted.focus()
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
+    global_review = setup_page.locator('[data-review-block="global"]')
+    applied = global_review.locator('[data-review-group-tab="applied"]')
+    applied.focus()
 
     setup_page.keyboard.press("Alt+ArrowUp")
 
-    assert setup_page.locator("[data-review-group-tab]").evaluate_all(
+    assert global_review.locator("[data-review-group-tab]").evaluate_all(
         "items => items.map(item => item.dataset.reviewGroupTab)"
-    )[:3] == ["recommended", "shortlisted", "pending"]
-    assert setup_page.locator(
+    )[:3] == ["applied", "saved", "interviewing"]
+    assert global_review.locator(
         ".review-groups > section.job-group"
     ).evaluate_all("items => items.map(item => item.id)")[:3] == [
-        "recommended",
-        "shortlisted",
-        "pending",
+        "applied",
+        "saved",
+        "interviewing",
     ]
-    assert "position 2 of 7" in setup_page.locator(".review-group-announcement").text_content()
+    assert "position 1 of 7" in global_review.locator(
+        ".review-group-announcement"
+    ).text_content()
 
 
 def test_review_group_touch_drag_reorders_navigation_and_panels(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    source = setup_page.locator('[data-review-group-tab="pending"] [data-review-group-drag-handle]')
-    target = setup_page.locator('[data-review-group-tab="recommended"]')
+    current_review = setup_page.locator('[data-review-block="current"]')
+    source = current_review.locator(
+        '[data-review-group-tab="pending"] [data-review-group-drag-handle]'
+    )
+    target = current_review.locator('[data-review-group-tab="recommended"]')
     source_bounds = source.bounding_box()
     target_bounds = target.bounding_box()
     assert source_bounds is not None
@@ -2574,15 +2617,15 @@ def test_review_group_touch_drag_reorders_navigation_and_panels(setup_page: obje
         }))"""
     )
 
-    assert setup_page.locator("[data-review-group-tab]").evaluate_all(
+    assert current_review.locator("[data-review-group-tab]").evaluate_all(
         "items => items.map(item => item.dataset.reviewGroupTab)"
-    )[:3] == ["pending", "recommended", "shortlisted"]
-    assert setup_page.locator(
+    ) == ["pending", "recommended", "excluded"]
+    assert current_review.locator(
         ".review-groups > section.job-group"
-    ).evaluate_all("items => items.map(item => item.id)")[:3] == [
+    ).evaluate_all("items => items.map(item => item.id)") == [
         "pending",
         "recommended",
-        "shortlisted",
+        "excluded",
     ]
 
 
@@ -2601,28 +2644,32 @@ def test_review_group_selection_shows_the_selected_panel(
 
 def test_review_group_order_restores_after_reload(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    assert setup_page.locator("[data-review-group-drag-handle]").count() == 7
-    setup_page.locator('[data-review-group-tab="pending"]').drag_to(
-        setup_page.locator('[data-review-group-tab="recommended"]'),
+    current_review = setup_page.locator('[data-review-block="current"]')
+    assert current_review.locator("[data-review-group-drag-handle]").count() == 3
+    current_review.locator('[data-review-group-tab="pending"]').drag_to(
+        current_review.locator('[data-review-group-tab="recommended"]'),
         target_position={"x": 12, "y": 1},
     )
 
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
 
-    assert setup_page.locator(".review-groups > section.job-group").evaluate_all(
+    current_review = setup_page.locator('[data-review-block="current"]')
+    assert current_review.locator(
+        ".review-groups > section.job-group"
+    ).evaluate_all(
         "items => items.map(item => item.id)"
-    )[:3] == [
+    ) == [
         "pending",
         "recommended",
-        "shortlisted",
+        "excluded",
     ]
-    assert setup_page.locator("[data-review-group-tab]").evaluate_all(
+    assert current_review.locator("[data-review-group-tab]").evaluate_all(
         "items => items.map(item => item.dataset.reviewGroupTab)"
-    )[:3] == [
+    ) == [
         "pending",
         "recommended",
-        "shortlisted",
+        "excluded",
     ]
 
 
@@ -2637,17 +2684,65 @@ def test_review_group_order_ignores_unknown_and_appends_missing_groups(
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
 
-    assert setup_page.locator(
+    current_review = setup_page.locator('[data-review-block="current"]')
+    assert current_review.locator(
         ".review-groups > section.job-group"
     ).evaluate_all("items => items.map(item => item.id)") == [
         "pending",
         "recommended",
-        "shortlisted",
         "excluded",
+    ]
+
+
+def test_global_review_group_order_migrates_legacy_shortlisted_id(
+    setup_page: object,
+) -> None:
+    setup_page.evaluate(
+        "localStorage.setItem('job-scan.global-review-group-order.v1', "
+        "JSON.stringify(['shortlisted', 'applied', 'rejected', 'ignored']))"
+    )
+
+    setup_page.reload()
+    setup_page.wait_for_load_state("networkidle")
+
+    group_ids = setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab]'
+    ).evaluate_all("items => items.map(item => item.dataset.reviewGroupTab)")
+    stored_order = setup_page.evaluate(
+        "JSON.parse(localStorage.getItem('job-scan.global-review-group-order.v1'))"
+    )
+    assert group_ids[:2] == ["saved", "applied"]
+    assert "shortlisted" not in group_ids
+    assert set(group_ids) == {
+        "saved",
         "applied",
+        "interviewing",
+        "offer",
+        "withdrawn",
         "rejected",
         "ignored",
-    ]
+    }
+    assert stored_order == group_ids
+
+
+def test_legacy_group_order_survives_storage_migration_write_failure(
+    setup_page: object,
+) -> None:
+    setup_page.evaluate(
+        "localStorage.setItem('job-scan.global-review-group-order.v1', "
+        "JSON.stringify(['applied', 'shortlisted']))"
+    )
+    setup_page.add_init_script(
+        "Storage.prototype.setItem = () => { throw new Error('storage disabled'); };"
+    )
+
+    setup_page.reload()
+    setup_page.wait_for_load_state("networkidle")
+
+    group_ids = setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab]'
+    ).evaluate_all("items => items.map(item => item.dataset.reviewGroupTab)")
+    assert group_ids[:2] == ["applied", "saved"]
 
 
 def test_review_group_order_discards_saved_history_entry(setup_page: object) -> None:

@@ -67,16 +67,31 @@ def test_effective_status_only_restores_manually_shown_excluded_jobs(
         ("eligible", "new", "recommended"),
         ("excluded", "new", "excluded"),
         ("uncertain", "new", "pending"),
-        ("pending_source", "shortlisted", "pending"),
-        ("pending", "shortlisted", "pending"),
-        ("eligible", "shortlisted", "shortlisted"),
-        ("excluded", "shortlisted", "excluded"),
-        ("uncertain", "shortlisted", "pending"),
+        ("pending_source", "saved", "pending"),
+        ("pending", "saved", "pending"),
+        ("eligible", "saved", "saved"),
+        ("excluded", "saved", "excluded"),
+        ("uncertain", "saved", "pending"),
         ("pending_source", "applied", "applied"),
         ("pending", "applied", "applied"),
         ("eligible", "applied", "applied"),
         ("excluded", "applied", "applied"),
         ("uncertain", "applied", "applied"),
+        ("pending_source", "interviewing", "interviewing"),
+        ("pending", "interviewing", "interviewing"),
+        ("eligible", "interviewing", "interviewing"),
+        ("excluded", "interviewing", "interviewing"),
+        ("uncertain", "interviewing", "interviewing"),
+        ("pending_source", "offer", "offer"),
+        ("pending", "offer", "offer"),
+        ("eligible", "offer", "offer"),
+        ("excluded", "offer", "offer"),
+        ("uncertain", "offer", "offer"),
+        ("pending_source", "withdrawn", "withdrawn"),
+        ("pending", "withdrawn", "withdrawn"),
+        ("eligible", "withdrawn", "withdrawn"),
+        ("excluded", "withdrawn", "withdrawn"),
+        ("uncertain", "withdrawn", "withdrawn"),
         ("pending_source", "rejected", "rejected"),
         ("pending", "rejected", "rejected"),
         ("eligible", "rejected", "rejected"),
@@ -104,7 +119,7 @@ def test_primary_view_priority_for_every_user_and_effective_status_combination(
     ("user", "expected"),
     [
         ("new", "recommended"),
-        ("shortlisted", "shortlisted"),
+        ("saved", "saved"),
     ],
 )
 def test_primary_view_uses_effective_status_after_manual_restore(user: str, expected: str) -> None:
@@ -118,7 +133,7 @@ def test_primary_view_uses_effective_status_after_manual_restore(user: str, expe
 
 @pytest.mark.parametrize("availability", ["stale", "closed"])
 @pytest.mark.parametrize(
-    "user", ["new", "shortlisted", "rejected", "ignored"]
+    "user", ["new", "saved", "withdrawn", "rejected", "ignored"]
 )
 def test_non_active_availability_hides_unapplied_jobs(
     availability: str, user: str
@@ -129,8 +144,12 @@ def test_non_active_availability_hides_unapplied_jobs(
 
 
 @pytest.mark.parametrize("availability", ["stale", "closed"])
-def test_non_active_applied_jobs_remain_in_applied(availability: str) -> None:
-    item = job_record("excluded", "applied", None, availability)
+@pytest.mark.parametrize("user", ["applied", "interviewing", "offer"])
+def test_non_active_application_jobs_remain_in_pipeline(
+    availability: str,
+    user: str,
+) -> None:
+    item = job_record("excluded", user, None, availability)
 
     assert primary_view(item) is not None
-    assert primary_view(item).value == "applied"
+    assert primary_view(item).value == user

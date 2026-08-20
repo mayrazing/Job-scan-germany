@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -80,7 +80,7 @@ def test_import_ignores_new_and_newest_old_status_wins(store: GlobalJobStore) ->
     earlier = _job(
         "old-key",
         external_ids=("same",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
         status_at=NOW,
     )
     newer = _job(
@@ -96,26 +96,32 @@ def test_import_ignores_new_and_newest_old_status_wins(store: GlobalJobStore) ->
     assert len(imported.jobs) == 1
     assert imported.jobs[0].user_status is UserStatus.REJECTED
     assert imported.jobs[0].canonical_job_key == "new-key"
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in imported.jobs[0].user_status_history
+    ] == [(UserStatus.REJECTED, NOW + timedelta(minutes=1))]
     assert store.find("new-only") is None
 
 
-def test_import_migrates_legacy_reviewed_jsonl_to_shortlisted(
+@pytest.mark.parametrize("legacy_status", [b"reviewed", b"shortlisted"])
+def test_import_migrates_legacy_saved_jsonl_statuses(
     store: GlobalJobStore,
+    legacy_status: bytes,
 ) -> None:
     legacy = serialize_snapshot(
-        _snapshot(_job("old-key", status=UserStatus.SHORTLISTED))
-    ).replace(b'"shortlisted"', b'"reviewed"')
+        _snapshot(_job("old-key", status=UserStatus.SAVED))
+    ).replace(b'"saved"', b'"' + legacy_status + b'"')
 
     imported = store.import_snapshots([parse_snapshot(legacy)])
 
-    assert imported.jobs[0].user_status is UserStatus.SHORTLISTED
+    assert imported.jobs[0].user_status is UserStatus.SAVED
 
 
 def test_set_status_cannot_be_rolled_back_by_older_history(store: GlobalJobStore) -> None:
     historical = _job(
         "job-1",
         external_ids=("shared",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
         status_at=NOW,
     )
     store.import_snapshots([_snapshot(historical)])
@@ -132,13 +138,122 @@ def test_set_status_cannot_be_rolled_back_by_older_history(store: GlobalJobStore
     assert reimported.jobs[0].user_status_updated_at == NOW + timedelta(minutes=2)
 
 
+def test_later_imported_legacy_status_replaces_the_first_known_event(
+    store: GlobalJobStore,
+) -> None:
+    saved = _job(
+        "job-1",
+        external_ids=("shared",),
+        status=UserStatus.SAVED,
+        status_at=NOW,
+    )
+    rejected = _job(
+        "job-1-new",
+        external_ids=("shared",),
+        status=UserStatus.REJECTED,
+        status_at=NOW + timedelta(minutes=1),
+    )
+    store.import_snapshots([_snapshot(saved)])
+
+    imported = store.import_snapshots([_snapshot(rejected)])
+
+    assert imported.jobs[0].user_status is UserStatus.REJECTED
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in imported.jobs[0].user_status_history
+    ] == [
+        (UserStatus.REJECTED, NOW + timedelta(minutes=1)),
+    ]
+
+
+def test_status_changes_append_persisted_history_without_duplicate_events(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    job = _job("job-1", external_ids=("shared",))
+
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(minutes=1))
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(minutes=2))
+
+    reloaded = GlobalJobStore(paths).find("job-1")
+    assert reloaded is not None
+    assert [
+        (entry.status, entry.changed_at) for entry in reloaded.user_status_history
+    ] == [
+        (UserStatus.SAVED, NOW),
+        (UserStatus.APPLIED, NOW + timedelta(minutes=1)),
+    ]
+    assert reloaded.user_status_updated_at == NOW + timedelta(minutes=1)
+
+
+def test_first_direct_tracker_status_still_starts_the_lifecycle_at_saved(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+
+    store.set_status(job, UserStatus.APPLIED, NOW)
+    updated = store.set_status(
+        job,
+        UserStatus.INTERVIEWING,
+        NOW + timedelta(minutes=1),
+    )
+
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in updated.jobs[0].user_status_history
+    ] == [
+        (UserStatus.SAVED, NOW),
+        (UserStatus.APPLIED, NOW),
+        (UserStatus.INTERVIEWING, NOW + timedelta(minutes=1)),
+    ]
+
+
+def test_same_time_saved_and_applied_order_survives_import_and_duplicate_submit(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    store.set_status(job, UserStatus.APPLIED, NOW)
+
+    store.import_snapshots([_snapshot(job)])
+    repeated = store.set_status(job, UserStatus.APPLIED, NOW + timedelta(minutes=1))
+
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in repeated.jobs[0].user_status_history
+    ] == [
+        (UserStatus.SAVED, NOW),
+        (UserStatus.APPLIED, NOW),
+    ]
+    assert repeated.jobs[0].user_status_updated_at == NOW
+
+
+def test_imported_old_status_becomes_the_first_known_history_event(
+    store: GlobalJobStore,
+) -> None:
+    old_job = _job(
+        "job-1",
+        external_ids=("shared",),
+        status=UserStatus.INTERVIEWING,
+        status_at=NOW,
+    )
+
+    imported = store.import_snapshots([_snapshot(old_job)])
+
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in imported.jobs[0].user_status_history
+    ] == [(UserStatus.INTERVIEWING, NOW)]
+
+
 def test_delete_hides_job_and_prevents_passive_history_reimport(
     store: GlobalJobStore,
 ) -> None:
     historical = _job(
         "job-1",
         external_ids=("shared",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
     )
     store.import_snapshots([_snapshot(historical)])
 
@@ -155,7 +270,7 @@ def test_deleted_job_learns_bridge_aliases_before_later_history_import(
     deleted = _job(
         "deleted",
         external_ids=("one",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
     )
     store.import_snapshots([_snapshot(deleted)])
     store.delete("deleted", now=NOW + timedelta(minutes=1))
@@ -172,22 +287,103 @@ def test_deleted_job_learns_bridge_aliases_before_later_history_import(
     assert store.import_snapshots([_snapshot(later_history)]).jobs == []
 
 
-def test_deletion_marker_serializes_only_for_deleted_global_jobs(
+def test_delete_removes_job_data_and_keeps_only_minimal_suppression_marker(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     store = GlobalJobStore(paths)
+    resume_id = "sha256:" + "1" * 64
+    profile_hash = "sha256:" + "a" * 64
+    job = _job("job-1", external_ids=("shared",))
+    job.reason = "private AI review"
     store.set_status(
-        _job("job-1", external_ids=("shared",)),
-        UserStatus.SHORTLISTED,
+        job,
+        UserStatus.SAVED,
         NOW,
+        resume_id=resume_id,
+        profile_hash=profile_hash,
     )
-
-    assert b'"global_status_deleted_at"' not in paths.global_jobs_jsonl.read_bytes()
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(seconds=30))
 
     store.delete("job-1", now=NOW + timedelta(minutes=1))
 
-    assert b'"global_status_deleted_at"' in paths.global_jobs_jsonl.read_bytes()
+    persisted = paths.global_jobs_jsonl.read_text(encoding="utf-8")
+    deleted = store._load_unlocked()
+    assert deleted.jobs == []
+    assert len(deleted.meta.global_job_deletions) == 1
+    marker = deleted.meta.global_job_deletions[0]
+    assert marker.canonical_job_keys == ["job-1"]
+    assert marker.source_job_keys == ["linkedin:acme/jobs:shared"]
+    assert marker.deleted_at == NOW + timedelta(minutes=1)
+    assert '"record_type":"job"' not in persisted
+    assert "private AI review" not in persisted
+    assert resume_id not in persisted
+    assert '"user_status_history"' not in persisted
+    assert '"global_status_deleted_at"' not in persisted
+
+
+def test_loading_legacy_soft_delete_physically_migrates_it_to_a_minimal_marker(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    legacy = _job("job-1", external_ids=("shared",), status=UserStatus.SAVED)
+    legacy.reason = "private legacy AI review"
+    legacy.global_status_deleted_at = NOW + timedelta(minutes=1)
+    paths.global_jobs_jsonl.write_bytes(serialize_snapshot(_snapshot(legacy)))
+
+    loaded = store.load()
+
+    persisted = paths.global_jobs_jsonl.read_text(encoding="utf-8")
+    assert loaded.jobs == []
+    assert '"record_type":"job"' not in persisted
+    assert "private legacy AI review" not in persisted
+    assert '"global_status_deleted_at"' not in persisted
+    assert '"global_job_deletions"' in persisted
+
+
+def test_loading_old_active_job_persists_its_first_known_status_event(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    old_job = _job("job-1", status=UserStatus.INTERVIEWING, status_at=NOW)
+    paths.global_jobs_jsonl.write_bytes(serialize_snapshot(_snapshot(old_job)))
+
+    loaded = store.load()
+
+    assert [
+        (entry.status, entry.changed_at)
+        for entry in loaded.jobs[0].user_status_history
+    ] == [(UserStatus.INTERVIEWING, NOW)]
+    assert '"user_status_history"' in paths.global_jobs_jsonl.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_tracker_timestamps_are_timezone_aware_and_normalized_to_utc(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    berlin_time = datetime(
+        2026,
+        8,
+        18,
+        12,
+        0,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+
+    saved = store.set_status(job, UserStatus.SAVED, berlin_time)
+
+    assert saved.jobs[0].user_status_updated_at == NOW
+    assert saved.jobs[0].user_status_history[0].changed_at == NOW
+    with pytest.raises(ValueError, match="timezone-aware"):
+        store.set_status(
+            job,
+            UserStatus.APPLIED,
+            datetime(2026, 8, 18, 12, 1),  # noqa: DTZ001 - verifies rejection.
+        )
 
 
 def test_setting_status_explicitly_restores_a_deleted_global_job(
@@ -196,7 +392,7 @@ def test_setting_status_explicitly_restores_a_deleted_global_job(
     historical = _job(
         "job-1",
         external_ids=("shared",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
     )
     store.import_snapshots([_snapshot(historical)])
     store.delete("job-1", now=NOW + timedelta(minutes=1))
@@ -215,18 +411,38 @@ def test_reimporting_url_explicitly_restores_a_deleted_global_job(
     store: GlobalJobStore,
 ) -> None:
     manual = _job("manual", external_ids=("manual-url",))
-    store.upsert_with_default_status(manual, UserStatus.SHORTLISTED, NOW)
+    store.upsert_with_default_status(manual, UserStatus.SAVED, NOW)
     store.delete("manual", now=NOW + timedelta(minutes=1))
 
     restored = store.upsert_with_default_status(
         manual,
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW + timedelta(minutes=2),
     )
 
-    assert restored.user_status is UserStatus.SHORTLISTED
+    assert restored.user_status is UserStatus.SAVED
     assert restored.global_status_deleted_at is None
     assert store.find("manual") is not None
+
+
+def test_explicit_resave_after_delete_starts_a_new_saved_lifecycle(
+    store: GlobalJobStore,
+) -> None:
+    manual = _job("manual", external_ids=("manual-url",))
+    store.upsert_with_default_status(manual, UserStatus.SAVED, NOW)
+    store.set_status(manual, UserStatus.APPLIED, NOW + timedelta(minutes=1))
+    store.delete("manual", now=NOW + timedelta(minutes=2))
+
+    restored = store.upsert_with_default_status(
+        manual,
+        UserStatus.SAVED,
+        NOW + timedelta(minutes=3),
+    )
+
+    assert [
+        (entry.status, entry.changed_at) for entry in restored.user_status_history
+    ] == [(UserStatus.SAVED, NOW + timedelta(minutes=3))]
+    assert store._load_unlocked().meta.global_job_deletions == []
 
 
 def test_mutate_details_preserves_the_latest_global_status(
@@ -235,7 +451,7 @@ def test_mutate_details_preserves_the_latest_global_status(
     job = _job(
         "job-1",
         external_ids=("shared",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
         status_at=NOW,
     )
     store.import_snapshots([_snapshot(job)])
@@ -255,7 +471,7 @@ def test_mutate_details_rejects_global_status_changes(store: GlobalJobStore) -> 
     job = _job(
         "job-1",
         external_ids=("shared",),
-        status=UserStatus.SHORTLISTED,
+        status=UserStatus.SAVED,
     )
     store.import_snapshots([_snapshot(job)])
 
@@ -266,7 +482,7 @@ def test_mutate_details_rejects_global_status_changes(store: GlobalJobStore) -> 
     with pytest.raises(ValueError, match="cannot change global job status"):
         store.mutate_details(replace_status)
 
-    assert store.load().jobs[0].user_status is UserStatus.SHORTLISTED
+    assert store.load().jobs[0].user_status is UserStatus.SAVED
 
 
 def test_mutate_details_rejects_global_job_removal(store: GlobalJobStore) -> None:
@@ -317,7 +533,7 @@ def test_import_bridge_merges_two_global_records_by_source_alias(
                 _job(
                     "first",
                     external_ids=("one",),
-                    status=UserStatus.SHORTLISTED,
+                    status=UserStatus.SAVED,
                     status_at=NOW,
                 ),
                 _job(
@@ -348,7 +564,7 @@ def test_selected_jobs_rejects_empty_duplicate_and_missing_keys(
     store.import_snapshots(
         [
             _snapshot(
-                _job("one", status=UserStatus.SHORTLISTED),
+                _job("one", status=UserStatus.SAVED),
                 _job("two", status=UserStatus.REJECTED),
             )
         ]
@@ -384,7 +600,7 @@ def test_persisted_global_status_reloads_from_disk(tmp_path: Path) -> None:
 def test_reimporting_unchanged_snapshot_does_not_write_a_new_revision(
     store: GlobalJobStore,
 ) -> None:
-    snapshot = _snapshot(_job("job-1", status=UserStatus.SHORTLISTED))
+    snapshot = _snapshot(_job("job-1", status=UserStatus.SAVED))
     first = store.import_snapshots([snapshot])
 
     second = store.import_snapshots([snapshot])
@@ -400,7 +616,7 @@ def test_reimporting_unchanged_manual_job_does_not_write_a_new_revision(
     profile_hash = "sha256:" + "a" * 64
     store.upsert_with_default_status(
         job,
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW,
         resume_id=resume_id,
         profile_hash=profile_hash,
@@ -409,7 +625,7 @@ def test_reimporting_unchanged_manual_job_does_not_write_a_new_revision(
 
     store.upsert_with_default_status(
         job,
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW,
         resume_id=resume_id,
         profile_hash=profile_hash,
@@ -437,7 +653,7 @@ def test_same_job_keeps_one_status_but_distinct_resume_matches(
 
     store.set_status(
         resume_a,
-        UserStatus.SHORTLISTED,
+        UserStatus.SAVED,
         NOW,
         resume_id="sha256:" + "1" * 64,
         profile_hash="sha256:" + "a" * 64,
@@ -468,7 +684,7 @@ def test_existing_global_job_can_be_associated_by_profile_hash(
     existing = _job("job-1", external_ids=("shared",))
     existing.score = 88
     existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
-    store.set_status(existing, UserStatus.SHORTLISTED, NOW)
+    store.set_status(existing, UserStatus.SAVED, NOW)
 
     store.associate_profile(
         resume_id="sha256:" + "1" * 64,
@@ -486,7 +702,7 @@ def test_reassociating_known_profiles_does_not_write_new_revisions(
     existing = _job("job-1", external_ids=("shared",))
     existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
     existing.last_review_attempt_profile_hash = "sha256:" + "b" * 64
-    store.set_status(existing, UserStatus.SHORTLISTED, NOW)
+    store.set_status(existing, UserStatus.SAVED, NOW)
     associations = (
         ("sha256:" + "1" * 64, "sha256:" + "a" * 64),
         ("sha256:" + "2" * 64, "sha256:" + "b" * 64),

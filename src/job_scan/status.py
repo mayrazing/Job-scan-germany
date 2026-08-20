@@ -16,12 +16,18 @@ def effective_status(job: JobRecord) -> MachineStatus:
 def primary_view(job: JobRecord) -> PrimaryView | None:
     if job.user_status is UserStatus.APPLIED:
         return PrimaryView.APPLIED
+    if job.user_status is UserStatus.INTERVIEWING:
+        return PrimaryView.INTERVIEWING
+    if job.user_status is UserStatus.OFFER:
+        return PrimaryView.OFFER
     if job.availability_status is not AvailabilityStatus.ACTIVE:
         return None
     if job.user_status is UserStatus.IGNORED:
         return PrimaryView.IGNORED
     if job.user_status is UserStatus.REJECTED:
         return PrimaryView.REJECTED
+    if job.user_status is UserStatus.WITHDRAWN:
+        return PrimaryView.WITHDRAWN
 
     status = effective_status(job)
     if status is MachineStatus.EXCLUDED:
@@ -32,6 +38,6 @@ def primary_view(job: JobRecord) -> PrimaryView | None:
         MachineStatus.UNCERTAIN,
     }:
         return PrimaryView.PENDING
-    if job.user_status is UserStatus.SHORTLISTED:
-        return PrimaryView.SHORTLISTED
+    if job.user_status is UserStatus.SAVED:
+        return PrimaryView.SAVED
     return PrimaryView.RECOMMENDED

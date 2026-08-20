@@ -394,10 +394,13 @@
               <div class="review-workspace">
                 <nav class="group-nav review-group-nav" aria-label="Job groups">
                   <a href="#recommended" data-review-group-tab="recommended" draggable="true" aria-current="page"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Recommended</span><span>3</span></a>
-                  <a href="#shortlisted" data-review-group-tab="shortlisted" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Shortlisted</span><span>0</span></a>
+                  <a href="#saved" data-review-group-tab="saved" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Saved</span><span>0</span></a>
                   <a href="#pending" data-review-group-tab="pending" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Pending</span><span>0</span></a>
                   <a href="#excluded" data-review-group-tab="excluded" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Excluded</span><span>1</span></a>
-                  <a href="#applied" data-review-group-tab="applied" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Applied</span><span>0</span></a>
+                  <a href="#applied" data-review-group-tab="applied" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Applied</span><span>1</span></a>
+                  <a href="#interviewing" data-review-group-tab="interviewing" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Interviewing</span><span>0</span></a>
+                  <a href="#offer" data-review-group-tab="offer" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Offer</span><span>0</span></a>
+                  <a href="#withdrawn" data-review-group-tab="withdrawn" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Withdrawn</span><span>0</span></a>
                   <a href="#rejected" data-review-group-tab="rejected" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Rejected</span><span>0</span></a>
                   <a href="#ignored" data-review-group-tab="ignored" draggable="true"><span class="review-group-drag-handle" aria-hidden="true">⠿</span><span class="review-group-label">Ignored</span><span>0</span></a>
                 </nav>
@@ -437,7 +440,7 @@
                         <details class="evidence"><summary>Evidence</summary><ul><li>Backend ownership with Python and PostgreSQL.</li><li>English is the team language.</li></ul></details>
                         <div class="job-actions">
                           <form class="job-action" data-job-action="status" data-job-key="linkedin:example-backend">
-                            <label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
+                            <label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
                             <button type="submit">Save status</button>
                           </form>
                         </div>
@@ -467,7 +470,7 @@
                           <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
                         </dl>
                         <details class="evidence"><summary>Evidence</summary><ul><li>Own cloud platform services and CI/CD tooling.</li></ul></details>
-                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="indeed:northstar-platform"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
+                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="indeed:northstar-platform"><label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
                         <label class="form-check ats-job-selector">
                           <input class="form-check-input" type="checkbox" value="indeed:northstar-platform" data-ats-select-job aria-label="Select Platform Engineer at Northstar Systems for ATS Check">
                           <span class="form-check-label">Select for ATS Check</span>
@@ -494,7 +497,7 @@
                           <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
                         </dl>
                         <details class="evidence"><summary>Evidence</summary><ul><li>Build Python services and SQL-based data workflows.</li></ul></details>
-                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="simplify:rhein-python"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
+                        <div class="job-actions"><form class="job-action" data-job-action="status" data-job-key="simplify:rhein-python"><label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form></div>
                         <label class="form-check ats-job-selector">
                           <input class="form-check-input" type="checkbox" value="simplify:rhein-python" data-ats-select-job aria-label="Select Python Developer at Rhein Data AG for ATS Check">
                           <span class="form-check-label">Select for ATS Check</span>
@@ -504,7 +507,7 @@
                   </div>
                 </section>
 
-                <section class="job-group" id="shortlisted" aria-labelledby="shortlisted-title" hidden><header class="section-header"><h2 id="shortlisted-title">Shortlisted</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="saved" aria-labelledby="saved-title" hidden><header class="section-header"><h2 id="saved-title">Saved</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
                 <section class="job-group" id="pending" aria-labelledby="pending-title" hidden><header class="section-header"><h2 id="pending-title">Pending</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
 
                 <section class="job-group" id="excluded" aria-labelledby="excluded-title" hidden>
@@ -519,7 +522,7 @@
                         <dl class="facts"><div><dt>Sources</dt><dd>LinkedIn</dd></div><div class="company-size"><dt>Company size</dt><dd>11–50 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div><div><dt>Posted</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div><div><dt>First seen</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div><div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div></dl>
                         <details class="evidence"><summary>Evidence</summary><ul><li>Company profile reports fewer than 50 employees.</li></ul></details>
                         <div class="job-actions">
-                          <form class="job-action" data-job-action="status" data-job-key="linkedin:small-startup"><label><span>Set user status</span><select name="status"><option value="new" selected>New</option><option value="shortlisted">Shortlisted</option><option value="applied">Applied</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form>
+                          <form class="job-action" data-job-action="status" data-job-key="linkedin:small-startup"><label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label><button type="submit">Save status</button></form>
                           <form class="job-action" data-job-action="restore" data-job-key="linkedin:small-startup"><button type="submit">Restore job</button></form>
                         </div>
                       </div>
@@ -527,7 +530,67 @@
                   </div>
                 </section>
 
-                <section class="job-group" id="applied" aria-labelledby="applied-title" hidden><header class="section-header"><h2 id="applied-title">Applied</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="applied" aria-labelledby="applied-title" hidden>
+                  <header class="section-header"><h2 id="applied-title">Applied</h2><span class="count">1</span></header>
+                  <div class="card-grid">
+                    <article class="job-card" data-availability="active" data-company-size-maximum="5000" data-company-size-minimum="1001" data-job-key="linkedin:meridian-backend" data-posted-at="2026-08-08" data-posted-days-ago="1" data-sources="linkedin">
+                      <div class="status-rail" aria-label="Job status">
+                        <span data-user-status><strong>User status:</strong> applied</span>
+                        <span data-machine-status><strong>Machine:</strong> eligible</span>
+                        <span data-effective-status><strong>Effective:</strong> eligible</span>
+                        <span><strong>Availability:</strong> active</span>
+                      </div>
+                      <div class="card-body">
+                        <header class="card-header">
+                          <div>
+                            <p class="company">Meridian Commerce AG</p>
+                            <h3><a href="https://example.com/jobs/backend-platform" target="_blank" rel="noopener noreferrer">Backend Platform Engineer</a></h3>
+                            <p class="location">Berlin · Hybrid</p>
+                          </div>
+                          <p class="score"><strong>84</strong><span>score</span></p>
+                        </header>
+                        <p class="reason">Strong Java platform match. Application submitted with the backend resume.</p>
+                        <ul class="labels" aria-label="Labels"><li>Java</li><li>Spring Boot</li><li>platform</li></ul>
+
+                        <section class="job-lifecycle" data-job-lifecycle aria-labelledby="meridian-lifecycle-title">
+                          <header class="lifecycle-heading">
+                            <strong id="meridian-lifecycle-title">Job lifecycle</strong>
+                            <span>Current: Applied</span>
+                          </header>
+                          <ol class="lifecycle-steps" aria-label="Application progress">
+                            <li data-lifecycle-step data-state="complete"><span class="lifecycle-dot" aria-hidden="true"></span><strong>Saved</strong><time datetime="2026-08-10">08-10</time></li>
+                            <li data-lifecycle-step data-state="current" aria-current="step"><span class="lifecycle-dot" aria-hidden="true"></span><strong>Applied</strong><time datetime="2026-08-12">08-12</time></li>
+                          </ol>
+                          <details class="lifecycle-history" data-lifecycle-history>
+                            <summary>Lifecycle details</summary>
+                            <ol>
+                              <li data-lifecycle-event><time datetime="2026-08-10T18:25:00Z">Aug 10, 18:25</time><span><strong>Saved</strong>Added to Job Tracker.</span></li>
+                              <li data-lifecycle-event><time datetime="2026-08-12T08:15:00Z">Aug 12, 08:15</time><span><strong>Applied</strong>Application submitted.</span></li>
+                            </ol>
+                          </details>
+                        </section>
+
+                        <dl class="facts">
+                          <div><dt>Sources</dt><dd>LinkedIn</dd></div>
+                          <div class="company-size"><dt>Company size</dt><dd>1,001–5,000 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div>
+                          <div><dt>Posted</dt><dd><time datetime="2026-08-08">2026-08-08</time></dd></div>
+                          <div><dt>First seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                          <div><dt>Last seen</dt><dd><time datetime="2026-08-12">2026-08-12</time></dd></div>
+                        </dl>
+                        <details class="evidence"><summary>Evidence</summary><ul><li>Own Spring Boot services and platform APIs.</li></ul></details>
+                        <div class="job-actions">
+                          <form class="job-action" data-job-action="status" data-job-key="linkedin:meridian-backend">
+                            <label><span>Set user status</span><select name="status"><option value="saved">Saved</option><option value="applied" selected>Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
+                            <button type="submit">Save status</button>
+                          </form>
+                        </div>
+                      </div>
+                    </article>
+                  </div>
+                </section>
+                <section class="job-group" id="interviewing" aria-labelledby="interviewing-title" hidden><header class="section-header"><h2 id="interviewing-title">Interviewing</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="offer" aria-labelledby="offer-title" hidden><header class="section-header"><h2 id="offer-title">Offer</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
+                <section class="job-group" id="withdrawn" aria-labelledby="withdrawn-title" hidden><header class="section-header"><h2 id="withdrawn-title">Withdrawn</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
                 <section class="job-group" id="rejected" aria-labelledby="rejected-title" hidden><header class="section-header"><h2 id="rejected-title">Rejected</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
                 <section class="job-group" id="ignored" aria-labelledby="ignored-title" hidden><header class="section-header"><h2 id="ignored-title">Ignored</h2><span class="count">0</span></header><div class="card-grid"><p class="empty">No jobs in this group.</p></div></section>
                 </div>

@@ -19,9 +19,12 @@ from job_scan.status import effective_status, primary_view
 ACTIVE_VIEW_ORDER = (
     PrimaryView.RECOMMENDED,
     PrimaryView.PENDING,
-    PrimaryView.SHORTLISTED,
+    PrimaryView.SAVED,
     PrimaryView.EXCLUDED,
     PrimaryView.APPLIED,
+    PrimaryView.INTERVIEWING,
+    PrimaryView.OFFER,
+    PrimaryView.WITHDRAWN,
     PrimaryView.REJECTED,
     PrimaryView.IGNORED,
 )
@@ -33,18 +36,24 @@ CURRENT_VIEW_ORDER = (
 )
 
 GLOBAL_VIEW_ORDER = (
-    PrimaryView.SHORTLISTED,
+    PrimaryView.SAVED,
     PrimaryView.APPLIED,
+    PrimaryView.INTERVIEWING,
+    PrimaryView.OFFER,
+    PrimaryView.WITHDRAWN,
     PrimaryView.REJECTED,
     PrimaryView.IGNORED,
 )
 
 _GROUP_TITLES = {
     PrimaryView.RECOMMENDED: "Recommended",
-    PrimaryView.SHORTLISTED: "Shortlisted",
+    PrimaryView.SAVED: "Saved",
     PrimaryView.PENDING: "Pending review",
     PrimaryView.EXCLUDED: "Excluded",
     PrimaryView.APPLIED: "Applied",
+    PrimaryView.INTERVIEWING: "Interviewing",
+    PrimaryView.OFFER: "Offer",
+    PrimaryView.WITHDRAWN: "Withdrawn",
     PrimaryView.REJECTED: "Rejected",
     PrimaryView.IGNORED: "Ignored",
 }
@@ -57,6 +66,14 @@ _COMPANY_SIZE_BOUNDS = {
     "10000+": (10000, None),
     "unknown": (None, None),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class JobStatusEvent:
+    """Expose one immutable Job Tracker status change."""
+
+    status: UserStatus
+    changed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +99,7 @@ class JobCard:
     first_seen: datetime
     last_seen: datetime
     user_status: UserStatus
+    user_status_history: tuple[JobStatusEvent, ...]
     machine_status: MachineStatus
     effective_status: MachineStatus
     availability_status: AvailabilityStatus
@@ -119,7 +137,7 @@ class DashboardGroup:
 
 @dataclass(frozen=True, slots=True)
 class DashboardViewModel:
-    """Store the seven visible Review groups."""
+    """Store one ordered set of visible Review groups."""
 
     active_groups: Mapping[PrimaryView, DashboardGroup]
 
@@ -135,10 +153,13 @@ def build_current_dashboard(snapshot: Snapshot) -> DashboardViewModel:
 
 
 def build_global_dashboard(snapshot: Snapshot) -> DashboardViewModel:
-    """Project globally decided jobs into the four user-owned groups."""
+    """Project globally decided jobs into the seven user-owned groups."""
     user_views = {
-        UserStatus.SHORTLISTED: PrimaryView.SHORTLISTED,
+        UserStatus.SAVED: PrimaryView.SAVED,
         UserStatus.APPLIED: PrimaryView.APPLIED,
+        UserStatus.INTERVIEWING: PrimaryView.INTERVIEWING,
+        UserStatus.OFFER: PrimaryView.OFFER,
+        UserStatus.WITHDRAWN: PrimaryView.WITHDRAWN,
         UserStatus.REJECTED: PrimaryView.REJECTED,
         UserStatus.IGNORED: PrimaryView.IGNORED,
     }
@@ -217,6 +238,10 @@ def _card(job: JobRecord) -> JobCard:
         first_seen=job.first_seen,
         last_seen=job.last_seen,
         user_status=job.user_status,
+        user_status_history=tuple(
+            JobStatusEvent(status=entry.status, changed_at=entry.changed_at)
+            for entry in job.user_status_history
+        ),
         machine_status=job.machine_status,
         effective_status=status,
         availability_status=job.availability_status,

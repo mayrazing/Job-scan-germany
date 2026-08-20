@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Job snapshot prototype</title>
+    <link rel="stylesheet" href="../../src/job_scan/dashboard/static/bootstrap.min.css">
+    <link rel="stylesheet" href="../../src/job_scan/dashboard/static/dashboard.css">
+    <link rel="stylesheet" href="../../src/job_scan/dashboard/static/console.css">
+    <link rel="stylesheet" href="prototype.css">
+  </head>
+  <body>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Prototype</p>
+        <h1>Job scan</h1>
+        <p>Preview the job card entry before snapshot storage is implemented.</p>
+      </div>
+      <p class="revision">Local review desk</p>
+    </header>
+
+    <main class="prototype-main">
+      <section class="review-block">
+        <header class="review-block-heading">
+          <p class="eyebrow">Current search</p>
+          <h2>Recommended</h2>
+        </header>
+
+        <div class="prototype-card-grid">
+          <article class="job-card">
+            <div class="status-rail" aria-label="Job status">
+              <span><strong>User status:</strong> new</span>
+              <span><strong>Machine:</strong> recommended</span>
+              <span><strong>Effective:</strong> recommended</span>
+              <span><strong>Availability:</strong> active</span>
+            </div>
+            <div class="card-body">
+              <header class="card-header">
+                <div>
+                  <p class="company">IDnow GmbH</p>
+                  <h3>
+                    <a href="https://www.stepstone.de/stellenangebote--Senior-Software-Engineer-Java-f-m-d-Berlin-Berlin-Germany-Muenchen-Bavaria-Germany-IDnow-GmbH--13889830-inline.html" target="_blank" rel="noopener noreferrer">Senior Software Engineer - Java (f/m/d)</a>
+                  </h3>
+                  <p class="location">Berlin, Berlin, Germany; München, Bavaria, Germany</p>
+                </div>
+              </header>
+
+              <p class="reason">Backend Java role working on IDnow's identity-verification platform.</p>
+
+              <dl class="facts">
+                <div><dt>Sources</dt><dd>stepstone</dd></div>
+                <div><dt>Work model</dt><dd>Hybrid</dd></div>
+                <div><dt>Posted</dt><dd>Unknown</dd></div>
+                <div><dt>First seen</dt><dd><time datetime="2026-08-20">2026-08-20</time></dd></div>
+                <div><dt>Last seen</dt><dd><time datetime="2026-08-20">2026-08-20</time></dd></div>
+              </dl>
+
+              <div class="job-actions prototype-actions">
+                <a class="btn btn-outline-secondary snapshot-link" href="original-page.html" target="_blank" rel="noopener" data-job-snapshot>Job snapshot</a>
+                <span class="snapshot-help">Saved content from the day this job was scanned.</span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

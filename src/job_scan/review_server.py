@@ -618,7 +618,7 @@ def create_review_app(
                 company_sizes().apply(imported, config, imported_at)
                 saved_job = global_jobs.upsert_with_default_status(
                     imported.jobs[0],
-                    UserStatus.SHORTLISTED,
+                    UserStatus.SAVED,
                     resume_id=base_config.resume_sha256,
                     profile_hash=base_config.profile_sha256,
                 )
@@ -727,7 +727,7 @@ def create_review_app(
                     catalog_created = True
                 saved_job = global_jobs.upsert_with_default_status(
                     imported.jobs[0],
-                    UserStatus.SHORTLISTED,
+                    UserStatus.SAVED,
                     resume_id=resume_id,
                     profile_hash=config.profile_sha256,
                 )

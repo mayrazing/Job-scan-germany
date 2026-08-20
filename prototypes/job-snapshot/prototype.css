@@ -1,0 +1,100 @@
+.prototype-main,
+.snapshot-main {
+  padding-block: 2rem 4rem;
+}
+
+.prototype-card-grid,
+.snapshot-main {
+  max-width: 76rem;
+}
+
+.prototype-card-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.prototype-actions,
+.snapshot-footer {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.snapshot-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  padding: 0.55rem 0.85rem;
+  text-decoration: none;
+}
+
+.snapshot-help {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.snapshot-page-header {
+  align-items: center;
+}
+
+.snapshot-notice {
+  margin: 0 0 1rem;
+}
+
+.snapshot-document {
+  min-height: 0;
+}
+
+.snapshot-heading {
+  margin-bottom: 1rem;
+}
+
+.snapshot-heading h1 {
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+
+.snapshot-facts {
+  margin: 0;
+  padding-block: 1rem;
+  border-block: 1px solid var(--border);
+}
+
+.snapshot-section {
+  padding-block: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.snapshot-section h2,
+.snapshot-section p,
+.snapshot-section ul {
+  margin-top: 0;
+}
+
+.snapshot-section h2 {
+  margin-bottom: 0.5rem;
+  font-size: 1.08rem;
+  line-height: 1.3;
+}
+
+.snapshot-section p,
+.snapshot-section ul {
+  margin-bottom: 0;
+}
+
+.snapshot-section li + li {
+  margin-top: 0.35rem;
+}
+
+@media (max-width: 42rem) {
+  .prototype-actions,
+  .snapshot-footer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .snapshot-link {
+    width: 100%;
+  }
+}

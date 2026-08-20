@@ -1,0 +1,71 @@
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url('0519fb00ccc1a51f.woff2') format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-stretch: normal;
+}
+
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url('0a659ff4edd1493b.woff2') format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-stretch: normal;
+}
+
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url('baa943852cc36f45.woff2') format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 350;
+  font-style: normal;
+  font-stretch: normal;
+}
+
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url() format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-stretch: normal;
+}
+
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url() format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-stretch: normal;
+}
+
+@font-face {
+  font-family: 'Relative Pro';
+  src: url();
+  src: url() format('embedded-opentype'),
+    url() format('woff2'),
+    url() format('woff'),
+    url() format('truetype');
+  font-weight: 350;
+  font-style: italic;
+  font-stretch: normal;
+}

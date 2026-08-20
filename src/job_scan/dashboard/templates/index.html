@@ -28,12 +28,12 @@
       </section>
       <section class="review-block" id="review" data-review-block="global">
         <header class="review-block-heading review-block-heading-actions">
-          <div><p class="eyebrow">All searches</p><h2>Global job status</h2></div>
+          <div><p class="eyebrow">All searches</p><h2>Job Tracker</h2></div>
           {{ manual_job_import() }}
         </header>
         {{ global_resume_list(resume_catalog, selected_resume_id, '/') }}
         <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
-          {{ navigation(global_dashboard, 'Global job status groups') }}
+          {{ navigation(global_dashboard, 'Job Tracker groups') }}
           <div class="review-groups">{{ groups(global_dashboard, false, false, 'global') }}</div>
         </div>
       </section>
