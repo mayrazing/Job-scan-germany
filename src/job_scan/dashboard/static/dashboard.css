@@ -17,7 +17,7 @@
 
 html {
   /* Shrinks the whole UI by scaling the rem base: layout is rem-driven, so
-     87.5% of the browser default (16px -> 14px) scales type, spacing and
+     75.5% of the browser default (16px -> 12.08px) scales type, spacing and
      controls together. Uses a percentage, not a px value, so a user's own
      browser font-size setting still applies. */
   font-size: 75.5%;

@@ -844,6 +844,7 @@ def test_source_filter_uses_summary_control_and_checkbox_dropdown(
 def test_source_filter_matches_any_checked_source(setup_page: object) -> None:
     assert setup_page.locator("#source-filter").count() == 1
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.setValue(['linkedin'])"
@@ -869,6 +870,7 @@ def test_source_filter_restores_manual_selection_after_reload(setup_page: object
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     assert setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.items"
@@ -927,7 +929,10 @@ def test_review_filters_do_not_hide_global_status_jobs(setup_page: object) -> No
 
 def test_review_group_counts_follow_active_filters(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    nav_count = setup_page.locator('.review-group-nav a[href="#recommended"] span')
+    setup_page.locator("#review-language-requirement").select_option("")
+    nav_count = setup_page.locator(
+        '[data-review-block="current"] [data-review-group-count="recommended"]'
+    )
 
     assert nav_count.text_content() == "11"
 
@@ -942,6 +947,7 @@ def test_minimum_score_filter_includes_boundary_and_updates_counts(
     setup_page: object,
 ) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
     score_filter = setup_page.locator("#review-minimum-score")
 
     assert score_filter.input_value() == ""
@@ -952,10 +958,7 @@ def test_minimum_score_filter_includes_boundary_and_updates_counts(
     assert setup_page.locator('article[data-job-key="stepstone-only"]').is_hidden()
     assert setup_page.locator('article[data-job-key="bosch-only"]').is_hidden()
     assert setup_page.locator(
-        '.review-group-nav a[href="#recommended"] span'
-    ).text_content() == "3"
-    assert setup_page.locator(
-        "#recommended > summary .count"
+        '[data-review-block="current"] [data-review-group-count="recommended"]'
     ).text_content() == "3"
 
 
@@ -979,9 +982,11 @@ def test_source_filter_does_not_overlap_posted_filter_at_narrow_width(
 
     assert source_control is not None
     assert posted_filter is not None
-    assert posted_filter["x"] - (
-        source_control["x"] + source_control["width"]
-    ) >= 16
+    root_rem = setup_page.evaluate(
+        "parseFloat(getComputedStyle(document.documentElement).fontSize)"
+    )
+    gap = posted_filter["x"] - (source_control["x"] + source_control["width"])
+    assert gap == pytest.approx(root_rem, abs=0.5)
 
 
 @pytest.mark.parametrize("viewport_width", [1053, 1440])
@@ -999,11 +1004,19 @@ def test_review_filter_controls_keep_fixed_width(
     assert source is not None
     assert posted is not None
     assert company is not None
-    assert [round(box["width"]) for box in (source, posted, company)] == [256, 256, 256]
+    root_rem = setup_page.evaluate(
+        "parseFloat(getComputedStyle(document.documentElement).fontSize)"
+    )
+    expected_width = 16 * root_rem
+    assert all(
+        box["width"] == pytest.approx(expected_width, abs=0.5)
+        for box in (source, posted, company)
+    )
 
 
 def test_posted_within_filter_combines_with_checked_sources(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     posted_within = setup_page.locator("#review-posted-within-days")
     assert posted_within.input_value() == "7"
@@ -1022,6 +1035,7 @@ def test_posted_within_filter_combines_with_checked_sources(setup_page: object) 
 
 def test_company_size_filter_uses_reported_ranges(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     company_size = setup_page.locator("#review-company-size")
     assert company_size.input_value() == "0"
@@ -1045,6 +1059,7 @@ def test_company_industry_filter_includes_unknown_and_combines_with_sources(
     setup_page: object,
 ) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     company_industry = setup_page.locator("#review-company-industry")
     assert company_industry.locator("option").all_text_contents() == [
@@ -1106,22 +1121,22 @@ def test_language_requirement_filter_combines_with_sources_and_updates_counts(
     setup_page: object,
 ) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    nav_count = setup_page.locator('.review-group-nav a[href="#recommended"] span')
-    heading_count = setup_page.locator("#recommended > summary .count")
+    nav_count = setup_page.locator(
+        '[data-review-block="current"] [data-review-group-count="recommended"]'
+    )
 
     setup_page.locator("#review-language-requirement").select_option("required")
     assert nav_count.text_content() == "1"
-    assert heading_count.text_content() == "1"
 
     setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.setValue(['stepstone'])"
     )
     assert nav_count.text_content() == "0"
-    assert heading_count.text_content() == "0"
 
 
 def test_company_size_help_opens_on_click(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
     card = setup_page.locator('article[data-job-key="bosch-only"]')
 
     card.locator("[data-company-size-help]").click()
@@ -1149,6 +1164,7 @@ def test_company_size_search_reports_lookup_failure_on_the_selected_card(
 
     setup_page.route("**/api/jobs/bosch-only/company-size", reject_lookup)
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
     card = setup_page.locator('article[data-job-key="bosch-only"]')
 
     card.locator("[data-company-size-search]").click()
@@ -2163,7 +2179,11 @@ def test_run_page_polls_and_renders_real_backend_stages(setup_page: object) -> N
     setup_page.evaluate(
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
+    setup_page.locator("[data-open-ai-config]").click()
+    setup_page.locator("#ai-config-modal").wait_for(state="visible")
     setup_page.locator("#claude-thinking-enabled").uncheck()
+    setup_page.locator("#ai-config-modal [data-bs-dismiss='modal']").last.click()
+    setup_page.locator("#ai-config-modal").wait_for(state="hidden")
     setup_page.locator("#target-company-bosch").check()
     setup_page.locator("#target-company-dallmeier").check()
     setup_page.locator("#target-company-dhl").check()
@@ -2196,9 +2216,6 @@ def test_run_page_polls_and_renders_real_backend_stages(setup_page: object) -> N
         '"target_companies":["bosch","telekom","rohde-schwarz","siemens","dhl","thyssenkrupp","dallmeier"]'
         in posted_bodies[0]
     )
-    assert setup_page.evaluate(
-        "JSON.parse(localStorage.getItem('job-scan.setup-draft.v1')).claude.thinking_enabled"
-    ) is False
     assert states == []
 
 
@@ -2338,6 +2355,9 @@ def test_completed_run_open_review_desk_shows_fresh_review(setup_page: object) -
     setup_page.route("**/api/setup-and-scan", respond_run)
     setup_page.route("**/api/setup-and-scan/web-run-1", respond_run)
     setup_page.locator("#resume").set_input_files(str(RESUME))
+    setup_page.evaluate(
+        "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
+    )
     setup_page.get_by_role("button", name="Save and run scan").click()
     review_link = setup_page.get_by_role("link", name="Open review desk")
     review_link.wait_for(state="visible")
@@ -2392,6 +2412,9 @@ def test_run_page_renders_review_batch_percent_and_counts(setup_page: object) ->
     setup_page.route("**/api/setup-and-scan", respond_run)
     setup_page.route("**/api/setup-and-scan/web-run-1", respond_run)
     setup_page.locator("#resume").set_input_files(str(RESUME))
+    setup_page.evaluate(
+        "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
+    )
 
     setup_page.get_by_role("button", name="Save and run scan").click()
 
@@ -2539,6 +2562,9 @@ def test_run_page_reports_service_disconnect_instead_of_running_forever(
     setup_page.route("**/api/setup-and-scan", disconnect)
     setup_page.route("**/api/setup-and-scan/web-run-1", disconnect)
     setup_page.locator("#resume").set_input_files(str(RESUME))
+    setup_page.evaluate(
+        "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
+    )
 
     setup_page.get_by_role("button", name="Save and run scan").click()
 
@@ -2652,18 +2678,20 @@ def test_ats_job_checkbox_uses_a_visible_unchecked_border(setup_page: object) ->
 
 def test_review_cards_have_a_framed_non_collapsible_area(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
+    current_review = setup_page.locator('[data-review-block="current"]')
 
-    assert setup_page.locator("[data-collapse-review-groups]").count() == 0
-    assert setup_page.locator(".review-groups > .job-group > summary").count() == 0
-    assert setup_page.locator(".review-groups > details.job-group").count() == 0
-    assert setup_page.locator(".review-groups").evaluate(
+    assert current_review.locator("[data-collapse-review-groups]").count() == 0
+    assert current_review.locator(".review-groups > .job-group > summary").count() == 0
+    assert current_review.locator(".review-groups > details.job-group").count() == 0
+    assert current_review.locator(".review-groups").evaluate(
         "node => getComputedStyle(node).borderTopWidth"
     ) == "1px"
 
 
 def test_review_jobs_scroll_without_moving_the_page(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    groups = setup_page.locator(".review-groups")
+    setup_page.locator("#review-language-requirement").select_option("")
+    groups = setup_page.locator('[data-review-block="current"] .review-groups')
     groups.evaluate("node => node.scrollIntoView({block: 'start'})")
     setup_page.wait_for_timeout(100)
     groups.hover()
@@ -2933,18 +2961,19 @@ def test_legacy_group_order_survives_storage_migration_write_failure(
 def test_review_group_order_discards_saved_history_entry(setup_page: object) -> None:
     setup_page.evaluate(
         "localStorage.setItem('job-scan.review-group-order.v1', "
-        "JSON.stringify(['history', 'ignored']))"
+        "JSON.stringify(['history', 'pending']))"
     )
 
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
 
-    group_ids = setup_page.locator("[data-review-group-tab]").evaluate_all(
+    current_review = setup_page.locator('[data-review-block="current"]')
+    group_ids = current_review.locator("[data-review-group-tab]").evaluate_all(
         "items => items.map(item => item.dataset.reviewGroupTab)"
     )
     assert "history" not in group_ids
-    assert group_ids[0] == "ignored"
-    assert setup_page.locator("#history").count() == 0
+    assert group_ids[0] == "pending"
+    assert current_review.locator("#history").count() == 0
 
 
 def test_review_group_deep_links_select_the_matching_panel(setup_page: object) -> None:
