@@ -777,6 +777,7 @@ def test_disabled_opencli_switch_does_not_hide_existing_review_sources(
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
     setup_page.locator('[data-nav-step="review"]').click()
+    setup_page.locator("#review-language-requirement").select_option("")
 
     assert setup_page.evaluate(
         "document.querySelector('#source-filter').tomselect.items"
