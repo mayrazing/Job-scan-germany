@@ -24,6 +24,7 @@ from job_scan.domain import (
     MachineStatus,
     Snapshot,
     StoreMeta,
+    UserStatus,
 )
 from job_scan.search_history import SearchHistoryEntry
 from job_scan.setup_service import SetupAnswers
@@ -242,8 +243,15 @@ def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None
         review_job("recommended", MachineStatus.ELIGIBLE),
         review_job("pending", MachineStatus.PENDING),
     )
+    tracked = review_snapshot(
+        review_job("saved").model_copy(update={"user_status": UserStatus.SAVED})
+    )
     page = BeautifulSoup(
-        render_console(snapshot, ats_source_run_id="search-1"),
+        render_console(
+            snapshot,
+            global_snapshot=tracked,
+            ats_source_run_id="search-1",
+        ),
         "html.parser",
     )
 
@@ -280,8 +288,10 @@ def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None
     start = page.select_one('[data-open-ats][data-search-run-id="search-1"]')
     assert start is not None and start.has_attr("disabled")
     assert start.get_text(" ", strip=True) == "Check 0 selected jobs"
-    assert page.select_one('#recommended [data-ats-select-job][value="recommended"]')
-    assert page.select_one('#pending [data-ats-select-job][value="pending"]')
+    assert review_view.select("[data-ats-select-job]") == []
+    assert job_tracker_view.select_one(
+        '#saved [data-ats-select-job][value="saved"]'
+    )
     assert "Step 1 of 6" in page.select_one("#setup").get_text(" ", strip=True)
     assert "Step 3 of 6" in review_view.get_text(" ", strip=True)
     assert "Step 4 of 6" in job_tracker_view.get_text(" ", strip=True)
@@ -298,23 +308,40 @@ def test_console_uses_top_workflow_navigation_without_a_duplicate_step_rail() ->
     assert console_card.select_one(":scope > .console-body") is not None
 
 
-def test_console_places_ats_selectors_only_in_cards_without_group_headers() -> None:
+def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
     snapshot = review_snapshot(
         review_job("recommended", MachineStatus.ELIGIBLE),
         review_job("pending", MachineStatus.PENDING),
     )
+    tracked = review_snapshot(
+        review_job("saved").model_copy(update={"user_status": UserStatus.SAVED}),
+        review_job("applied").model_copy(update={"user_status": UserStatus.APPLIED}),
+    )
     page = BeautifulSoup(
-        render_console(snapshot, ats_source_run_id="search-1"),
+        render_console(
+            snapshot,
+            global_snapshot=tracked,
+            ats_source_run_id="search-1",
+        ),
         "html.parser",
     )
 
+    current_block = page.select_one('[data-review-block="current"]')
+    global_block = page.select_one('[data-review-block="global"]')
+    assert current_block is not None
+    assert global_block is not None
     assert page.select("[data-ats-select-group]") == []
     assert page.select(".review-groups > details.job-group") == []
     assert len(page.select(".review-groups > section.job-group")) == 10
     assert page.select(".review-groups > .job-group > summary") == []
-    assert page.select_one('#recommended .card-header [data-ats-select-job][value="recommended"]')
-    assert page.select_one('#pending .card-header [data-ats-select-job][value="pending"]')
-    assert page.select_one("#recommended .card-body > .ats-job-selector") is None
+    assert current_block.select("[data-ats-select-job]") == []
+    assert global_block.select_one(
+        '#saved .card-header [data-ats-select-job][value="saved"]'
+    )
+    assert global_block.select_one(
+        '#applied .card-header [data-ats-select-job][value="applied"]'
+    )
+    assert global_block.select_one("#saved .card-body > .ats-job-selector") is None
 
 
 def test_console_omits_obsolete_review_group_collapse_control() -> None:

@@ -541,7 +541,7 @@
                 </header>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
                   {{ navigation(current_dashboard, 'Current history job groups') }}
-                  <div class="review-groups">{{ groups(current_dashboard, true, true, 'current') }}</div>
+                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current') }}</div>
                 </div>
               </section>
             </div>
@@ -577,12 +577,13 @@
           <footer class="form-footer" id="review-actions" hidden>
             <div class="review-ats-controls">
               <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
-              <label class="ats-resume-picker" for="ats-resume">
+              <a class="btn btn-primary primary-button" href="#job-tracker" data-back-to-job-tracker data-review-only>Job Tracker</a>
+              <label class="ats-resume-picker" for="ats-resume" data-job-tracker-only>
                 <span class="field-label">ATS resume</span>
                 <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
                 <small>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
               </label>
-              <button class="btn btn-primary primary-button" type="button" data-open-ats data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
+              <button class="btn btn-primary primary-button" type="button" data-open-ats data-job-tracker-only data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
             </div>
           </footer>
 
@@ -591,7 +592,7 @@
               <div>
                 <p class="eyebrow">Step 5 of 6</p>
                 <h2 id="ats-running-title">ATS run</h2>
-                <p>Follow the current ATS check from Review to completion.</p>
+                <p>Follow the current ATS check from Job Tracker to completion.</p>
               </div>
               <span class="fixed-scope ready-badge" id="ats-run-badge">Idle</span>
             </header>
@@ -601,7 +602,7 @@
                 <div>
                   <p class="eyebrow">One job per AI request</p>
                   <h3 id="ats-running-progress-title">ATS check progress</h3>
-                  <p id="ats-run-message" aria-live="polite">No ATS check is running. Start one from Review.</p>
+                  <p id="ats-run-message" aria-live="polite">No ATS check is running. Start one from Job Tracker.</p>
                 </div>
                 <strong class="run-percent" id="ats-run-percent">Idle</strong>
               </header>
@@ -616,7 +617,7 @@
             </section>
 
             <footer class="form-footer ats-running-footer">
-              <a class="btn btn-outline-secondary secondary-button" href="#review" data-back-to-review>Back to review</a>
+              <a class="btn btn-outline-secondary secondary-button" href="#job-tracker" data-back-to-job-tracker>Back to Job Tracker</a>
               <a class="btn btn-primary primary-button" id="ats-results-link" href="#ats-check" hidden>Open ATS results</a>
             </footer>
           </section>
@@ -746,7 +747,7 @@
             {% endif %}
 
             <footer class="form-footer ats-footer">
-              <a class="btn btn-outline-secondary secondary-button" href="#review" data-back-to-review>Back to review</a>
+              <a class="btn btn-outline-secondary secondary-button" href="#job-tracker" data-back-to-job-tracker>Back to Job Tracker</a>
               <p>Scores estimate resume-to-JD fit. They do not guarantee screening results.</p>
             </footer>
           </section>

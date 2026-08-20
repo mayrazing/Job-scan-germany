@@ -369,6 +369,14 @@ GLOBAL_STATUS_SNAPSHOT = Snapshot(
     ],
 )
 
+GLOBAL_ATS_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=45),
+    jobs=[
+        job.model_copy(update={"user_status": UserStatus.SAVED})
+        for job in SOURCE_FILTER_SNAPSHOT.jobs
+    ],
+)
+
 
 @pytest.fixture
 def setup_page() -> Iterator[object]:
@@ -438,6 +446,8 @@ def setup_page() -> Iterator[object]:
                     global_snapshot=(
                         GLOBAL_STATUS_SNAPSHOT
                         if "global-status=1" in request.url
+                        else GLOBAL_ATS_SNAPSHOT
+                        if "ats-jobs=1" in request.url
                         else None
                     ),
                     ai_providers=AI_PROVIDERS,
@@ -453,6 +463,11 @@ def setup_page() -> Iterator[object]:
         yield page
         context.close()
         browser.close()
+
+
+def open_ats_jobs_in_tracker(setup_page: object) -> None:
+    setup_page.goto("http://draft.test/setup?ats-jobs=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
 
 
 def test_ai_configuration_modal_saves_one_global_selection(setup_page: object) -> None:
@@ -540,8 +555,8 @@ def test_ai_configuration_modal_is_read_only_while_ai_is_in_use(
     assert modal.locator("[data-save-ai-selection]").is_disabled()
 
 
-def test_review_ats_controls_share_height_and_edges(setup_page: object) -> None:
-    setup_page.locator('[data-nav-step="review"]').click()
+def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> None:
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
 
     rectangles = setup_page.locator(
         "#new-run-button, #ats-resume, [data-open-ats]"
@@ -591,6 +606,47 @@ def test_job_tracker_tab_shows_global_jobs_outside_review(setup_page: object) ->
     setup_page.reload()
     setup_page.wait_for_load_state("networkidle")
     assert job_tracker.is_visible()
+
+
+def test_ats_selection_is_available_only_in_job_tracker(setup_page: object) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#review")
+    setup_page.wait_for_load_state("networkidle")
+
+    assert setup_page.locator(
+        '[data-review-block="current"] [data-ats-select-job]'
+    ).count() == 0
+    assert setup_page.locator("#new-run-button").is_visible()
+    assert setup_page.locator("#ats-resume").is_hidden()
+    assert setup_page.locator("[data-open-ats]").is_hidden()
+    job_tracker_button = setup_page.locator(
+        '#review-actions [data-review-only][data-back-to-job-tracker]'
+    )
+    assert job_tracker_button.text_content() == "Job Tracker"
+    assert job_tracker_button.is_visible()
+
+    job_tracker_button.click()
+
+    assert setup_page.locator(
+        '[data-review-block="global"] [data-ats-select-job]'
+    ).count() == 1
+    assert setup_page.locator("#new-run-button").is_visible()
+    assert job_tracker_button.is_hidden()
+    assert setup_page.locator("#ats-resume").is_visible()
+    assert setup_page.locator("[data-open-ats]").is_visible()
+
+
+def test_idle_ats_run_points_back_to_job_tracker(setup_page: object) -> None:
+    setup_page.locator('[data-nav-step="ats-run"]').click()
+
+    assert setup_page.locator("#ats-run-message").text_content() == (
+        "No ATS check is running. Start one from Job Tracker."
+    )
+    back = setup_page.locator("#ats-running [data-back-to-job-tracker]")
+    assert back.get_attribute("href") == "#job-tracker"
+
+    back.click()
+
+    assert setup_page.locator("#job-tracker-view").is_visible()
 
 
 def test_arbeitsagentur_switch_defaults_on_and_restores_disabled_draft(
@@ -1354,7 +1410,7 @@ def test_global_resume_selection_updates_only_global_review(
     assert setup_page.locator("#job-tracker-view").is_visible()
 
 
-def test_status_change_preserves_ats_selection_when_card_changes_blocks(
+def test_status_change_exposes_ats_selection_only_after_job_enters_tracker(
     setup_page: object,
 ) -> None:
     current_job = source_job(
@@ -1404,7 +1460,7 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
         '[data-review-block="current"] '
         'article[data-job-key="current-status-local"]'
     )
-    current_card.locator("[data-ats-select-job]").check()
+    assert current_card.locator("[data-ats-select-job]").count() == 0
     status_form = current_card.locator('[data-job-action="status"]')
     status_form.locator('select[name="status"]').select_option("saved")
 
@@ -1417,7 +1473,9 @@ def test_status_change_preserves_ats_selection_when_card_changes_blocks(
     setup_page.locator('[data-nav-step="job-tracker"]').click()
     global_card.wait_for(state="visible")
     assert current_card.count() == 0
-    assert global_card.locator("[data-ats-select-job]").is_checked()
+    selector = global_card.locator("[data-ats-select-job]")
+    assert not selector.is_checked()
+    selector.check()
     assert setup_page.locator("[data-open-ats]").text_content() == (
         "Check 1 selected jobs"
     )
@@ -2405,9 +2463,7 @@ def test_ats_start_polls_common_then_parallel_job_states(setup_page: object) -> 
         lambda route: respond_next(route, states),
     )
 
-    setup_page.locator('[data-nav-step="review"]').click()
-    setup_page.locator("#review-posted-within-days").select_option("")
-    setup_page.locator("#review-language-requirement").select_option("")
+    open_ats_jobs_in_tracker(setup_page)
     start = setup_page.locator("[data-open-ats]")
     assert start.is_disabled()
     setup_page.locator(
@@ -2457,8 +2513,10 @@ def test_ats_start_polls_common_then_parallel_job_states(setup_page: object) -> 
 
 
 def test_ats_job_checkbox_uses_a_visible_unchecked_border(setup_page: object) -> None:
-    setup_page.locator('[data-nav-step="review"]').click()
-    job_checkbox = setup_page.locator("#recommended [data-ats-select-job]").first
+    open_ats_jobs_in_tracker(setup_page)
+    job_checkbox = setup_page.locator(
+        '[data-review-block="global"] #saved [data-ats-select-job]'
+    ).first
 
     assert job_checkbox.evaluate(
         "control => getComputedStyle(control).borderTopColor"
@@ -2808,8 +2866,7 @@ def test_ats_failed_state_maps_error_and_skipped_without_polling_again(
         )
 
     setup_page.route("**/api/ats-runs/ats-1", respond_failed)
-    setup_page.locator('[data-nav-step="review"]').click()
-    setup_page.locator("#review-posted-within-days").select_option("")
+    open_ats_jobs_in_tracker(setup_page)
     setup_page.locator(
         '[data-ats-select-job][value="linkedin-only"]'
     ).check()
@@ -2866,9 +2923,7 @@ def test_ats_start_failure_keeps_selection_for_retry(setup_page: object) -> None
 
     setup_page.route("**/api/ats-runs", respond_start)
     setup_page.on("dialog", lambda dialog: dialog.accept())
-    setup_page.locator('[data-nav-step="review"]').click()
-    setup_page.locator("#review-posted-within-days").select_option("")
-    setup_page.locator("#review-language-requirement").select_option("")
+    open_ats_jobs_in_tracker(setup_page)
     selected = setup_page.locator(
         '[data-ats-select-job][value="linkedin-only"]'
     )
@@ -2951,7 +3006,7 @@ def test_ats_run_nav_shows_idle_and_ats_check_nav_uses_saved_results(
     assert setup_page.locator("#ats-run-badge").text_content() == "Idle"
     assert setup_page.locator("#ats-run-percent").text_content() == "Idle"
     assert setup_page.locator("#ats-run-message").text_content() == (
-        "No ATS check is running. Start one from Review."
+        "No ATS check is running. Start one from Job Tracker."
     )
 
     setup_page.locator('[data-nav-step="ats"]').click()
@@ -2972,6 +3027,7 @@ def test_ats_top_nav_opens_just_completed_result(
             content_type="text/html",
             body=render_console(
                 SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=GLOBAL_ATS_SNAPSHOT,
                 ai_providers=AI_PROVIDERS,
                 ats_history=ATS_HISTORY if has_saved_result else [],
                 selected_ats=SELECTED_ATS if has_saved_result else None,
@@ -2979,7 +3035,7 @@ def test_ats_top_nav_opens_just_completed_result(
             ),
         ),
     )
-    setup_page.goto("http://draft.test/setup?fresh=1#review")
+    setup_page.goto("http://draft.test/setup?fresh=1#job-tracker")
 
     completed = ats_state(
         status="complete",
@@ -2999,7 +3055,6 @@ def test_ats_top_nav_opens_just_completed_result(
             body=json.dumps(completed),
         ),
     )
-    setup_page.locator("#review-posted-within-days").select_option("")
     setup_page.locator(
         '[data-ats-select-job][value="linkedin-only"]'
     ).check()
@@ -3104,8 +3159,9 @@ def test_delayed_idle_lookup_cannot_overwrite_a_new_ats_run(setup_page: object) 
         "**/api/ats-runs/current",
         lambda route: pending_current.append(route),
     )
-    setup_page.goto("http://draft.test/setup?delayed-current=1#review")
-    setup_page.locator("#review-posted-within-days").select_option("")
+    setup_page.goto(
+        "http://draft.test/setup?ats-jobs=1&delayed-current=1#job-tracker"
+    )
     setup_page.locator(
         '[data-ats-select-job][value="linkedin-only"]'
     ).check()

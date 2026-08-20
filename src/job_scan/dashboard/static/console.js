@@ -12,6 +12,12 @@
   const atsResultsLink = document.querySelector("#ats-results-link");
   const atsStartButton = document.querySelector("[data-open-ats]");
   const atsResumeInput = document.querySelector("#ats-resume");
+  const reviewOnlyControls = [
+    ...document.querySelectorAll("[data-review-only]"),
+  ];
+  const jobTrackerOnlyControls = [
+    ...document.querySelectorAll("[data-job-tracker-only]"),
+  ];
   const atsJobSelectors = () => [
     ...document.querySelectorAll("[data-ats-select-job]"),
   ];
@@ -494,6 +500,12 @@
     reviewView.hidden = selected !== "review";
     jobTrackerView.hidden = selected !== "job-tracker";
     reviewActions.hidden = !["review", "job-tracker"].includes(selected);
+    reviewOnlyControls.forEach((control) => {
+      control.hidden = selected !== "review";
+    });
+    jobTrackerOnlyControls.forEach((control) => {
+      control.hidden = selected !== "job-tracker";
+    });
     atsRunningView.hidden = selected !== "ats-run";
     atsView.hidden = selected !== "ats";
     document.querySelectorAll("[data-nav-step]").forEach((link) => {
@@ -906,7 +918,7 @@
     atsTaskList.replaceChildren();
     atsRunBadge.textContent = "Idle";
     atsRunPercent.textContent = "Idle";
-    atsRunMessage.textContent = "No ATS check is running. Start one from Review.";
+    atsRunMessage.textContent = "No ATS check is running. Start one from Job Tracker.";
     atsRunProgressBar.classList.remove(
       "progress-bar-striped",
       "progress-bar-animated",
@@ -939,11 +951,11 @@
           signal: AbortSignal.timeout(10_000),
         });
       } catch (_error) {
-        failAts("Connection to ATS service lost. Return to review and try again.");
+        failAts("Connection to ATS service lost. Return to Job Tracker and try again.");
         return;
       }
       if (response.status === 404) {
-        failAts("ATS state was lost after the service restarted. Return to review and try again.");
+        failAts("ATS state was lost after the service restarted. Return to Job Tracker and try again.");
         return;
       }
       if (!response.ok) {
@@ -1457,10 +1469,10 @@
     openReview();
   });
 
-  document.querySelectorAll("[data-back-to-review]").forEach((link) => {
+  document.querySelectorAll("[data-back-to-job-tracker]").forEach((link) => {
     link.addEventListener("click", (event) => {
       event.preventDefault();
-      openReview();
+      openJobTracker();
     });
   });
 
