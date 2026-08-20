@@ -31,6 +31,15 @@ GLOBAL_USER_STATUSES = frozenset(
         UserStatus.IGNORED,
     }
 )
+APPLICATION_USER_STATUSES = frozenset(
+    {
+        UserStatus.APPLIED,
+        UserStatus.INTERVIEWING,
+        UserStatus.OFFER,
+        UserStatus.WITHDRAWN,
+        UserStatus.REJECTED,
+    }
+)
 
 
 class GlobalJobStore:
@@ -84,6 +93,7 @@ class GlobalJobStore:
                     or job.user_status != current_job.user_status
                     or job.user_status_updated_at != current_job.user_status_updated_at
                     or job.user_status_history != current_job.user_status_history
+                    or job.application_resume_id != current_job.application_resume_id
                     or job.global_status_deleted_at
                     != current_job.global_status_deleted_at
                 ):
@@ -132,6 +142,7 @@ class GlobalJobStore:
                 entry.model_copy(deep=True)
                 for entry in status_job.user_status_history
             ]
+            job.application_resume_id = status_job.application_resume_id
         return result
 
     def set_status(
@@ -171,6 +182,7 @@ class GlobalJobStore:
                     entry.model_copy(deep=True)
                     for entry in previous.user_status_history
                 ]
+                candidate.application_resume_id = previous.application_resume_id
             candidate.user_status = selected_status
             candidate.user_status_updated_at = (
                 previous.user_status_updated_at
@@ -180,6 +192,12 @@ class GlobalJobStore:
             candidate.global_status_deleted_at = None
             if resume_id is not None and profile_hash is not None:
                 _save_resume_match(candidate, resume_id, profile_hash)
+            if (
+                candidate.application_resume_id is None
+                and resume_id is not None
+                and selected_status in APPLICATION_USER_STATUSES
+            ):
+                candidate.application_resume_id = resume_id
             merged, _changed = _merge_into(jobs, candidate)
             if previous is None:
                 merged.user_status_history = []
@@ -188,6 +206,26 @@ class GlobalJobStore:
             merged.global_status_deleted_at = None
             return _visible_snapshot(
                 self._persist_unlocked(current, jobs, deletions=deletions)
+            )
+
+    def set_application_resume(self, job: JobRecord, resume_id: str) -> JobRecord:
+        """Correct the resume recorded for an existing job application."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            if not _has_application_progress(merged):
+                raise ValueError("job has not entered the application lifecycle")
+            merged.application_resume_id = resume_id
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
             )
 
     def upsert_with_default_status(
@@ -502,6 +540,20 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         )
     else:
         profile.user_status_history = []
+    application_job = max(
+        (job for job in candidates if job.application_resume_id is not None),
+        key=lambda job: (
+            job.user_status_updated_at,
+            job.last_seen,
+            job.canonical_job_key,
+        ),
+        default=None,
+    )
+    profile.application_resume_id = (
+        application_job.application_resume_id
+        if application_job is not None
+        else None
+    )
     profile.source_occurrences = _merged_occurrences(candidates)
     profile.resume_matches = _merged_resume_matches(candidates)
     return profile
@@ -518,6 +570,13 @@ def _newest_status_job(candidates: Sequence[JobRecord]) -> JobRecord | None:
             bool(job.user_status_history),
             job.canonical_job_key,
         ),
+    )
+
+
+def _has_application_progress(job: JobRecord) -> bool:
+    return job.user_status in APPLICATION_USER_STATUSES or any(
+        entry.status in APPLICATION_USER_STATUSES
+        for entry in job.user_status_history
     )
 
 

@@ -1293,6 +1293,132 @@ def test_status_change_updates_review_without_page_navigation(
     )
 
 
+def test_global_status_request_includes_the_selected_resume(
+    setup_page: object,
+) -> None:
+    resume_id = "sha256:" + "a" * 64
+    resume = ResumeCatalogEntry(
+        resume_id=resume_id,
+        profile_hash="sha256:" + "b" * 64,
+        candidate_name="Backend CV",
+        filename="backend.pdf",
+        created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+    )
+    posted: list[dict[str, object]] = []
+
+    def serve_resume_tracker(route: object) -> None:
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-saved/status"):
+            posted.append(request.post_data_json)
+            route.fulfill(status=204, body="")
+            return
+        if "resume-status=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=GLOBAL_STATUS_SNAPSHOT,
+                resume_catalog=[resume],
+                selected_resume_id=resume_id,
+            ),
+        )
+
+    setup_page.route("**/*", serve_resume_tracker)
+    setup_page.goto("http://draft.test/setup?resume-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    form = setup_page.locator(
+        '[data-review-block="global"] '
+        '[data-job-key="global-saved"] [data-job-action="status"]'
+    )
+
+    form.locator('select[name="status"]').select_option("applied")
+    form.locator('button[type="submit"]').click()
+    setup_page.wait_for_timeout(100)
+
+    assert posted == [{"status": "applied", "resume_id": resume_id}]
+
+
+def test_application_resume_correction_posts_without_page_navigation(
+    setup_page: object,
+) -> None:
+    resume_a = "sha256:" + "a" * 64
+    resume_b = "sha256:" + "b" * 64
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=resume_a,
+            profile_hash="sha256:" + "c" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+        ),
+        ResumeCatalogEntry(
+            resume_id=resume_b,
+            profile_hash="sha256:" + "d" * 64,
+            candidate_name="Platform CV",
+            filename="platform.pdf",
+            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+        ),
+    ]
+    tracked = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "user_status": UserStatus.APPLIED,
+                    "application_resume_id": resume_a,
+                }
+            )
+        ],
+    )
+    posted: list[dict[str, object]] = []
+
+    def serve_resume_correction(route: object) -> None:
+        request = route.request
+        if request.url.endswith(
+            "/api/global-jobs/global-saved/application-resume"
+        ):
+            posted.append(request.post_data_json)
+            route.fulfill(status=204, body="")
+            return
+        if "resume-correction=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=tracked,
+                resume_catalog=resumes,
+                selected_resume_id=resume_a,
+            ),
+        )
+
+    setup_page.route("**/*", serve_resume_correction)
+    setup_page.goto("http://draft.test/setup?resume-correction=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="applied"]'
+    ).click()
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+    form = setup_page.locator(
+        '[data-review-block="global"] '
+        '[data-job-key="global-saved"] '
+        '[data-job-action="application-resume"]'
+    )
+
+    form.locator('select[name="resume_id"]').select_option(resume_b)
+    form.locator('button[type="submit"]').click()
+    setup_page.wait_for_timeout(100)
+
+    assert posted == [{"resume_id": resume_b}]
+    assert navigations == []
+
+
 def test_global_resume_selection_updates_only_global_review(
     setup_page: object,
 ) -> None:

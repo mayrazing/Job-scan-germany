@@ -1,4 +1,5 @@
-{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
+{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current', resumes=()) -%}
+  {% set has_application = job.application_resume_id or job.user_status.value in ('applied', 'interviewing', 'offer', 'withdrawn', 'rejected') %}
   <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}">
     <div class="status-rail" aria-label="Job status">
       <span><strong>User status:</strong> {{ job.user_status.value | replace('_', ' ') }}</span>
@@ -83,6 +84,16 @@
             </ol>
           </details>
         </section>
+      {% endif %}
+
+      {% if has_application %}
+        {% set applied_resume = namespace(label='Unknown') %}
+        {% for resume in resumes %}
+          {% if resume.resume_id == job.application_resume_id %}
+            {% set applied_resume.label = resume.candidate_name ~ ' - ' ~ resume.filename %}
+          {% endif %}
+        {% endfor %}
+        <p class="application-resume" data-application-resume><strong>Applied with:</strong> {{ applied_resume.label }}</p>
       {% endif %}
 
       <dl class="facts">
@@ -175,6 +186,19 @@
           </label>
           <button type="submit">Save status</button>
         </form>
+        {% if status_scope == 'global' and resumes and has_application %}
+          <form class="job-action" data-job-action="application-resume" data-job-key="{{ job.canonical_key }}">
+            <label>
+              <span>Applied resume</span>
+              <select name="resume_id">
+                {% for resume in resumes %}
+                  <option value="{{ resume.resume_id }}"{% if resume.resume_id == job.application_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit">Change resume</button>
+          </form>
+        {% endif %}
         {% if status_scope == 'global' %}
           <button
             class="btn btn-outline-danger"
@@ -213,12 +237,12 @@
   </nav>
 {%- endmacro %}
 
-{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
+{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current', resumes=()) -%}
   {% for group in dashboard.active_groups.values() %}
     <section class="job-group" id="{{ group.id }}" aria-labelledby="{{ group.id }}-title"{% if not loop.first %} hidden{% endif %}>
       <h2 class="visually-hidden" id="{{ group.id }}-title">{{ group.title }}</h2>
       <div class="card-grid">
-        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
+        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope, resumes) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
       </div>
     </section>
   {% endfor %}

@@ -26,6 +26,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.resume_catalog import ResumeCatalogEntry
 from job_scan.search_history import SearchHistoryEntry
 from job_scan.setup_service import SetupAnswers
 
@@ -342,6 +343,66 @@ def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
         '#applied .card-header [data-ats-select-job][value="applied"]'
     )
     assert global_block.select_one("#saved .card-body > .ats-job-selector") is None
+
+
+def test_job_tracker_shows_and_can_correct_the_application_resume() -> None:
+    resume_a = "sha256:" + "a" * 64
+    resume_b = "sha256:" + "b" * 64
+    tracked = review_snapshot(
+        review_job("known").model_copy(
+            update={
+                "user_status": UserStatus.APPLIED,
+                "application_resume_id": resume_a,
+            }
+        ),
+        review_job("unknown").model_copy(
+            update={"user_status": UserStatus.REJECTED}
+        ),
+    )
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=resume_a,
+            profile_hash="sha256:" + "c" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+        ),
+        ResumeCatalogEntry(
+            resume_id=resume_b,
+            profile_hash="sha256:" + "d" * 64,
+            candidate_name="Platform CV",
+            filename="platform.pdf",
+            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+        ),
+    ]
+    page = BeautifulSoup(
+        render_console(global_snapshot=tracked, resume_catalog=resumes),
+        "html.parser",
+    )
+
+    known = page.select_one('[data-review-block="global"] [data-job-key="known"]')
+    unknown = page.select_one(
+        '[data-review-block="global"] [data-job-key="unknown"]'
+    )
+    assert known is not None
+    assert unknown is not None
+    known_resume = known.select_one("[data-application-resume]")
+    unknown_resume = unknown.select_one("[data-application-resume]")
+    assert known_resume is not None
+    assert unknown_resume is not None
+    assert known_resume.get_text(" ", strip=True) == (
+        "Applied with: Backend CV - backend.pdf"
+    )
+    correction = known.select_one(
+        'form[data-job-action="application-resume"] select[name="resume_id"]'
+    )
+    assert correction is not None
+    assert [option.get("value") for option in correction.select("option")] == [
+        resume_a,
+        resume_b,
+    ]
+    assert correction.select_one("option[selected]").get("value") == resume_a
+    assert unknown_resume.get_text(" ", strip=True) == "Applied with: Unknown"
 
 
 def test_console_omits_obsolete_review_group_collapse_control() -> None:

@@ -261,6 +261,143 @@ def test_every_status_change_is_global_and_new_is_rejected(
     assert global_jobs.find("current").user_status is UserStatus(selected_status)
 
 
+def test_global_status_records_the_selected_application_resume(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    config = load_config(paths.config_toml)
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(
+        job,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=config.resume_sha256,
+        profile_hash=config.profile_sha256,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/status",
+            json={
+                "status": "applied",
+                "resume_id": config.resume_sha256,
+            },
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.application_resume_id == config.resume_sha256
+
+
+def test_global_status_rejects_an_unknown_application_resume(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    config = load_config(paths.config_toml)
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(
+        job,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=config.resume_sha256,
+        profile_hash=config.profile_sha256,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/status",
+            json={
+                "status": "applied",
+                "resume_id": "sha256:" + "f" * 64,
+            },
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 404
+    assert saved is not None
+    assert saved.user_status is UserStatus.SAVED
+    assert saved.application_resume_id is None
+
+
+def test_application_resume_can_be_corrected_through_the_global_api(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    config = load_config(paths.config_toml)
+    resume_b = "sha256:" + "c" * 64
+    ResumeCatalogStore(paths).register(
+        resume_id=resume_b,
+        profile_hash="sha256:" + "d" * 64,
+        candidate_name="Platform CV",
+        filename="platform.pdf",
+        profile_bytes=b"# Platform profile",
+        config_bytes=serialize_config(config).encode("utf-8"),
+        resume_bytes=b"PLATFORM RESUME",
+        created_at=NOW,
+    )
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW,
+        resume_id=config.resume_sha256,
+        profile_hash=config.profile_sha256,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/application-resume",
+            json={"resume_id": resume_b},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.application_resume_id == resume_b
+    assert saved.user_status is UserStatus.APPLIED
+    assert [entry.status for entry in saved.user_status_history] == [
+        UserStatus.SAVED,
+        UserStatus.APPLIED,
+    ]
+
+
 def test_history_status_appears_in_global_block_of_another_history(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     repository = _repository(paths)

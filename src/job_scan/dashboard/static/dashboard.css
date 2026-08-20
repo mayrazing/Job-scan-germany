@@ -509,9 +509,16 @@ main {
 .reason,
 .source-error,
 .exclusions,
+.application-resume,
 .facts,
 .evidence {
   margin-top: 0.9rem;
+}
+
+.application-resume {
+  padding: 0.65rem 0.75rem;
+  border-left: 3px solid var(--action);
+  background: #F9FBFA;
 }
 
 .labels {

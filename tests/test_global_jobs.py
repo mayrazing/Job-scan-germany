@@ -210,6 +210,64 @@ def test_first_direct_tracker_status_still_starts_the_lifecycle_at_saved(
     ]
 
 
+def test_first_application_status_records_resume_without_later_overwrite(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    resume_a = "sha256:" + "1" * 64
+    resume_b = "sha256:" + "2" * 64
+
+    saved = store.set_status(
+        job,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=resume_a,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    applied = store.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW + timedelta(minutes=1),
+        resume_id=resume_a,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    interviewing = store.set_status(
+        job,
+        UserStatus.INTERVIEWING,
+        NOW + timedelta(minutes=2),
+        resume_id=resume_b,
+        profile_hash="sha256:" + "b" * 64,
+    )
+
+    assert saved.jobs[0].application_resume_id is None
+    assert applied.jobs[0].application_resume_id == resume_a
+    assert interviewing.jobs[0].application_resume_id == resume_a
+
+
+def test_application_resume_can_be_corrected_without_changing_progress(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    resume_a = "sha256:" + "1" * 64
+    resume_b = "sha256:" + "2" * 64
+    applied = store.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW,
+        resume_id=resume_a,
+        profile_hash="sha256:" + "a" * 64,
+    )
+
+    corrected = store.set_application_resume(applied.jobs[0], resume_b)
+
+    assert corrected.application_resume_id == resume_b
+    assert corrected.user_status is UserStatus.APPLIED
+    assert [entry.status for entry in corrected.user_status_history] == [
+        UserStatus.SAVED,
+        UserStatus.APPLIED,
+    ]
+
+
 def test_same_time_saved_and_applied_order_survives_import_and_duplicate_submit(
     store: GlobalJobStore,
 ) -> None:
@@ -485,6 +543,30 @@ def test_mutate_details_rejects_global_status_changes(store: GlobalJobStore) -> 
     assert store.load().jobs[0].user_status is UserStatus.SAVED
 
 
+def test_mutate_details_rejects_application_resume_changes(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    resume_a = "sha256:" + "1" * 64
+    resume_b = "sha256:" + "2" * 64
+    store.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW,
+        resume_id=resume_a,
+        profile_hash="sha256:" + "a" * 64,
+    )
+
+    def replace_resume(snapshot: Snapshot) -> Snapshot:
+        snapshot.jobs[0].application_resume_id = resume_b
+        return snapshot
+
+    with pytest.raises(ValueError, match="cannot change global job status"):
+        store.mutate_details(replace_resume)
+
+    assert store.load().jobs[0].application_resume_id == resume_a
+
+
 def test_mutate_details_rejects_global_job_removal(store: GlobalJobStore) -> None:
     store.import_snapshots(
         [_snapshot(_job("job-1", external_ids=("shared",), status=UserStatus.APPLIED))]
@@ -517,6 +599,26 @@ def test_overlay_copies_global_status_without_changing_input(store: GlobalJobSto
     assert overlaid.jobs[0].user_status is UserStatus.REJECTED
     assert overlaid.jobs[0].user_status_updated_at == NOW + timedelta(minutes=1)
     assert incoming.jobs[0].user_status is UserStatus.NEW
+
+
+def test_overlay_copies_application_resume_without_changing_input(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("global-key", external_ids=("shared",))
+    resume_id = "sha256:" + "1" * 64
+    store.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW,
+        resume_id=resume_id,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    incoming = _snapshot(_job("local-key", external_ids=("shared",)))
+
+    overlaid = store.overlay(incoming)
+
+    assert overlaid.jobs[0].application_resume_id == resume_id
+    assert incoming.jobs[0].application_resume_id is None
 
 
 def test_set_status_rejects_new(store: GlobalJobStore) -> None:

@@ -7,11 +7,26 @@
     if (action === "restore") {
       return options;
     }
+    if (action === "application-resume") {
+      return {
+        ...options,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resume_id: form.elements.namedItem("resume_id").value,
+        }),
+      };
+    }
     const status = form.elements.namedItem("status").value;
+    const payload = { status };
+    const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
+    const selectedResumeId = document.body.dataset.selectedResumeId;
+    if (statusScope === "global" && selectedResumeId) {
+      payload.resume_id = selectedResumeId;
+    }
     return {
       ...options,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(payload),
     };
   };
 
@@ -844,8 +859,10 @@
     const jobKey = encodeURIComponent(rawJobKey);
     const runId = document.body.dataset.reviewRunId;
     const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
-    const endpoint = action === "status" && statusScope === "global"
-      ? `/api/global-jobs/${jobKey}/status`
+    const endpoint = statusScope === "global" && (
+      action === "status" || action === "application-resume"
+    )
+      ? `/api/global-jobs/${jobKey}/${action}`
       : runId
         ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${action}`
         : `/api/jobs/${jobKey}/${action}`;

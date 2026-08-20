@@ -541,7 +541,7 @@
                 </header>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
                   {{ navigation(current_dashboard, 'Current history job groups') }}
-                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current') }}</div>
+                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current', resume_catalog) }}</div>
                 </div>
               </section>
             </div>
@@ -568,7 +568,7 @@
                 {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker') }}
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Job Tracker groups') }}
-                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>
+                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global', resume_catalog) }}</div>
                 </div>
               </section>
             </div>

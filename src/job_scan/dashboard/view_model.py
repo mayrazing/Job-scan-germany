@@ -100,6 +100,7 @@ class JobCard:
     last_seen: datetime
     user_status: UserStatus
     user_status_history: tuple[JobStatusEvent, ...]
+    application_resume_id: str | None
     machine_status: MachineStatus
     effective_status: MachineStatus
     availability_status: AvailabilityStatus
@@ -242,6 +243,7 @@ def _card(job: JobRecord) -> JobCard:
             JobStatusEvent(status=entry.status, changed_at=entry.changed_at)
             for entry in job.user_status_history
         ),
+        application_resume_id=job.application_resume_id,
         machine_status=job.machine_status,
         effective_status=status,
         availability_status=job.availability_status,

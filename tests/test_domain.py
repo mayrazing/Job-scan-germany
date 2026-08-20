@@ -192,6 +192,7 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
     }
     assert set(dumped["jobs"][0]) == set(JobRecord.model_fields) - {
         "global_status_deleted_at",
+        "application_resume_id",
         "resume_matches",
         "user_status_history",
     }
@@ -281,6 +282,7 @@ def test_domain_enums_accept_only_contract_values() -> None:
         "glassdoor",
         "indeed",
         "linkedin",
+        "manual",
         "siemens",
         "simplify",
         "smartrecruiters",

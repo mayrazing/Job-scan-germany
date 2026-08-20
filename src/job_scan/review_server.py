@@ -111,6 +111,10 @@ _SESSION_COOKIE = "job_scan_session"
 
 class _StatusMutation(BaseModel):
     status: UserStatus
+    resume_id: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
     @field_validator("status")
     @classmethod
@@ -119,6 +123,10 @@ class _StatusMutation(BaseModel):
         if value not in GLOBAL_USER_STATUSES:
             raise ValueError("New is not a selectable user status")
         return value
+
+
+class _ApplicationResumeMutation(BaseModel):
+    resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class _AiModelDiscoveryRequest(BaseModel):
@@ -1592,11 +1600,55 @@ def create_review_app(
                 job = global_jobs.find(key)
                 if job is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND)
-                global_jobs.set_status(job, mutation.status)
+                if mutation.resume_id is not None:
+                    try:
+                        resume_catalog.read(mutation.resume_id)
+                    except KeyError:
+                        raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+                global_jobs.set_status(
+                    job,
+                    mutation.status,
+                    resume_id=mutation.resume_id,
+                )
         except LockUnavailable:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 "A scan is running; retry the status change after it completes.",
+            ) from None
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/api/global-jobs/{key}/application-resume",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def set_global_job_application_resume(
+        key: str,
+        mutation: _ApplicationResumeMutation,
+    ) -> Response:
+        try:
+            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
+                blocking=False
+            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
+                blocking=False
+            ):
+                job = global_jobs.find(key)
+                if job is None:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND)
+                try:
+                    resume_catalog.read(mutation.resume_id)
+                    global_jobs.set_application_resume(job, mutation.resume_id)
+                except KeyError:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+                except ValueError as error:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        str(error),
+                    ) from None
+        except LockUnavailable:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A scan is running; retry the resume change after it completes.",
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
