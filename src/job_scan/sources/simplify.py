@@ -11,23 +11,26 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
+import httpx
 from bs4 import BeautifulSoup
 from pydantic import HttpUrl, ValidationError
 
 from job_scan.company_size import native_company_size_evidence
 from job_scan.config import AppConfig
 from job_scan.domain import CompanySizeEvidence, CompanySizeSource, SourceKind
-from job_scan.http_client import InvalidResponse
+from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
 from job_scan.sources.base import (
     BrowserSourceError,
-    ClosureReason,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
     SourceError,
 )
-from job_scan.sources.job_snapshot_capture import browser_snapshot_script
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
+)
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -36,6 +39,8 @@ from job_scan.sources.opencli_challenge import (
 )
 
 _DEFAULT_TIMEOUT_SECONDS = 90
+_SNAPSHOT_TIMEOUT_SECONDS = 30
+_SNAPSHOT_CHALLENGE_WAIT_SECONDS = 30
 _MAX_OUTPUT_BYTES = 5_000_000
 _SEARCH_PAGE_URL = "https://simplify.jobs/jobs?state=Germany&country=Germany"
 _DETAIL_API = "https://api.simplify.jobs/v2/job-posting/:id/{job_id}/company"
@@ -129,6 +134,7 @@ class SimplifyDeAdapter:
     def __init__(
         self,
         config: AppConfig,
+        http_client: PublicHttpClient,
         *,
         opencli_executable: str | Path | None = None,
         limit: int | None = None,
@@ -144,6 +150,7 @@ class SimplifyDeAdapter:
         if challenge_wait_seconds < 0:
             raise ValueError("challenge_wait_seconds must not be negative")
         self._config = config
+        self._http_client = http_client
         self._opencli_executable = str(
             opencli_executable if opencli_executable is not None else _find_opencli()
         )
@@ -154,13 +161,11 @@ class SimplifyDeAdapter:
         self._session = f"job-scan-simplify-de-{os.getpid()}-{id(self):x}"
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
-        self._details: dict[str, FetchedOccurrence | Exception] = {}
 
     def discover(self) -> list[JobReference]:
         """Return unique Simplify jobs for every configured term and location."""
         self._discovery_errors.clear()
         self._completed_listing = True
-        self._details.clear()
         references: list[JobReference] = []
         references_by_id: dict[str, JobReference] = {}
         locations = self._config.locations or [""]
@@ -204,13 +209,6 @@ class SimplifyDeAdapter:
                             continue
                         references_by_id[reference.external_id] = reference
                         references.append(reference)
-            for index, reference in enumerate(references):
-                try:
-                    self._details[reference.external_id] = self._fetch_detail(reference)
-                except (BrowserSourceError, ExplicitlyClosed, InvalidResponse) as error:
-                    self._details[reference.external_id] = error
-                    if is_challenge_error(error):
-                        return references[: index + 1]
             return references
         finally:
             self._close_session()
@@ -227,18 +225,10 @@ class SimplifyDeAdapter:
         return errors
 
     def fetch_detail(self, reference: JobReference) -> FetchedOccurrence:
-        """Return detail data collected before the OpenCLI session was closed."""
+        """Return one complete Simplify posting from its public detail API."""
         if reference.source is not self.source:
             raise ValueError("reference source must be simplify")
-        try:
-            detail = self._details[reference.external_id]
-        except KeyError:
-            raise ValueError(
-                f"Simplify detail was not discovered for {reference.external_id}"
-            ) from None
-        if isinstance(detail, Exception):
-            raise detail
-        return detail
+        return self._fetch_detail(reference)
 
     def _search(self, search_term: str, location: str) -> list[object]:
         payload = self._evaluate(_search_script(self._config, search_term, location, self._limit))
@@ -251,20 +241,23 @@ class SimplifyDeAdapter:
         return [row for row in rows]
 
     def _fetch_detail(self, reference: JobReference) -> FetchedOccurrence:
-        payload = self._evaluate(_detail_script(reference.external_id))
-        status = _page_status(payload, "detail")
-        if status == "closed":
-            raise ExplicitlyClosed(_source_job_key(reference), _closure_reason(payload))
-        if status != "ok":
-            _raise_page_failure(status)
-        if not isinstance(payload, dict) or not isinstance(payload.get("job"), dict):
-            raise InvalidResponse("OpenCLI Simplify detail must contain a job object")
-        job = payload["job"]
+        source_job_key = _source_job_key(reference)
+        try:
+            job = self._http_client.get_json(
+                _DETAIL_API.format(job_id=reference.external_id)
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {404, 410}:
+                raise ExplicitlyClosed(
+                    source_job_key,
+                    "http_404" if error.response.status_code == 404 else "http_410",
+                ) from error
+            raise
         job_id = _required_job_id(job.get("id"))
         if job_id != reference.external_id:
             raise InvalidResponse("OpenCLI Simplify detail did not match its job ID")
         if _is_closed_job(job):
-            raise ExplicitlyClosed(_source_job_key(reference), "page_closed_marker")
+            raise ExplicitlyClosed(source_job_key, "page_closed_marker")
 
         company = _detail_company(job) or reference.listing_company
         title = _optional_string(job.get("title")) or reference.listing_title
@@ -278,22 +271,17 @@ class SimplifyDeAdapter:
             reference.with_current_identity(title=title, posted_at=posted_at)
         ):
             try:
-                self._open_page(str(reference.detail_url))
-                snapshot_payload = self._evaluate(
-                    _snapshot_script(reference.external_id)
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.detail_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="simplify",
+                    timeout_seconds=_SNAPSHOT_TIMEOUT_SECONDS,
+                    challenge_wait_seconds=_SNAPSHOT_CHALLENGE_WAIT_SECONDS,
                 )
             except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
                 snapshot_error_code = "snapshot_capture_failed"
-            else:
-                if (
-                    isinstance(snapshot_payload, dict)
-                    and snapshot_payload.get("status") == "ok"
-                    and isinstance(snapshot_payload.get("html"), str)
-                    and snapshot_payload["html"].strip()
-                ):
-                    snapshot_html = snapshot_payload["html"]
-                else:
-                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -443,31 +431,6 @@ def _search_script(
     }};
   }} catch (_error) {{
     return {{status: "request_failed", rows: []}};
-  }}
-}})()
-""".strip()
-
-
-def _detail_script(job_id: str) -> str:
-    endpoint = _DETAIL_API.format(job_id=job_id)
-    return f"""
-(async () => {{
-  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
-    /Cloudflare Ray ID|Verify you are human/i.test(document.body?.innerText || "") ||
-    !!document.querySelector('[id^="cf-"], iframe[src*="captcha" i]');
-  if (isChallenge()) return {{status: "challenge"}};
-  try {{
-    const response = await fetch({json.dumps(endpoint)}, {{
-      credentials: "omit",
-      headers: {{Accept: "application/json"}},
-    }});
-    if (response.status === 404 || response.status === 410) {{
-      return {{status: "closed", reason: `http_${{response.status}}`}};
-    }}
-    if (!response.ok) return {{status: "request_failed"}};
-    return {{status: "ok", job: await response.json()}};
-  }} catch (_error) {{
-    return {{status: "request_failed"}};
   }}
 }})()
 """.strip()
@@ -640,12 +603,6 @@ def _page_status(payload: object, page_name: str) -> str:
     if status is None:
         raise InvalidResponse(f"OpenCLI Simplify {page_name} output missing status")
     return status
-
-
-def _closure_reason(payload: object) -> ClosureReason:
-    if isinstance(payload, dict) and payload.get("reason") == "http_410":
-        return "http_410"
-    return "http_404"
 
 
 def _raise_page_failure(status: str) -> None:

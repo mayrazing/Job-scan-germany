@@ -1379,6 +1379,10 @@
         window.location.assign("/setup#review");
         return;
       }
+      if (result.resume_deleted) {
+        window.location.assign("/setup#review");
+        return;
+      }
       row.remove();
     } catch (error) {
       deleteButton.disabled = false;

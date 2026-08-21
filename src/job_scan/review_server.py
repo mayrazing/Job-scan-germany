@@ -1650,6 +1650,9 @@ def create_review_app(
                     status.HTTP_409_CONFLICT,
                     "A setup or scan is running; retry deletion after it completes.",
                 )
+        resume_id = _history_resume_id(history, run_id)
+        shared_resume = _history_still_uses_resume(history, run_id, resume_id)
+        resume_deleted = False
         try:
             with FileRWLock(repository.paths.workflow_lock_file).exclusive(
                 blocking=False
@@ -1682,6 +1685,24 @@ def create_review_app(
                             _quarantine_files(live_paths),
                         ):
                             pass
+                    if resume_id is not None and not shared_resume:
+                        try:
+                            live_resume_id = load_config(
+                                repository.paths.config_toml
+                            ).resume_sha256
+                        except (OSError, ValueError):
+                            live_resume_id = None
+                        if (
+                            live_resume_id != resume_id
+                            and not _resume_has_visible_jobs(
+                                global_jobs, resume_id
+                            )
+                        ):
+                            try:
+                                resume_catalog.delete(resume_id)
+                                resume_deleted = True
+                            except (KeyError, OSError):
+                                pass
         except LockUnavailable:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -1689,7 +1710,7 @@ def create_review_app(
             ) from None
         except (KeyError, ValueError):
             raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-        return {"deleted_latest": deleted_latest}
+        return {"deleted_latest": deleted_latest, "resume_deleted": resume_deleted}
 
     @app.post(
         "/api/jobs/{key}/company-size",
@@ -2061,6 +2082,51 @@ def _quarantine_files(paths: list[Path]) -> Iterator[None]:
                 # Visible state is already committed. A failed durability flush
                 # must not roll history back into a half-deleted user-visible state.
                 pass
+
+
+def _history_resume_id(
+    history: SearchHistoryStore, run_id: str
+) -> str | None:
+    """Return the resume hash archived with one search, or None when unreadable."""
+    try:
+        return load_config_bytes(
+            history.read_review_input(run_id).config_bytes
+        ).resume_sha256
+    except (KeyError, OSError, UnicodeError, ValueError):
+        return None
+
+
+def _history_still_uses_resume(
+    history: SearchHistoryStore, run_id: str, resume_id: str | None
+) -> bool:
+    """Return whether any remaining search history still uses the same resume."""
+    if resume_id is None:
+        return False
+    for entry in history.list():
+        if entry.run_id == run_id:
+            continue
+        try:
+            if (
+                load_config_bytes(
+                    history.read_review_input(entry.run_id).config_bytes
+                ).resume_sha256
+                == resume_id
+            ):
+                return True
+        except (KeyError, OSError, UnicodeError, ValueError):
+            continue
+    return False
+
+
+def _resume_has_visible_jobs(
+    store: GlobalJobStore, resume_id: str
+) -> bool:
+    """Return whether any visible tracked job is matched to one resume."""
+    return any(
+        match.resume_id == resume_id
+        for job in store.load().jobs
+        for match in job.resume_matches
+    )
 
 
 def _fsync_directory(path: Path) -> None:

@@ -605,6 +605,7 @@ def _default_source_factory(
             adapters.append(
                 SimplifyDeAdapter(
                     config,
+                    http_client,
                     capture_snapshot=should_capture_snapshot,
                 )
             )
