@@ -268,7 +268,7 @@
     </div>
     <select class="global-resume-select" data-global-resume-select aria-label="Select resume"{% if not resumes %} disabled{% endif %}>
       {% for resume in resumes %}
-        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
+        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.filename }} ({{ resume.created_at.strftime('%Y-%m-%d %H:%M') }})</option>
       {% else %}
         <option selected>No resumes associated with tracked jobs yet.</option>
       {% endfor %}

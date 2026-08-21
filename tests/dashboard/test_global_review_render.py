@@ -302,8 +302,8 @@ def test_console_job_tracker_lists_resumes_and_accepts_a_new_upload() -> None:
         f'option[data-global-resume-id="{resume_id}"][selected]'
     )
     assert selected is not None
-    assert "Backend CV" in selected.get_text(" ", strip=True)
     assert "backend.pdf" in selected.get_text(" ", strip=True)
+    assert "2026-08-19 10:00" in selected.get_text(" ", strip=True)
     assert selected.get("data-review-url").endswith("#job-tracker")
     upload = global_block.select_one(
         'input#manual-job-resume[name="resume"][type="file"][accept=".pdf,.docx"]'
