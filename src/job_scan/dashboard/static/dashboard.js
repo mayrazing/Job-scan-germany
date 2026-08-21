@@ -35,12 +35,30 @@
   };
 
   const sourceFilterKey = "job-scan.review-source-filter.v1";
+  const globalSourceFilterKey = "job-scan.global-source-filter.v1";
 
   const cardSources = (card) => card.dataset.sources.split(",").filter(Boolean);
 
-  const restoredSourceFilter = (sources) => {
+  const sourceLabels = {
+    arbeitsagentur: "Arbeitsagentur",
+    bosch: "Bosch",
+    dallmeier: "Dallmeier",
+    dhl: "DHL",
+    glassdoor: "Glassdoor",
+    indeed: "Indeed",
+    linkedin: "LinkedIn",
+    manual: "Manual",
+    siemens: "Siemens",
+    simplify: "Simplify",
+    stepstone: "StepStone",
+    successfactors: "Rohde & Schwarz",
+    telekom: "Deutsche Telekom",
+    thyssenkrupp: "thyssenkrupp",
+  };
+
+  const restoredSourceFilter = (sources, storageKey = sourceFilterKey) => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem(sourceFilterKey));
+      const saved = JSON.parse(window.localStorage.getItem(storageKey));
       const sameSources =
         Array.isArray(saved?.sources) &&
         saved.sources.length === sources.length &&
@@ -52,10 +70,10 @@
     }
   };
 
-  const saveSourceFilter = (sources, selected) => {
+  const saveSourceFilter = (sources, selected, storageKey = sourceFilterKey) => {
     try {
       window.localStorage.setItem(
-        sourceFilterKey,
+        storageKey,
         JSON.stringify({ sources, selected }),
       );
     } catch (_error) {
@@ -182,27 +200,11 @@
       return;
     }
 
-    const labels = {
-      arbeitsagentur: "Arbeitsagentur",
-      bosch: "Bosch",
-      dallmeier: "Dallmeier",
-      dhl: "DHL",
-      glassdoor: "Glassdoor",
-      indeed: "Indeed",
-      linkedin: "LinkedIn",
-      manual: "Manual",
-      siemens: "Siemens",
-      simplify: "Simplify",
-      stepstone: "StepStone",
-      successfactors: "Rohde & Schwarz",
-      telekom: "Deutsche Telekom",
-      thyssenkrupp: "thyssenkrupp",
-    };
     const selectedSources = new Set(restoredSourceFilter(sources));
     sources.forEach((source) => {
       const option = document.createElement("option");
       option.value = source;
-      option.textContent = labels[source] || source;
+      option.textContent = sourceLabels[source] || source;
       option.selected = selectedSources.has(source);
       select.append(option);
     });
@@ -297,6 +299,77 @@
     handleFilterSelectChange(companyIndustrySelect, "companyIndustry");
     handleFilterSelectChange(languageRequirementSelect, "languageRequirement");
     document.addEventListener("job-scan:review-updated", applyCurrentFilters);
+  };
+
+  const initializeGlobalSourceFilter = () => {
+    const select = document.querySelector("#global-source-filter");
+    if (!select) return;
+    const globalCards = () => [
+      ...document.querySelectorAll(
+        '[data-review-block="global"] .review-groups [data-sources]',
+      ),
+    ];
+    const cards = globalCards();
+    const sources = [...new Set(cards.flatMap(cardSources))].sort();
+    if (sources.length === 0) {
+      select.closest(".source-filter").hidden = true;
+      return;
+    }
+
+    const selectedSources = new Set(
+      restoredSourceFilter(sources, globalSourceFilterKey),
+    );
+    sources.forEach((source) => {
+      const option = document.createElement("option");
+      option.value = source;
+      option.textContent = sourceLabels[source] || source;
+      option.selected = selectedSources.has(source);
+      select.append(option);
+    });
+
+    const applyGlobalFilters = () => {
+      applyReviewFilters(
+        globalCards(),
+        control.items,
+        "",
+        "",
+        "0",
+        "",
+        "",
+      );
+    };
+    const control = new TomSelect(select, {
+      plugins: {
+        checkbox_options: {},
+      },
+      closeAfterSelect: false,
+      hideSelected: false,
+      maxItems: null,
+      onChange(values) {
+        const selected = Array.isArray(values) ? values : [values].filter(Boolean);
+        saveSourceFilter(sources, selected, globalSourceFilterKey);
+        applyGlobalFilters();
+      },
+    });
+    const updateSourceSummary = () => {
+      const count = control.items.length;
+      control.control.dataset.summary = `${count} source${count === 1 ? "" : "s"} selected`;
+    };
+    control.on("change", updateSourceSummary);
+    control.control.addEventListener(
+      "click",
+      (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        control.focus();
+        control.refreshOptions(false);
+        control.open();
+      },
+      true,
+    );
+    updateSourceSummary();
+    applyGlobalFilters();
+    document.addEventListener("job-scan:review-updated", applyGlobalFilters);
   };
 
   const reviewGroupOrderKey = "job-scan.review-group-order.v1";
@@ -921,6 +994,7 @@
       initializeReviewGroupWorkspace,
     );
     initializeSourceFilter();
+    initializeGlobalSourceFilter();
     initializeManualJobImport();
   };
 

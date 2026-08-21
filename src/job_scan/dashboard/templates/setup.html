@@ -566,6 +566,14 @@
                   {{ manual_job_import() }}
                 </header>
                 {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker') }}
+                <div class="review-filters">
+                  <div class="source-filter">
+                    <label for="global-source-filter">
+                      <span class="field-label">Search sources</span>
+                      <select class="form-select" id="global-source-filter" name="global-source-filter" multiple aria-describedby="source-filter-help"></select>
+                    </label>
+                  </div>
+                </div>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Job Tracker groups') }}
                   <div class="review-groups">{{ groups(global_dashboard, true, true, 'global', resume_catalog) }}</div>

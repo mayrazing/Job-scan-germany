@@ -927,6 +927,42 @@ def test_review_filters_do_not_hide_global_status_jobs(setup_page: object) -> No
     assert global_count.text_content() == "1"
 
 
+def test_job_tracker_source_filter_filters_only_global_jobs(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+
+    assert setup_page.locator("#global-source-filter").count() == 1
+    assert setup_page.evaluate(
+        "document.querySelector('#global-source-filter').tomselect.items"
+    ) == ["linkedin"]
+
+    global_card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    )
+    global_count = setup_page.locator(
+        '[data-review-block="global"] [data-review-group-count="saved"]'
+    )
+    assert global_card.is_visible()
+    assert global_count.text_content() == "1"
+
+    setup_page.evaluate(
+        "document.querySelector('#global-source-filter').tomselect.clear()"
+    )
+
+    assert global_card.is_hidden()
+    assert global_count.text_content() == "0"
+    assert setup_page.locator(
+        '[data-review-block="current"] .review-groups [data-sources]'
+    ).count() > 0
+
+    setup_page.evaluate(
+        "document.querySelector('#global-source-filter').tomselect.setValue(['linkedin'])"
+    )
+    assert global_card.is_visible()
+
+
 def test_review_group_counts_follow_active_filters(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
     setup_page.locator("#review-language-requirement").select_option("")

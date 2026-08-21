@@ -238,7 +238,10 @@ def test_fetch_detail_returns_full_description_and_simplify_platform_url(
 
     assert occurrence.source is SourceKind.SIMPLIFY
     assert occurrence.external_id == JOB_ID
-    assert str(occurrence.url) == f"https://simplify.jobs/jobs?jobId={JOB_ID}"
+    assert str(occurrence.url) == (
+        f"https://simplify.jobs/jobs?query=Example%20GmbH"
+        f"&state=Germany&country=Germany&jobId={JOB_ID}"
+    )
     assert occurrence.description == (
         "Build reliable services.\n"
         "Responsibilities\nOwn production APIs.\n"
@@ -461,7 +464,10 @@ def test_simplify_listing_size_becomes_native_company_size_evidence() -> None:
     source = CompanySizeSource(
         source_name="simplify",
         lookup_url=f"https://api.simplify.jobs/v2/job-posting/:id/{JOB_ID}/company",
-        public_url=f"https://simplify.jobs/jobs?jobId={JOB_ID}",
+        public_url=(
+            f"https://simplify.jobs/jobs?query=Example%20GmbH"
+            f"&state=Germany&country=Germany&jobId={JOB_ID}"
+        ),
         source_title="Simplify job posting",
         reported_size="51-200",
     )

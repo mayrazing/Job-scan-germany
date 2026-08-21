@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 from pydantic import HttpUrl, ValidationError
@@ -38,7 +39,9 @@ _DEFAULT_TIMEOUT_SECONDS = 90
 _MAX_OUTPUT_BYTES = 5_000_000
 _SEARCH_PAGE_URL = "https://simplify.jobs/jobs?state=Germany&country=Germany"
 _DETAIL_API = "https://api.simplify.jobs/v2/job-posting/:id/{job_id}/company"
-_DETAIL_PAGE = "https://simplify.jobs/jobs?jobId={job_id}"
+_DETAIL_PAGE = (
+    "https://simplify.jobs/jobs?query={query}&state=Germany&country=Germany&jobId={job_id}"
+)
 _APPLICATION_URL = "https://simplify.jobs/jobs/click/{job_id}"
 
 _SNAPSHOT_PAGE_JS_TEMPLATE = browser_snapshot_script(
@@ -74,9 +77,12 @@ _SNAPSHOT_PAGE_JS_TEMPLATE = browser_snapshot_script(
     "Job Description",
     "Job Responsibilities",
     "Job Requirements",
+    "Requirements",
+    "Responsibilities",
+    "Desired Qualifications",
     "Benefits",
   ]);
-  const jobRoots = [...details.querySelectorAll("h3")]
+  const jobRoots = [...details.querySelectorAll("h3, div.mt-3")]
     .filter((heading) => allowedSectionHeadings.has(normalize(heading.innerText)))
     .map((heading) => heading.parentElement)
     .filter(Boolean);
@@ -497,14 +503,14 @@ def _parse_search_row(value: object) -> JobReference:
             source=SourceKind.SIMPLIFY,
             source_instance="de",
             external_id=external_id,
-            detail_url=HttpUrl(_DETAIL_PAGE.format(job_id=external_id)),
+            detail_url=_detail_page(external_id, company),
             listing_title=title,
             listing_company=company,
             listing_location=location,
             listing_posted_at=_posted_date(value.get("start_date")),
             listing_application_url=HttpUrl(_APPLICATION_URL.format(job_id=external_id)),
             listing_company_size_source=(
-                _company_size_source(external_id, reported_size)
+                _company_size_source(external_id, reported_size, company)
                 if reported_size is not None
                 else None
             ),
@@ -513,11 +519,21 @@ def _parse_search_row(value: object) -> JobReference:
         raise InvalidResponse("OpenCLI Simplify result contained an invalid URL") from None
 
 
-def _company_size_source(job_id: str, reported_size: str) -> CompanySizeSource:
+def _detail_page(job_id: str, company: str) -> HttpUrl:
+    return HttpUrl(
+        _DETAIL_PAGE.format(query=quote(company, safe=""), job_id=job_id)
+    )
+
+
+def _company_size_source(
+    job_id: str,
+    reported_size: str,
+    company: str,
+) -> CompanySizeSource:
     return CompanySizeSource(
         source_name="simplify",
         lookup_url=HttpUrl(_DETAIL_API.format(job_id=job_id)),
-        public_url=HttpUrl(_DETAIL_PAGE.format(job_id=job_id)),
+        public_url=_detail_page(job_id, company),
         source_title="Simplify job posting",
         reported_size=reported_size,
     )
