@@ -15,6 +15,7 @@ from pydantic import HttpUrl
 from typer.testing import CliRunner
 
 from job_scan import cli as cli_module
+from job_scan import review_server as review_server_module
 from job_scan.ai_config import AiProviderStore
 from job_scan.anthropic_api import AiModelDiscovery
 from job_scan.ats_history import AtsHistoryStore
@@ -40,11 +41,13 @@ from job_scan.domain import (
     UserStatus,
 )
 from job_scan.global_jobs import GLOBAL_USER_STATUSES, GlobalJobStore
+from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
 from job_scan.review_server import create_review_app
 from job_scan.search_history import SearchHistoryStore
+from job_scan.sources.base import BrowserSourceError
 from job_scan.web_workflow import WebWorkflow
 
 NOW = datetime(2026, 8, 3, 12, tzinfo=UTC)
@@ -267,6 +270,352 @@ def test_get_returns_current_dashboard_bytes_and_sets_protected_cookie(
     assert "httponly" in set_cookie
     assert "samesite=strict" in set_cookie
     assert "path=/" in set_cookie
+
+
+def test_job_snapshot_route_serves_saved_html_without_source_access(
+    review_client: tuple[TestClient, JsonlRepository],
+) -> None:
+    client, repository = review_client
+    html = (
+        '<!doctype html><html data-job-scan-snapshot="stepstone:de:13889830">'
+        '<head><meta http-equiv="Content-Security-Policy" '
+        'content="default-src \'none\'; style-src \'unsafe-inline\'">'
+        "<style>body{color:#0c2577}</style></head>"
+        "<body><main>Senior Software Engineer Java</main></body></html>"
+    )
+    reference = JobSnapshotStore(repository.paths.job_snapshots_dir).save(
+        source_job_key="stepstone:de:13889830",
+        captured_at=NOW,
+        html=html,
+    )
+
+    def attach_snapshot(snapshot: Snapshot) -> Snapshot:
+        snapshot.jobs[0].source_occurrences[0].job_snapshot = reference
+        return snapshot
+
+    repository.mutate(attach_snapshot)
+
+    response = client.get(f"/api/job-snapshots/{reference.snapshot_id}")
+
+    assert response.status_code == 200
+    assert response.content == html.encode()
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+def test_job_snapshot_route_hides_invalid_or_missing_ids(
+    review_client: tuple[TestClient, JsonlRepository],
+) -> None:
+    client, _repository = review_client
+
+    assert client.get("/api/job-snapshots/not-a-snapshot").status_code == 404
+    assert (
+        client.get(f"/api/job-snapshots/sha256:{'f' * 64}").status_code == 404
+    )
+
+
+def test_generate_snapshot_captures_one_current_job_only_once(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    def capture(occurrence: SourceOccurrence) -> str:
+        attempts.append(occurrence.source_occurrence_key)
+        return (
+            "<!doctype html>"
+            f'<html data-job-scan-snapshot="{occurrence.source_job_key}">'
+            "<head><style>body{color:#2557a7}</style></head>"
+            "<body><main>Backend Engineer</main></body></html>"
+        )
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        capture,
+        raising=False,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        first = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+        second = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert attempts == ["linkedin:acme/jobs:REQ-42@1"]
+    occurrence = repository.load().jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is not None
+    assert occurrence.job_snapshot_error_code is None
+    assert JobSnapshotStore(repository.paths.job_snapshots_dir).read(
+        occurrence.job_snapshot.snapshot_id
+    ).endswith(b"<body><main>Backend Engineer</main></body></html>")
+
+
+def test_generate_snapshot_records_an_unavailable_automatic_source(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        lambda _occurrence: None,
+        raising=False,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert response.status_code == 204
+    occurrence = repository.load().jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_generate_snapshot_records_a_browser_capture_failure(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_capture(_occurrence: SourceOccurrence) -> str:
+        raise BrowserSourceError("OpenCLI timed out.", error_code="opencli_timeout")
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        fail_capture,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert response.status_code == 204
+    occurrence = repository.load().jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_generate_snapshot_rejects_a_manual_only_job_without_opening_its_page(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def make_manual(snapshot: Snapshot) -> Snapshot:
+        occurrence = snapshot.jobs[0].source_occurrences[0]
+        occurrence.source = SourceKind.MANUAL
+        occurrence.source_instance = "careers.example"
+        occurrence.external_id = "manual-1"
+        snapshot.jobs[0].primary_source_occurrence_key = (
+            occurrence.source_occurrence_key
+        )
+        return snapshot
+
+    repository.mutate(make_manual)
+
+    def unexpected_capture(_occurrence: SourceOccurrence) -> str:
+        raise AssertionError("manual job page was opened")
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        unexpected_capture,
+        raising=False,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Manual jobs do not support snapshots."}
+
+
+def test_generate_snapshot_updates_only_the_selected_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
+    repository.mutate(lambda snapshot: snapshot.with_job(_job()))
+    _save_review_config(paths)
+    paths.profile_md.write_text("profile", encoding="utf-8")
+    resume = tmp_path / "candidate.pdf"
+    resume.write_bytes(b"resume")
+    history = SearchHistoryStore(paths)
+    history.archive(
+        run_id="search-1",
+        candidate_name="Candidate",
+        resume_filename=resume.name,
+        resume_path=resume,
+        snapshot=repository.load(),
+        finished_at=NOW,
+    )
+
+    attempts: list[str] = []
+
+    def capture(occurrence: SourceOccurrence) -> str:
+        attempts.append(occurrence.source_occurrence_key)
+        return (
+            "<!doctype html>"
+            f'<html data-job-scan-snapshot="{occurrence.source_job_key}">'
+            "<head><style>body{color:#2557a7}</style></head>"
+            "<body><main>History Backend Engineer</main></body></html>"
+        )
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        capture,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+        history_store=history,
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/scan-history/search-1/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+        second = client.post(
+            "/api/scan-history/search-1/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert response.status_code == 204
+    assert second.status_code == 204
+    assert attempts == ["linkedin:acme/jobs:REQ-42@1"]
+    assert history.load("search-1").jobs[0].source_occurrences[0].job_snapshot is not None
+    assert repository.load().jobs[0].source_occurrences[0].job_snapshot is None
+
+
+def test_generate_snapshot_updates_only_the_global_job(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global_jobs = GlobalJobStore(repository.paths)
+    global_jobs.set_status(repository.load().jobs[0], UserStatus.SAVED, NOW)
+
+    attempts: list[str] = []
+
+    def capture(occurrence: SourceOccurrence) -> str:
+        attempts.append(occurrence.source_occurrence_key)
+        return (
+            "<!doctype html>"
+            f'<html data-job-scan-snapshot="{occurrence.source_job_key}">'
+            "<head><style>body{color:#2557a7}</style></head>"
+            "<body><main>Saved Backend Engineer</main></body></html>"
+        )
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        capture,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+        second = client.post(
+            "/api/global-jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+
+    assert response.status_code == 204
+    assert second.status_code == 204
+    assert attempts == ["linkedin:acme/jobs:REQ-42@1"]
+    saved = global_jobs.find("canonical-42")
+    assert saved is not None
+    assert saved.source_occurrences[0].job_snapshot is not None
+    assert repository.load().jobs[0].source_occurrences[0].job_snapshot is None
+
+
+@pytest.mark.parametrize("lock_name", ["workflow_lock_file", "scan_lock_file"])
+def test_generate_snapshot_returns_conflict_without_capture_when_lock_is_busy(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    lock_name: str,
+) -> None:
+    attempts: list[str] = []
+
+    def capture(occurrence: SourceOccurrence) -> str:
+        attempts.append(occurrence.source_occurrence_key)
+        return "<html data-job-scan-snapshot='unexpected'></html>"
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        capture,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        lock_path = getattr(repository.paths, lock_name)
+        with FileRWLock(lock_path).exclusive():
+            response = client.post(
+                "/api/jobs/canonical-42/snapshot",
+                headers=_mutation_headers(),
+            )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "A scan is running; retry the snapshot after it completes."
+    }
+    assert attempts == []
 
 
 def test_company_size_search_updates_live_job_and_public_cache(

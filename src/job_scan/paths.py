@@ -20,6 +20,7 @@ class AppPaths:
     ai_usage_lock_file: Path
     history_dir: Path
     history_lock_file: Path
+    job_snapshots_dir: Path
     ats_history_dir: Path
     ats_history_lock_file: Path
     global_jobs_jsonl: Path
@@ -46,6 +47,7 @@ class AppPaths:
             ai_usage_lock_file=root / ".ai-usage.lock",
             history_dir=root / "history",
             history_lock_file=root / "history" / ".history.lock",
+            job_snapshots_dir=root / "job-snapshots",
             ats_history_dir=root / "ats-history",
             ats_history_lock_file=root / "ats-history" / ".ats-history.lock",
             global_jobs_jsonl=root / "global-jobs.jsonl",

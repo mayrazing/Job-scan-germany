@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+import json
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import quote
@@ -15,10 +16,15 @@ from job_scan.domain import CompanySizeEvidence, CompanySizeSource, SourceKind
 from job_scan.http_client import JOBSUCHE_API_KEY, InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash, normalize_text
 from job_scan.sources.base import (
+    BrowserSourceError,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
     SourceError,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
 )
 
 _BASE_URL = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4"
@@ -30,6 +36,35 @@ _EMPLOYER_PROFILE_BASE_URL = (
 _HEADERS = {"X-API-Key": JOBSUCHE_API_KEY}
 _DEFAULT_PAGE_SIZE = 100
 _CLOSED_STATUSES = {"closed", "inactive", "unavailable", "nicht verfügbar"}
+
+def _snapshot_page_js(expected_external_id: str) -> str:
+    return browser_snapshot_script(
+        r"""
+  const expectedJobId = __EXPECTED_JOB_ID__;
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Verify you are human|Sicherheitsüberprüfung/i.test(document.body?.innerText || "");
+  if (isChallenge()) return {status: "challenge"};
+  const pageJobId = location.pathname.match(/\/jobsuche\/jobdetail\/([^/?#]+)/)?.[1] ||
+    document.querySelector("[data-job-id]")?.getAttribute("data-job-id") || "";
+  const header = document.querySelector("#detail-kopfbereich-container");
+  const title = document.querySelector("#detail-h1-heading");
+  const description = document.querySelector("#detail-beschreibung-container");
+  const employer = document.querySelector("#detail-agdarstellung-container");
+  if (!pageJobId || !header || !title || !description) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  if (pageJobId !== expectedJobId) {
+    return {status: "unavailable", error_code: "job_identity_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `arbeitsagentur:default:${expectedJobId}`,
+    title: (title.innerText || title.textContent || "").trim(),
+    sourceLabel: "Arbeitsagentur",
+    accent: "#005f87",
+    roots: [header, description, employer],
+  });
+""".strip().replace("__EXPECTED_JOB_ID__", json.dumps(expected_external_id))
+    )
 
 
 def lookup_company_size(
@@ -68,6 +103,7 @@ class JobsucheAdapter:
         *,
         page_size: int = _DEFAULT_PAGE_SIZE,
         request_base_url: str = _SEARCH_BASE_URL,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         if page_size <= 0:
             raise ValueError("page_size must be greater than zero")
@@ -75,6 +111,7 @@ class JobsucheAdapter:
         self._http_client = http_client
         self._page_size = page_size
         self._request_base_url = request_base_url.rstrip("/")
+        self._capture_snapshot = capture_snapshot
         if not self._request_base_url:
             raise ValueError("request_base_url must not be empty")
         self._detail_base_url = (
@@ -196,6 +233,22 @@ class JobsucheAdapter:
         detail_complete = bool(normalize_text(raw_description))
         description = raw_description.strip() if detail_complete else ""
         company_size_source = _company_size_source(payload, reference.external_id)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.platform_url or _public_detail_url(reference.external_id)),
+                    script=_snapshot_page_js(reference.external_id),
+                    source_name="arbeitsagentur",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if snapshot_html is None:
+                    snapshot_error_code = "snapshot_capture_failed"
 
         return FetchedOccurrence(
             source=self.source,
@@ -210,6 +263,8 @@ class JobsucheAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_size_source=company_size_source,
         )
 

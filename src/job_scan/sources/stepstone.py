@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -37,6 +37,7 @@ from job_scan.sources.base import (
     JobReference,
     SourceError,
 )
+from job_scan.sources.job_snapshot_capture import browser_snapshot_script
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -145,6 +146,71 @@ _DETAIL_PAGE_JS = r"""
   return {status: "ok", job};
 })()
 """.strip()
+
+_SNAPSHOT_PAGE_JS = browser_snapshot_script(
+    r"""
+  const findPosting = () => {
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent || "null");
+        const values = Array.isArray(parsed) ? parsed : [parsed];
+        for (const value of values) {
+          if (value?.["@type"] === "JobPosting") return value;
+          const posting = value?.["@graph"]?.find?.(
+            (item) => item?.["@type"] === "JobPosting"
+          );
+          if (posting) return posting;
+        }
+      } catch (_error) {
+        // The detail reader already validated the posting. Ignore other JSON-LD.
+      }
+    }
+    return null;
+  };
+  const posting = findPosting();
+  const jobId = String(posting?.url || location.href).match(
+    /--(\d{5,20})(?:-inline)?\.html(?:[?#]|$)/
+  )?.[1];
+  const articles = [...document.querySelectorAll("article")];
+  const header = articles.find((article) => article.querySelector("h1"));
+  const allowedHeadings = new Set([
+    "introduction",
+    "einleitung",
+    "key responsibilities",
+    "ihre aufgaben",
+    "deine aufgaben",
+    "aufgaben",
+    "your profile",
+    "ihr profil",
+    "dein profil",
+    "anforderungen",
+    "perks & benefits",
+    "benefits",
+    "wir bieten",
+    "gehalt",
+    "salary",
+  ]);
+  const sections = articles.filter((article) => {
+    if (article === header) return false;
+    const heading = (article.innerText || article.textContent || "")
+      .split(/\n+/)[0]
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLocaleLowerCase("de-DE");
+    return !!heading && allowedHeadings.has(heading);
+  });
+  if (!jobId || !header || sections.length === 0) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `stepstone:de:${jobId}`,
+    title: posting?.title || "Gespeicherte Stellenanzeige",
+    sourceLabel: "StepStone",
+    accent: "#0c2577",
+    roots: [header, ...sections],
+  });
+""".strip()
+)
 
 _COMPANY_PAGE_JS = r"""
 (async () => {
@@ -325,6 +391,7 @@ class StepstoneDeAdapter:
         limit: int | None = None,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
         challenge_wait_seconds: float = DEFAULT_CHALLENGE_WAIT_SECONDS,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         resolved_limit = config.stepstone_de_limit if limit is None else limit
         if not 1 <= resolved_limit <= 100:
@@ -340,6 +407,7 @@ class StepstoneDeAdapter:
         self._limit = resolved_limit
         self._timeout_seconds = timeout_seconds
         self._challenge_wait_seconds = challenge_wait_seconds
+        self._capture_snapshot = capture_snapshot
         self._session = f"job-scan-stepstone-de-{os.getpid()}-{id(self):x}"
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
@@ -464,6 +532,25 @@ class StepstoneDeAdapter:
         )
         company_industry_source = _company_industry_source(company_size_source)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_payload = self._evaluate(_SNAPSHOT_PAGE_JS)
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and snapshot_payload.get("status") == "ok"
+                    and isinstance(snapshot_payload.get("html"), str)
+                    and snapshot_payload["html"].strip()
+                ):
+                    snapshot_html = snapshot_payload["html"]
+                else:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -477,6 +564,8 @@ class StepstoneDeAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_size_source=company_size_source,
             company_industry_source=company_industry_source,
         )

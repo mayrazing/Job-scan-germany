@@ -16,6 +16,7 @@ def test_job_scan_home_overrides_default(tmp_path: Path) -> None:
     assert paths.workflow_lock_file == tmp_path / "output" / ".workflow.lock"
     assert paths.history_dir == tmp_path / "history"
     assert paths.history_lock_file == tmp_path / "history" / ".history.lock"
+    assert paths.job_snapshots_dir == tmp_path / "job-snapshots"
     assert paths.cache_dir == tmp_path / "cache"
     assert paths.logs_dir == tmp_path / "logs"
 
@@ -46,4 +47,5 @@ def test_ensure_directories_creates_only_data_directories(tmp_path: Path) -> Non
         Path("logs"),
         Path("history"),
         Path("ats-history"),
+        Path("global-resumes"),
     }

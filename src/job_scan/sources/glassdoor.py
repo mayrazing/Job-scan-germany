@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -38,6 +38,7 @@ from job_scan.sources.base import (
     JobReference,
     SourceError,
 )
+from job_scan.sources.job_snapshot_capture import browser_snapshot_script
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -170,6 +171,32 @@ _DETAIL_PAGE_JS = r"""
   return {status: "not_ready", page_url: location.href};
 })()
 """.strip()
+
+_SNAPSHOT_PAGE_JS = browser_snapshot_script(
+    r"""
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Cloudflare Ray ID|Reference #[\d.]+|Verify you are human/i.test(
+      document.body?.innerText || ""
+    );
+  if (isChallenge()) return {status: "challenge"};
+  const jobId = new URLSearchParams(location.search).get("jl") ||
+    document.querySelector('h1[id^="jd-job-title-"]')?.id.replace("jd-job-title-", "") ||
+    "";
+  const header = document.querySelector('[data-test="job-details-header"]');
+  const title = document.querySelector(`#jd-job-title-${jobId}`) || header?.querySelector("h1");
+  const description = document.querySelector('[class*="JobDetails_jobDescription__"]');
+  if (!/^\d{10,20}$/.test(jobId) || !header || !title || !description) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `glassdoor:de:${jobId}`,
+    title: (title.innerText || title.textContent || "").trim(),
+    sourceLabel: "Glassdoor",
+    accent: "#007663",
+    roots: [header, description],
+  });
+""".strip()
+)
 
 _COMPANY_PAGE_JS = r"""
 (async () => {
@@ -363,6 +390,7 @@ class GlassdoorDeAdapter:
         limit: int | None = None,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
         challenge_wait_seconds: float = DEFAULT_CHALLENGE_WAIT_SECONDS,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         resolved_limit = getattr(config, "glassdoor_de_limit", 10) if limit is None else limit
         if not 1 <= resolved_limit <= 100:
@@ -378,6 +406,7 @@ class GlassdoorDeAdapter:
         self._limit = resolved_limit
         self._timeout_seconds = timeout_seconds
         self._challenge_wait_seconds = challenge_wait_seconds
+        self._capture_snapshot = capture_snapshot
         self._session = f"job-scan-glassdoor-de-{os.getpid()}-{id(self):x}"
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
@@ -516,6 +545,25 @@ class GlassdoorDeAdapter:
         company_size_source = _company_size_source(organization.get("sameAs"))
         company_industry_source = _company_industry_source(company_size_source)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_payload = self._evaluate(_SNAPSHOT_PAGE_JS)
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and snapshot_payload.get("status") == "ok"
+                    and isinstance(snapshot_payload.get("html"), str)
+                    and snapshot_payload["html"].strip()
+                ):
+                    snapshot_html = snapshot_payload["html"]
+                else:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -529,6 +577,8 @@ class GlassdoorDeAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_size_source=company_size_source,
             company_industry_source=company_industry_source,
         )

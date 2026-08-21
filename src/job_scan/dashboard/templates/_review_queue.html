@@ -174,6 +174,18 @@
       </details>
 
       <div class="job-actions">
+        {% if job.job_snapshot_id %}
+          <div class="job-snapshot-control">
+            <a class="btn btn-outline-secondary" href="/api/job-snapshots/{{ job.job_snapshot_id }}" target="_blank" rel="noopener noreferrer" data-job-snapshot>Job snapshot</a>
+          </div>
+        {% elif job.job_snapshot_triggerable %}
+          <div class="job-snapshot-control">
+            {% if job.job_snapshot_error_code %}<p class="job-snapshot-unavailable" data-job-snapshot-unavailable>Snapshot unavailable</p>{% endif %}
+            <form class="job-action" data-job-action="snapshot" data-job-key="{{ job.canonical_key }}">
+              <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-trigger>{{ 'Retry snapshot' if job.job_snapshot_error_code else 'Generate snapshot' }}</button>
+            </form>
+          </div>
+        {% endif %}
         <form class="job-action" data-job-action="status" data-job-key="{{ job.canonical_key }}">
           <label>
             <span>Set user status</span>

@@ -445,3 +445,93 @@ def test_fetch_detail_marks_official_error_redirect_closed(tmp_path: Path) -> No
     assert error.value.reason == "http_404"
     assert detail_route.call_count == 1
     assert error_route.call_count == 1
+
+
+@respx.mock
+def test_new_siemens_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    snapshot_html = (
+        '<html data-job-scan-snapshot="siemens:siemens:513387">'
+        "<body>Senior Software Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.siemens.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = SiemensAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_siemens_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    monkeypatch.setattr(
+        "job_scan.sources.siemens.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = SiemensAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_siemens_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.siemens import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.js_views { color: rgb(0, 94, 184); }</style>
+            <main>
+              <section class="js_views">
+                <header><h3>Senior Software Engineer</h3></header>
+                <article><dl><dt>Job ID</dt><dd>513387</dd><dt>Company</dt><dd>Siemens AG</dd></dl></article>
+                <article><h4>What are my responsibilities?</h4><p>Build industrial software.</p>
+                  <h4>What do I need to qualify?</h4><p>Java experience.</p></article>
+              </section>
+              <article class="article--actions"><button>Apply now</button></article>
+              <section id="widgetRelatedJobs"><h2>Similar jobs</h2><p>Recommendation.</p></section>
+            </main>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("513387"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="siemens:siemens:513387"' in html
+        assert "Senior Software Engineer" in html
+        assert "Build industrial software." in html
+        assert "Java experience." in html
+        assert "rgb(0, 94, 184)" in html
+        assert "Apply now" not in html
+        assert "Recommendation." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

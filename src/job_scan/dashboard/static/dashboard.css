@@ -623,6 +623,37 @@ main {
   border-top: 1px solid var(--border);
 }
 
+.job-snapshot-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.job-snapshot-control a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  color: var(--action);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.job-snapshot-control a:hover {
+  border-color: var(--action);
+  background: var(--surface-soft);
+}
+
+.job-snapshot-unavailable {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
 .job-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
@@ -14,9 +15,14 @@ from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
 from job_scan.sources.base import (
+    BrowserSourceError,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
 )
 
 _ORIGIN = "https://jobs.siemens.com"
@@ -50,15 +56,45 @@ _STATE_ID_BY_CITY = {
 }
 
 
+def _snapshot_script(external_id: str) -> str:
+    expected_id = json.dumps(external_id)
+    return browser_snapshot_script(
+        rf"""
+  const expectedId = {expected_id};
+  const jobContent = document.querySelector("main section.js_views") ||
+    document.querySelector("section.js_views");
+  if (!jobContent || !(jobContent.textContent || "").includes(expectedId)) {{
+    return {{status: "unavailable", error_code: "job_identity_mismatch"}};
+  }}
+  const title = jobContent.querySelector("header h1, header h2, header h3") ||
+    jobContent.querySelector("h1, h2, h3");
+  return buildJobSnapshot({{
+    snapshotKey: `siemens:siemens:${{expectedId}}`,
+    title: title?.textContent?.trim() || document.title,
+    sourceLabel: "Siemens",
+    accent: "#00646e",
+    roots: [jobContent],
+  }});
+"""
+    )
+
+
 class SiemensAdapter:
     """Read Siemens jobs from its official career search and detail pages."""
 
     source = SourceKind.SIEMENS
     source_instance = _SOURCE_INSTANCE
 
-    def __init__(self, config: AppConfig, http_client: PublicHttpClient) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        http_client: PublicHttpClient,
+        *,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
+    ) -> None:
         self._config = config
         self._http_client = http_client
+        self._capture_snapshot = capture_snapshot
 
     def discover(self) -> list[JobReference]:
         """Return Siemens jobs matching the configured search terms and locations."""
@@ -131,6 +167,21 @@ class SiemensAdapter:
         )
         description = _element_text(description_element)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.detail_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="Siemens",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
+                snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -144,6 +195,8 @@ class SiemensAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_html=snapshot_html,
+            job_snapshot_error_code=snapshot_error_code,
         )
 
     def _require_reference(self, reference: JobReference) -> None:

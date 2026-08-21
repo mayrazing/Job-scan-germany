@@ -343,6 +343,69 @@ def test_fetch_detail_returns_complete_glassdoor_job_posting(tmp_path: Path) -> 
     assert not state_path.exists()
 
 
+def test_new_glassdoor_job_carries_transient_snapshot_html(tmp_path: Path) -> None:
+    job_id = "1010138743368"
+    snapshot_html = (
+        f'<html data-job-scan-snapshot="glassdoor:de:{job_id}">'
+        "<body>Software Engineer</body></html>"
+    )
+    executable, state_path, _opened_path = fake_opencli(
+        tmp_path,
+        {
+            LOCATION_URL: location_payload(),
+            search_url(): search_payload([search_row(job_id)]),
+            detail_url(job_id): [
+                detail_payload(job_id),
+                {"status": "ok", "html": snapshot_html},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(),
+        opencli_executable=executable,
+        limit=1,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    reference = adapter.discover()[0]
+    occurrence = adapter.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+    assert not state_path.exists()
+
+
+def test_glassdoor_snapshot_failure_does_not_discard_the_job(tmp_path: Path) -> None:
+    job_id = "1010138743368"
+    executable, state_path, _opened_path = fake_opencli(
+        tmp_path,
+        {
+            LOCATION_URL: location_payload(),
+            search_url(): search_payload([search_row(job_id)]),
+            detail_url(job_id): [
+                detail_payload(job_id),
+                {"status": "unavailable", "error_code": "structure_mismatch"},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(),
+        opencli_executable=executable,
+        limit=1,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    result = run_source(adapter)
+
+    assert len(result.occurrences) == 1
+    assert result.occurrences[0].description == "About us\nBuild Java and Spring Boot services."
+    assert result.occurrences[0].job_snapshot_html is None
+    assert result.occurrences[0].job_snapshot_error_code == "snapshot_capture_failed"
+    assert not state_path.exists()
+
+
 def test_search_challenge_is_isolated_as_glassdoor_browser_error(tmp_path: Path) -> None:
     executable, state_path, _opened_path = fake_opencli(
         tmp_path,
@@ -551,6 +614,51 @@ def test_search_page_script_reads_stable_glassdoor_job_card_fields() -> None:
             "page_url": "about:blank",
             "rows": [search_row(job_id)],
         }
+        browser.close()
+
+
+def test_snapshot_page_script_keeps_only_glassdoor_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.glassdoor import _SNAPSHOT_PAGE_JS
+
+    job_id = "1010138743368"
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            f"""
+            <style>.JobDetails_jobDetailsHeader__test {{ color: rgb(0, 118, 99); }}</style>
+            <header data-test="job-details-header" class="JobDetails_jobDetailsHeader__test">
+              <div>Example GmbH</div>
+              <h1 id="jd-job-title-{job_id}">Software Engineer</h1>
+              <div data-test="location">Berlin</div>
+              <button data-test="applyButton">Bewerben</button>
+              <button data-test="save-job">Speichern</button>
+            </header>
+            <section id="verified-qualifications">Deine Qualifikationen für diesen Job</section>
+            <div class="JobDetails_jobDescription__test">
+              <h2>Stellenbeschreibung</h2><p>Build Java and Spring Boot services.</p>
+            </div>
+            <aside><h2>Unternehmen im Überblick</h2><p>Company advertisement.</p></aside>
+            <section data-test="jobListing"><h2>Ähnliche Jobs</h2></section>
+            """
+        )
+
+        payload = page.evaluate(_SNAPSHOT_PAGE_JS)
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert f'data-job-scan-snapshot="glassdoor:de:{job_id}"' in html
+        assert "Software Engineer" in html
+        assert "Example GmbH" in html
+        assert "Berlin" in html
+        assert "Build Java and Spring Boot services." in html
+        assert "rgb(0, 118, 99)" in html
+        assert "Deine Qualifikationen für diesen Job" not in html
+        assert "Company advertisement." not in html
+        assert "Ähnliche Jobs" not in html
+        assert ">Bewerben<" not in html
+        assert ">Speichern<" not in html
         browser.close()
 
 

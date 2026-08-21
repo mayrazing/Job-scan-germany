@@ -144,7 +144,9 @@ def merge_occurrences(
     for fetched in selected:
         stored = _stored_for_source_job_key(snapshot.jobs, fetched.source_job_key)
         latest = max((item for _, item in stored), key=lambda item: item.source_generation, default=None)
-        rollover = latest is not None and _should_rollover(latest, fetched)
+        rollover = latest is not None and requires_source_generation_rollover(
+            latest, fetched
+        )
         generation = (
             max((item.source_generation for _, item in stored), default=0) + 1
             if rollover
@@ -275,7 +277,11 @@ def _find_occurrence(
     return None
 
 
-def _should_rollover(previous: SourceOccurrence, current: FetchedOccurrence) -> bool:
+def requires_source_generation_rollover(
+    previous: SourceOccurrence,
+    current: FetchedOccurrence,
+) -> bool:
+    """Return whether a reused source ID represents a genuinely new posting."""
     if not previous.detail_complete or not current.detail_complete:
         return False
     baseline_title = previous.identity_baseline_title or previous.title
@@ -324,6 +330,8 @@ def _new_occurrence(
         availability_status=AvailabilityStatus.ACTIVE,
         detail_complete=fetched.detail_complete,
         last_fetch_error_code=fetched.fetch_error_code,
+        job_snapshot=fetched.job_snapshot,
+        job_snapshot_error_code=fetched.job_snapshot_error_code,
         company_size_source=fetched.company_size_source,
         company_industry_source=fetched.company_industry_source,
         identity_baseline_title=fetched.title,

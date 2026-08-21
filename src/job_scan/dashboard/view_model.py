@@ -12,6 +12,7 @@ from job_scan.domain import (
     MachineStatus,
     PrimaryView,
     Snapshot,
+    SourceKind,
     UserStatus,
 )
 from job_scan.status import effective_status, primary_view
@@ -87,6 +88,9 @@ class JobCard:
     description: str
     posted_at: date | None
     url: str
+    job_snapshot_id: str | None
+    job_snapshot_error_code: str | None
+    job_snapshot_triggerable: bool
     score: int | None
     reason: str
     source_error: str | None
@@ -210,6 +214,7 @@ def _card(job: JobRecord) -> JobCard:
     )
     company_size = job.company_size
     company_industry = job.company_industry
+    job_snapshot_id, job_snapshot_error_code = _job_snapshot_state(job)
     company_size_minimum, company_size_maximum = _company_size_bounds(company_size)
     return JobCard(
         canonical_key=job.canonical_job_key,
@@ -219,6 +224,15 @@ def _card(job: JobRecord) -> JobCard:
         description=job.description,
         posted_at=job.posted_at,
         url=str(job.url),
+        job_snapshot_id=job_snapshot_id,
+        job_snapshot_error_code=job_snapshot_error_code,
+        job_snapshot_triggerable=(
+            job_snapshot_id is None
+            and any(
+                occurrence.source is not SourceKind.MANUAL
+                for occurrence in job.source_occurrences
+            )
+        ),
         score=job.score,
         reason=job.reason,
         source_error=(
@@ -295,6 +309,30 @@ def _card(job: JobRecord) -> JobCard:
             tuple(company_industry.evidence) if company_industry is not None else ()
         ),
     )
+
+
+def _job_snapshot_state(job: JobRecord) -> tuple[str | None, str | None]:
+    """Prefer any usable occurrence snapshot, then expose an attempted failure."""
+    primary = next(
+        (
+            occurrence
+            for occurrence in job.source_occurrences
+            if occurrence.source_occurrence_key == job.primary_source_occurrence_key
+        ),
+        None,
+    )
+    occurrences = [
+        occurrence
+        for occurrence in [primary, *job.source_occurrences]
+        if occurrence is not None
+    ]
+    for occurrence in occurrences:
+        if occurrence.job_snapshot is not None:
+            return occurrence.job_snapshot.snapshot_id, None
+    for occurrence in occurrences:
+        if occurrence.job_snapshot_error_code is not None:
+            return None, occurrence.job_snapshot_error_code
+    return None, None
 
 
 def _company_size_bounds(

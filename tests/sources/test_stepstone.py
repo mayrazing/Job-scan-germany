@@ -372,6 +372,66 @@ def test_fetch_detail_returns_one_complete_stepstone_job_posting(tmp_path: Path)
     assert not state_path.exists()
 
 
+def test_new_stepstone_job_carries_transient_snapshot_html(tmp_path: Path) -> None:
+    job_id = "14358591"
+    snapshot_html = (
+        '<!doctype html><html data-job-scan-snapshot="stepstone:de:14358591">'
+        "<body>Software Engineer</body></html>"
+    )
+    executable, state_path, _opened_path = fake_opencli(
+        tmp_path,
+        {
+            search_url(): search_payload([search_row(job_id)]),
+            detail_url(job_id): [
+                detail_payload(job_id),
+                {"status": "ok", "html": snapshot_html},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(stepstone_de_limit=1),
+        opencli_executable=executable,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    reference = adapter.discover()[0]
+    occurrence = adapter.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+    assert not state_path.exists()
+
+
+def test_stepstone_snapshot_failure_does_not_discard_the_job(tmp_path: Path) -> None:
+    job_id = "14358591"
+    executable, state_path, _opened_path = fake_opencli(
+        tmp_path,
+        {
+            search_url(): search_payload([search_row(job_id)]),
+            detail_url(job_id): [
+                detail_payload(job_id),
+                {"status": "unavailable", "error_code": "structure_mismatch"},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(stepstone_de_limit=1),
+        opencli_executable=executable,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    result = run_source(adapter)
+
+    assert len(result.occurrences) == 1
+    assert result.occurrences[0].detail_complete is True
+    assert result.occurrences[0].job_snapshot_html is None
+    assert result.occurrences[0].job_snapshot_error_code == "snapshot_capture_failed"
+    assert result.errors == []
+    assert not state_path.exists()
+
+
 def test_detail_falls_back_to_listing_stepstone_company_page(
     tmp_path: Path,
 ) -> None:
@@ -848,6 +908,54 @@ def test_detail_page_script_reports_terminal_page_state(
         payload = page.evaluate(_DETAIL_PAGE_JS)
 
         assert payload == {"status": expected_status}
+        browser.close()
+
+
+def test_snapshot_page_script_keeps_only_stepstone_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.stepstone import _SNAPSHOT_PAGE_JS
+
+    html = f"""
+    <style>
+      article {{ color: rgb(12, 37, 119); padding: 12px; }}
+      h1 {{ font-size: 32px; }}
+    </style>
+    <article><h1>Senior Software Engineer Java</h1>
+      <p>IDnow GmbH</p><button>Jetzt bewerben</button>
+      <div data-at="header-company-logo-img"><img src="https://ads.example/logo.png"></div>
+    </article>
+    <article><h2>Passt dieser Job zu mir?</h2><p>Konto-Werbung</p></article>
+    <article data-at="rebranded-version"><h2>Introduction</h2><p>About IDnow.</p></article>
+    <article data-at="rebranded-version"><h2>Key Responsibilities</h2><p>Build Java services.</p></article>
+    <article data-at="rebranded-version"><p>Your profile</p><h2>Preferred Experience</h2><p>Spring Boot.</p></article>
+    <article data-at="rebranded-version"><h2>Perks &amp; Benefits</h2><p>Remote work.</p></article>
+    <article data-at="rebranded-version"><h2>Gehalt</h2><p>Competitive salary.</p></article>
+    <article><h2>Ähnliche Jobs</h2><p>Unrelated recommendation.</p></article>
+    <script type="application/ld+json">{json.dumps(detail_payload('14358591')['job'])}</script>
+    """
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+
+        payload = page.evaluate(_SNAPSHOT_PAGE_JS)
+
+        assert payload["status"] == "ok"
+        snapshot = payload["html"]
+        assert 'data-job-scan-snapshot="stepstone:de:14358591"' in snapshot
+        assert "Senior Software Engineer Java" in snapshot
+        assert "Build Java services." in snapshot
+        assert "Spring Boot." in snapshot
+        assert "Remote work." in snapshot
+        assert "Competitive salary." in snapshot
+        assert "rgb(12, 37, 119)" in snapshot
+        assert "Passt dieser Job zu mir?" not in snapshot
+        assert "Konto-Werbung" not in snapshot
+        assert "Unrelated recommendation." not in snapshot
+        assert "Jetzt bewerben" not in snapshot
+        assert "header-company-logo-img" not in snapshot
+        assert "https://ads.example" not in snapshot
+        assert "<script" not in snapshot
         browser.close()
 
 

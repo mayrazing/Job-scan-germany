@@ -15,7 +15,7 @@ from pydantic import HttpUrl
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.domain import CompanySizeSource, SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
-from job_scan.sources import ExplicitlyClosed, JobReference, run_source
+from job_scan.sources import BrowserSourceError, ExplicitlyClosed, JobReference, run_source
 from job_scan.sources.jobsuche import JobsucheAdapter, lookup_company_size
 
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "sources" / "jobsuche"
@@ -380,6 +380,124 @@ def test_fetch_detail_maps_complete_public_contract(tmp_path: Path) -> None:
     )
     assert occurrence.detail_complete is True
     assert occurrence.fetch_error_code is None
+
+
+@respx.mock
+def test_new_jobsuche_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail = load_fixture("detail.json")
+    respx.get(f"{BASE_URL}/jobdetails/10000-123456-S").mock(
+        return_value=httpx.Response(200, json=detail)
+    )
+    snapshot_html = (
+        '<html data-job-scan-snapshot="arbeitsagentur:default:10000-123456-S">'
+        "<body>Senior Backend Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.jobsuche.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(cache_dir=tmp_path / "cache", min_interval_seconds=0)
+    jobsuche = JobsucheAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = jobsuche.fetch_detail(reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_jobsuche_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detail = load_fixture("detail.json")
+    respx.get(f"{BASE_URL}/jobdetails/10000-123456-S").mock(
+        return_value=httpx.Response(200, json=detail)
+    )
+
+    def fail_capture(**_arguments: object) -> str:
+        raise BrowserSourceError("snapshot failed", error_code="browser_failed")
+
+    monkeypatch.setattr(
+        "job_scan.sources.jobsuche.capture_browser_snapshot",
+        fail_capture,
+    )
+    client = PublicHttpClient(cache_dir=tmp_path / "cache", min_interval_seconds=0)
+    jobsuche = JobsucheAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = jobsuche.fetch_detail(reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_arbeitsagentur_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.jobsuche import _snapshot_page_js
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.ba-layout-tile { color: rgb(0, 95, 135); }</style>
+            <article data-job-id="10000-123456-S">
+              <section id="detail-kopfbereich-container" class="ba-layout-tile">
+                <h1 id="detail-h1-heading">Stellenangebot: Senior Backend Engineer bei Example GmbH</h1>
+                <div>Arbeitsort Berlin</div><div>Anstellungsart Vollzeit</div>
+                <div id="detailansicht-action-lane">
+                  <a href="https://jobs.example/apply">Info zur Bewerbung</a>
+                  <button>Vormerken</button>
+                </div>
+              </section>
+              <section id="detail-beschreibung-container">
+                <h2 id="detail-beschreibung-heading">Stellenbeschreibung</h2>
+                <p>Build Java and Spring Boot services.</p>
+              </section>
+              <section id="detail-agdarstellung-container">
+                <h2>Unternehmensdarstellung: Example GmbH</h2>
+                <p>Developer tools company.</p>
+              </section>
+              <section id="jobdetails-kontaktdaten-block">
+                <h2>Informationen zur Bewerbung</h2><form>Captcha verification</form>
+              </section>
+              <footer>Navigation and legal links</footer>
+            </article>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_page_js("10000-123456-S"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="arbeitsagentur:default:10000-123456-S"' in html
+        assert "Senior Backend Engineer" in html
+        assert "Example GmbH" in html
+        assert "Arbeitsort Berlin" in html
+        assert "Build Java and Spring Boot services." in html
+        assert "Developer tools company." in html
+        assert "rgb(0, 95, 135)" in html
+        assert "Info zur Bewerbung" not in html
+        assert "Vormerken" not in html
+        assert "Captcha verification" not in html
+        assert "Navigation and legal links" not in html
+        assert page.evaluate(_snapshot_page_js("10000-OTHER-S")) == {
+            "status": "unavailable",
+            "error_code": "job_identity_mismatch",
+        }
+        browser.close()
 
 
 @respx.mock

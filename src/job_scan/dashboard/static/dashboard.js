@@ -4,7 +4,7 @@
       method: "POST",
       credentials: "same-origin",
     };
-    if (action === "restore") {
+    if (action === "restore" || action === "snapshot") {
       return options;
     }
     if (action === "application-resume") {
@@ -860,7 +860,7 @@
     const runId = document.body.dataset.reviewRunId;
     const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
     const endpoint = statusScope === "global" && (
-      action === "status" || action === "application-resume"
+      action === "status" || action === "application-resume" || action === "snapshot"
     )
       ? `/api/global-jobs/${jobKey}/${action}`
       : runId
@@ -868,7 +868,9 @@
         : `/api/jobs/${jobKey}/${action}`;
     const button = form.querySelector('button[type="submit"]');
     if (button?.disabled) return;
+    const buttonText = button?.textContent;
     if (button) button.disabled = true;
+    if (button && action === "snapshot") button.textContent = "Generating...";
     try {
       const response = await fetch(endpoint, requestOptions(action, form));
       if (!response.ok) {
@@ -877,7 +879,10 @@
       await refreshReviewJob(rawJobKey);
     } catch (error) {
       window.alert(error.message);
-      if (button) button.disabled = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = buttonText;
+      }
     }
   });
 

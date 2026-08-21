@@ -8,11 +8,12 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from pydantic import HttpUrl
 
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
-from job_scan.sources import ExplicitlyClosed
+from job_scan.sources import ExplicitlyClosed, JobReference
 from job_scan.sources.dhl import DhlAdapter
 
 ORIGIN = "https://careers.dhl.com"
@@ -21,6 +22,19 @@ SEARCH_PATTERN = re.compile(re.escape(SEARCH_URL) + r"(?:\?.*)?")
 WIDGETS_URL = f"{ORIGIN}/widgets"
 DETAIL_URL = f"{ORIGIN}/amer/en/job/DPDHGLOBALAV361651ENAMEREXTERNAL"
 GERMANY_PLACE_ID = "ChIJa76xwh5ymkcRW-WRjmtd6HU"
+
+
+def _reference() -> JobReference:
+    return JobReference(
+        source=SourceKind.DHL,
+        source_instance="dhl",
+        external_id="DPDHGLOBALAV361651ENAMEREXTERNAL",
+        detail_url=HttpUrl(DETAIL_URL),
+        platform_url=HttpUrl(DETAIL_URL),
+        listing_title="Experte Softwareentwicklung (m/w/d)",
+        listing_company="DHL Group",
+        listing_location="Berlin, Berlin, Germany",
+    )
 
 
 def config(**overrides: object) -> AppConfig:
@@ -391,6 +405,151 @@ def test_fetch_detail_uses_detail_date_and_complete_job_data(tmp_path: Path) -> 
     assert occurrence.detail_complete is True
     assert occurrence.fetch_error_code is None
     assert detail_route.call_count == 1
+
+
+@respx.mock
+def test_new_dhl_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    snapshot_html = (
+        '<html data-job-scan-snapshot="dhl:dhl:DPDHGLOBALAV361651ENAMEREXTERNAL">'
+        "<body>Experte Softwareentwicklung</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.dhl.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    dhl = DhlAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+    reference = _reference()
+
+    occurrence = dhl.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_dhl_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    monkeypatch.setattr(
+        "job_scan.sources.dhl.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    dhl = DhlAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = dhl.fetch_detail(_reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_dhl_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.dhl import _snapshot_page_js
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.job-info { color: rgb(212, 5, 17); }</style>
+            <div data-job-id="DPDHGLOBALAV361651ENAMEREXTERNAL">
+              <div class="job-info">
+                <h1 class="job-title">Experte Softwareentwicklung (m/w/d)</h1>
+                <div>Berlin, Germany</div><div>Full-time Permanent</div>
+                <button>Copy job link</button><button>Share</button>
+              </div>
+              <section class="job-description">
+                <div class="jd-info"><p>Build Java backend services.</p></div>
+              </section>
+              <a data-test="applyButton">Apply for this job</a>
+              <button data-test="save-job">Save job</button>
+              <section><h2>Similar Jobs</h2><p>Recommendation</p></section>
+              <section><h2>Profile recommendations</h2></section>
+            </div>
+            """
+        )
+
+        payload = page.evaluate(
+            _snapshot_page_js("DPDHGLOBALAV361651ENAMEREXTERNAL")
+        )
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="dhl:dhl:DPDHGLOBALAV361651ENAMEREXTERNAL"' in html
+        assert "Experte Softwareentwicklung" in html
+        assert "Berlin, Germany" in html
+        assert "Build Java backend services." in html
+        assert "rgb(212, 5, 17)" in html
+        assert "Copy job link" not in html
+        assert ">Share<" not in html
+        assert "Apply for this job" not in html
+        assert "Save job" not in html
+        assert "Recommendation" not in html
+        assert "Profile recommendations" not in html
+        assert page.evaluate(_snapshot_page_js("DPDHGLOBALOTHER")) == {
+            "status": "unavailable",
+            "error_code": "job_identity_mismatch",
+        }
+        browser.close()
+
+
+def test_snapshot_page_script_uses_page_job_data_when_widget_does_not_render() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.dhl import _snapshot_page_js
+
+    external_id = "DPDHGLOBALAV371598ENAMEREXTERNAL"
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.job-info { color: rgb(212, 5, 17); }</style>
+            <nav>Search Job</nav><footer>Similar Jobs</footer>
+            <script>
+              window.phApp = {ddo: {jobDetail: {data: {job: {
+                jobSeqNo: "DPDHGLOBALAV371598ENAMEREXTERNAL",
+                title: "IT Super User (m/w/d)",
+                companyName: "DHL Supply Chain (Leipzig) GmbH",
+                location: "Jena, Thüringen, Germany",
+                datePosted: "2026-08-19T00:00:00.000+0000",
+                description: "<div><p>Support warehouse IT systems.</p>"
+                  + "<a href='https://apply.example'>Apply now</a></div>"
+              }}}}};
+            </script>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_page_js(external_id))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert f'data-job-scan-snapshot="dhl:dhl:{external_id}"' in html
+        assert "IT Super User" in html
+        assert "DHL Supply Chain (Leipzig) GmbH" in html
+        assert "Jena, Thüringen, Germany" in html
+        assert "Support warehouse IT systems." in html
+        assert "rgb(212, 5, 17)" in html
+        assert "Apply now" not in html
+        assert "Search Job" not in html
+        assert "Similar Jobs" not in html
+        browser.close()
 
 
 @respx.mock

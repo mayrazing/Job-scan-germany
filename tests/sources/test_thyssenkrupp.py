@@ -477,3 +477,104 @@ def source_reference():
         listing_location="Berlin, Berlin, Germany",
         listing_posted_at=date(2026, 8, 10),
     )
+
+
+@respx.mock
+def test_new_thyssenkrupp_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    snapshot_html = (
+        '<html data-job-scan-snapshot="thyssenkrupp:thyssenkrupp:967315">'
+        "<body>Softwareentwickler IoT</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.thyssenkrupp.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = ThyssenkruppAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(source_reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_thyssenkrupp_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    monkeypatch.setattr(
+        "job_scan.sources.thyssenkrupp.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = ThyssenkruppAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(source_reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_thyssenkrupp_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.thyssenkrupp import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>#job { color: rgb(0, 65, 101); }</style>
+            <script type="application/ld+json">{"identifier":{"value":"967315"}}</script>
+            <main class="outer-container">
+              <section id="job"><h1>Softwareentwickler:in IoT</h1>
+                <p>Berlin · thyssenkrupp Automation Engineering GmbH</p></section>
+              <div class="metadata-actions">
+                <div class="w-full"><h2>Job details</h2><table>
+                  <tr><th>Published</th><td>10.08.2026</td></tr>
+                  <tr><th>Job number</th><td>967315</td></tr>
+                  <tr><th>Share job:</th><td><a href="https://example.com/share">LinkedIn</a></td></tr>
+                </table></div>
+                <div><a class="apply-now" href="https://example.com/apply">Apply now</a></div>
+              </div>
+              <article><h2>Your responsibilities</h2><p>Build backend services.</p>
+                <h2>Your profile</h2><p>Java experience.</p>
+                <h2>Your benefits</h2><p>Flexible working hours.</p></article>
+            </main>
+            <section id="benefits"><h2>Company benefits</h2><p>Generic company content.</p></section>
+            <section><h2>Similar jobs</h2><p>Recommendation.</p></section>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("967315"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="thyssenkrupp:thyssenkrupp:967315"' in html
+        assert "Softwareentwickler:in IoT" in html
+        assert "Build backend services." in html
+        assert "Java experience." in html
+        assert "Flexible working hours." in html
+        assert "rgb(0, 65, 101)" in html
+        assert "Share job" not in html
+        assert "Apply now" not in html
+        assert "Generic company content." not in html
+        assert "Recommendation." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

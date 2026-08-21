@@ -392,6 +392,191 @@ def test_fetch_detail_returns_public_posting_and_plain_complete_description(
 
 
 @respx.mock
+def test_new_smartrecruiters_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(LIST_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "totalFound": 1,
+                "content": [listing("job-1", "Software Engineer")],
+            },
+        )
+    )
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **listing("job-1", "Software Engineer"),
+                "active": True,
+                "postingUrl": (
+                    "https://jobs.smartrecruiters.com/"
+                    "BoschGroup/job-1-software-engineer"
+                ),
+                "jobAd": {
+                    "sections": {
+                        "jobDescription": {
+                            "title": "Job description",
+                            "text": "<p>Build backend systems.</p>",
+                        }
+                    }
+                },
+            },
+        )
+    )
+    snapshot_html = (
+        '<html data-job-scan-snapshot="smartrecruiters:boschgroup:job-1">'
+        "<body>Software Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.smartrecruiters.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = SmartRecruitersAdapter(
+        config(),
+        client,
+        company_identifier="BoschGroup",
+        company_name="Bosch",
+        today=lambda: date(2026, 8, 9),
+        capture_snapshot=lambda _reference: True,
+    )
+    reference = source.discover()[0]
+
+    occurrence = source.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_smartrecruiters_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(LIST_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "totalFound": 1,
+                "content": [listing("job-1", "Software Engineer")],
+            },
+        )
+    )
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **listing("job-1", "Software Engineer"),
+                "active": True,
+                "jobAd": {
+                    "sections": {
+                        "jobDescription": {
+                            "title": "Job description",
+                            "text": "<p>Build backend systems.</p>",
+                        }
+                    }
+                },
+            },
+        )
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.smartrecruiters.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = SmartRecruitersAdapter(
+        config(),
+        client,
+        company_identifier="BoschGroup",
+        company_name="Bosch",
+        today=lambda: date(2026, 8, 9),
+        capture_snapshot=lambda _reference: True,
+    )
+    reference = source.discover()[0]
+
+    occurrence = source.fetch_detail(reference)
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_smartrecruiters_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.smartrecruiters import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.jobad-main { color: rgb(0, 90, 156); }</style>
+            <header>SmartRecruiters navigation</header>
+            <main class="jobad-main job" itemscope
+                  itemtype="http://schema.org/JobPosting" role="main"
+                  data-company-identifier="BoschGroup"
+                  data-job-id="744000143108870">
+              <h1 class="job-title">Software Engineer</h1>
+              <ul class="job-details">
+                <li><spl-job-location formattedaddress="Berlin, Germany">
+                </spl-job-location></li>
+                <li>Full-time</li>
+              </ul>
+              <div class="job-sections">
+                <section class="job-section" id="st-companyDescription">
+                  <h2>Company description</h2><p>Build mobility products.</p>
+                </section>
+                <section class="job-section" id="st-jobDescription">
+                  <h2>Job description</h2><p>Build Java services.</p>
+                </section>
+                <section class="job-section" id="st-qualifications">
+                  <h2>Qualifications</h2><p>Java and SQL.</p>
+                </section>
+                <section class="job-section" id="st-additionalInformation">
+                  <h2>Additional information</h2><p>Hybrid work.</p>
+                  <a href="https://example.test/apply">Apply now</a>
+                </section>
+                <section class="job-section"><h2>Job location</h2><p>Map</p></section>
+                <section class="job-apply"><a href="/apply">Apply</a></section>
+              </div>
+            </main>
+            <aside><h2>Share this job</h2><p>Social links</p></aside>
+            <section><h2>More jobs</h2><p>Recommendation</p></section>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("BoschGroup", "744000143108870"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert (
+            'data-job-scan-snapshot="smartrecruiters:boschgroup:'
+            '744000143108870"' in html
+        )
+        assert "Software Engineer" in html
+        assert "Berlin, Germany" in html
+        assert "Build Java services." in html
+        assert "Java and SQL." in html
+        assert "Hybrid work." in html
+        assert "rgb(0, 90, 156)" in html
+        assert "Apply now" not in html
+        assert "SmartRecruiters navigation" not in html
+        assert "Share this job" not in html
+        assert "Recommendation" not in html
+        assert "Map" not in html
+        assert page.evaluate(
+            _snapshot_script("BoschGroup", "744000143108871")
+        ) == {
+            "status": "unavailable",
+            "error_code": "job_identity_mismatch",
+        }
+        browser.close()
+
+
+@respx.mock
 def test_fetch_detail_marks_inactive_posting_as_closed(tmp_path: Path) -> None:
     respx.get(LIST_URL).mock(
         return_value=httpx.Response(

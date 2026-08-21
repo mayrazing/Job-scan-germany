@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -16,9 +16,14 @@ from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
 from job_scan.sources.base import (
+    BrowserSourceError,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
 )
 
 _ORIGIN = "https://careers.dhl.com"
@@ -38,6 +43,80 @@ _CITY_ALIASES = {
     "nuernberg": "nuremberg",
 }
 
+def _snapshot_page_js(expected_external_id: str) -> str:
+    return browser_snapshot_script(
+        r"""
+  const expectedJobId = __EXPECTED_JOB_ID__;
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Verify you are human|Cloudflare Ray ID/i.test(document.body?.innerText || "");
+  if (isChallenge()) return {status: "challenge"};
+  const embeddedJob = globalThis.phApp?.ddo?.jobDetail?.data?.job;
+  const pageJobId = location.pathname.match(/\/job\/([^/?#]+)/)?.[1] ||
+    document.querySelector("[data-job-id]")?.getAttribute("data-job-id") ||
+    embeddedJob?.jobSeqNo || "";
+  if (!pageJobId) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  if (pageJobId !== expectedJobId) {
+    return {status: "unavailable", error_code: "job_identity_mismatch"};
+  }
+
+  let header = document.querySelector(".job-info");
+  let title = header?.querySelector(".job-title, h1");
+  let description = document.querySelector(".job-description");
+  let roots;
+  if (!header || !title || !description) {
+    if (
+      embeddedJob?.jobSeqNo !== expectedJobId ||
+      typeof embeddedJob.title !== "string" ||
+      typeof embeddedJob.description !== "string"
+    ) {
+      return {status: "unavailable", error_code: "structure_mismatch"};
+    }
+    header = document.createElement("section");
+    header.className = "job-info";
+    title = document.createElement("h1");
+    title.className = "job-title";
+    title.textContent = embeddedJob.title;
+    header.append(title);
+    for (const [className, value] of [
+      ["job-company", embeddedJob.companyName || embeddedJob.jobCompany],
+      ["job-location", embeddedJob.location],
+      ["job-posted-date", embeddedJob.datePosted],
+    ]) {
+      if (typeof value !== "string" || !value.trim()) continue;
+      const detail = document.createElement("div");
+      detail.className = className;
+      detail.textContent = value.trim();
+      header.append(detail);
+    }
+    description = document.createElement("section");
+    description.className = "job-description";
+    description.innerHTML = embeddedJob.description;
+    for (const action of description.querySelectorAll(
+      "a, button, form, input, select, textarea"
+    )) {
+      action.remove();
+    }
+    roots = [header, description];
+  } else {
+    const headerRoots = [...header.children].filter((element) =>
+      !/^(Copy job link|Share)\b/i.test(
+        (element.innerText || "").replace(/\s+/g, " ").trim()
+      )
+    );
+    roots = [...headerRoots, description];
+  }
+  return buildJobSnapshot({
+    snapshotKey: `dhl:dhl:${expectedJobId}`,
+    title: (title.innerText || title.textContent || "").trim(),
+    sourceLabel: "DHL",
+    accent: "#d40511",
+    roots,
+  });
+""".strip().replace("__EXPECTED_JOB_ID__", json.dumps(expected_external_id))
+    )
+
 
 class DhlAdapter:
     """Read DHL jobs returned by the public Phenom career search."""
@@ -45,9 +124,16 @@ class DhlAdapter:
     source = SourceKind.DHL
     source_instance = _SOURCE_INSTANCE
 
-    def __init__(self, config: AppConfig, http_client: PublicHttpClient) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        http_client: PublicHttpClient,
+        *,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
+    ) -> None:
         self._config = config
         self._http_client = http_client
+        self._capture_snapshot = capture_snapshot
 
     def discover(self) -> list[JobReference]:
         """Return unique DHL jobs matching each setup search term and city."""
@@ -116,6 +202,22 @@ class DhlAdapter:
         description = _plain_html(_required_string(job, "description", "DHL job detail"))
         posted_at = _required_date(job.get("datePosted"))
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.detail_url),
+                    script=_snapshot_page_js(reference.external_id),
+                    source_name="dhl",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if snapshot_html is None:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -129,6 +231,8 @@ class DhlAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
         )
 
     def _search(

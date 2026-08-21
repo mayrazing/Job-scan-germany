@@ -20,6 +20,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.job_snapshot import JobSnapshotReference
 
 OBSERVED_AT = datetime(2026, 8, 2, 10, 30, tzinfo=UTC)
 
@@ -30,6 +31,26 @@ def test_source_kind_accepts_linkedin_occurrences() -> None:
 
 def test_source_kind_accepts_indeed_occurrences() -> None:
     assert SourceKind("indeed") is SourceKind.INDEED
+
+
+def test_source_occurrence_accepts_a_job_snapshot_reference() -> None:
+    captured_at = datetime(2026, 8, 20, 9, 30, tzinfo=UTC)
+    item = occurrence(
+        job_snapshot=JobSnapshotReference(
+            snapshot_id=f"sha256:{'a' * 64}",
+            captured_at=captured_at,
+        )
+    )
+
+    assert item.job_snapshot is not None
+    assert item.job_snapshot.captured_at == captured_at
+
+
+def test_source_occurrence_keeps_old_records_without_a_snapshot() -> None:
+    item = occurrence()
+
+    assert item.job_snapshot is None
+    assert item.job_snapshot_error_code is None
 
 
 def occurrence(external_id: str = "REQ-42", **updates: Any) -> SourceOccurrence:

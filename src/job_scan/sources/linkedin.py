@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -29,6 +30,7 @@ from job_scan.sources.base import (
     JobReference,
     SourceError,
 )
+from job_scan.sources.job_snapshot_capture import browser_snapshot_script
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -60,6 +62,87 @@ _LINKEDIN_HUMAN_GATE_JS = r"""
   return {status: challenge ? "challenge" : "ok"};
 })()
 """.strip()
+
+def _snapshot_page_js(expected_external_id: str) -> str:
+    return browser_snapshot_script(
+        r"""
+  const expectedJobId = __EXPECTED_JOB_ID__;
+  const isChallenge = () =>
+    /linkedin\.com\/(login|checkpoint|authwall)/i.test(location.href || "") ||
+    /captcha|verification required|verify you are human|安全验证|登录领英/i.test(
+      `${document.title || ""}\n${document.body?.innerText || ""}`
+    );
+  if (isChallenge()) return {status: "challenge"};
+
+  const pageJobId = location.pathname.match(/^\/jobs\/view\/(\d+)(?:\/|$)/)?.[1] ||
+    document.querySelector("[data-job-id]")?.getAttribute("data-job-id") || "";
+  const main = document.querySelector("main");
+  const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+  const titleAnchor = [...document.querySelectorAll('a[href*="/jobs/view/"]')]
+    .filter((anchor) => new URL(anchor.href, location.href).pathname.includes(`/jobs/view/${pageJobId}`))
+    .filter((anchor) => normalize(anchor.innerText || anchor.textContent))
+    .sort((left, right) => left.outerHTML.length - right.outerHTML.length)[0];
+  const pageJobTitle = normalize((document.title || "").split(" | ")[0]);
+  const title = [...document.querySelectorAll("main h1, main p")]
+    .filter((element) => normalize(element.innerText || element.textContent) === pageJobTitle)
+    .sort((left, right) => left.outerHTML.length - right.outerHTML.length)[0] ||
+    titleAnchor?.querySelector("h1, p") ||
+    titleAnchor?.closest("h1, p") ||
+    document.querySelector("h1.jobs-unified-top-card__job-title, main h1");
+  const about = document.querySelector(
+    '[data-sdui-component*="aboutTheJob"], .jobs-description__container'
+  ) || [...document.querySelectorAll("main h2")]
+    .find((heading) => /^(About the job|Über den Job)$/i.test(normalize(heading.innerText)))
+    ?.parentElement?.parentElement;
+  if (!/^\d+$/.test(pageJobId) || !main || !title || !about) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  if (pageJobId !== expectedJobId) {
+    return {status: "unavailable", error_code: "job_identity_mismatch"};
+  }
+
+  const action = [...main.querySelectorAll("button, a")].find((element) =>
+    /^(Apply|Bewerben|Save|Speichern)$/i.test(normalize(element.innerText))
+  );
+  let header = null;
+  if (action) {
+    const titleAncestors = new Set();
+    for (let current = title; current; current = current.parentElement) {
+      titleAncestors.add(current);
+    }
+    for (let current = action; current; current = current.parentElement) {
+      if (titleAncestors.has(current)) {
+        header = current;
+        break;
+      }
+    }
+  }
+  if (!header || header === main) {
+    header = title.closest(
+      ".job-details-jobs-unified-top-card__container--two-pane, .jobs-unified-top-card"
+    );
+  }
+  if (!header) {
+    for (let current = title.parentElement; current && current !== main; current = current.parentElement) {
+      const text = normalize(current.innerText);
+      if (text.includes(" · ") && text.length < 2_000) {
+        header = current;
+        break;
+      }
+    }
+  }
+  if (!header || header === main || header.contains(about)) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `linkedin:default:${expectedJobId}`,
+    title: normalize(title.innerText || title.textContent),
+    sourceLabel: "LinkedIn",
+    accent: "#0a66c2",
+    roots: [header, about],
+  });
+""".strip().replace("__EXPECTED_JOB_ID__", json.dumps(expected_external_id))
+    )
 
 _COMPANY_PAGE_JS = r"""
 (async () => {
@@ -271,6 +354,7 @@ class LinkedinAdapter:
         limit: int | None = None,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
         challenge_wait_seconds: float = DEFAULT_CHALLENGE_WAIT_SECONDS,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         resolved_limit = config.linkedin_limit if limit is None else limit
         if not 1 <= resolved_limit <= 100:
@@ -286,6 +370,7 @@ class LinkedinAdapter:
         self._limit = resolved_limit
         self._timeout_seconds = timeout_seconds
         self._challenge_wait_seconds = challenge_wait_seconds
+        self._capture_snapshot = capture_snapshot
         self._occurrences: dict[str, FetchedOccurrence] = {}
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
@@ -354,6 +439,16 @@ class LinkedinAdapter:
                     reference_indexes[reference.external_id] = len(references)
                     references.append(reference)
                     self._occurrences[reference.external_id] = occurrence
+        if self._capture_snapshot is not None:
+            for reference in references:
+                occurrence = self._occurrences[reference.external_id]
+                if self._capture_snapshot(
+                    reference.with_current_identity(
+                        title=occurrence.title,
+                        posted_at=occurrence.posted_at,
+                    )
+                ):
+                    self._attach_snapshot(reference)
         return references
 
     @property
@@ -377,6 +472,73 @@ class LinkedinAdapter:
             raise ValueError(
                 f"LinkedIn detail was not discovered for {reference.external_id}"
             ) from None
+
+    def _attach_snapshot(self, reference: JobReference) -> None:
+        """Capture optional evidence without changing the LinkedIn job result."""
+        occurrence = self._occurrences[reference.external_id]
+        session = f"job-scan-linkedin-snapshot-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        try:
+            _run_company_opencli(
+                self._opencli_executable,
+                [
+                    "browser",
+                    session,
+                    "open",
+                    str(reference.detail_url),
+                    "--window",
+                    "background",
+                ],
+                self._timeout_seconds,
+            )
+
+            def read_snapshot(timeout_override: float | None = None) -> object:
+                effective_timeout = (
+                    self._timeout_seconds
+                    if timeout_override is None
+                    else min(self._timeout_seconds, timeout_override)
+                )
+                stdout = _run_company_opencli(
+                    self._opencli_executable,
+                    [
+                        "browser",
+                        session,
+                        "eval",
+                        _snapshot_page_js(reference.external_id),
+                    ],
+                    effective_timeout,
+                )
+                try:
+                    return json.loads(stdout)
+                except json.JSONDecodeError:
+                    raise InvalidResponse(
+                        "OpenCLI LinkedIn snapshot output was not valid JSON"
+                    ) from None
+
+            payload = wait_for_challenge_clearance(
+                read_snapshot,
+                is_challenge_payload,
+                wait_seconds=self._challenge_wait_seconds,
+                read_with_timeout=read_snapshot,
+            )
+        except (BrowserSourceError, InvalidResponse):
+            occurrence.job_snapshot_error_code = "snapshot_capture_failed"
+            return
+        finally:
+            _close_company_session(
+                self._opencli_executable,
+                session,
+                self._timeout_seconds,
+            )
+        if (
+            isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and isinstance(payload.get("html"), str)
+            and payload["html"].strip()
+        ):
+            occurrence.job_snapshot_html = payload["html"]
+            occurrence.job_snapshot_error_code = None
+        else:
+            occurrence.job_snapshot_error_code = "snapshot_capture_failed"
 
     def _search(self, search_term: str, location: str) -> list[object]:
         arguments = [

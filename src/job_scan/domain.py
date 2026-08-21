@@ -16,6 +16,8 @@ from pydantic import (
     model_validator,
 )
 
+from job_scan.job_snapshot import JobSnapshotReference
+
 
 class SourceKind(StrEnum):
     ARBEITSAGENTUR = "arbeitsagentur"
@@ -335,6 +337,8 @@ class SourceOccurrence(BaseModel):
     availability_status: AvailabilityStatus
     detail_complete: bool = False
     last_fetch_error_code: str | None = None
+    job_snapshot: JobSnapshotReference | None = None
+    job_snapshot_error_code: str | None = None
     company_size_source: CompanySizeSource | None = None
     company_industry_source: CompanyIndustrySource | None = None
     closed_at: datetime | None = None

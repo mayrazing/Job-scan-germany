@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -15,7 +16,16 @@ from job_scan.config import AppConfig
 from job_scan.domain import CompanyIndustrySource, SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash, normalize_text
-from job_scan.sources.base import ExplicitlyClosed, FetchedOccurrence, JobReference
+from job_scan.sources.base import (
+    BrowserSourceError,
+    ExplicitlyClosed,
+    FetchedOccurrence,
+    JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
+)
 
 _API_BASE_URL = "https://api.smartrecruiters.com/v1/companies"
 _PUBLIC_BASE_URL = "https://jobs.smartrecruiters.com"
@@ -41,6 +51,81 @@ _CITY_QUERY_NAMES = {
     "nuremberg": "Nürnberg",
 }
 
+
+def _snapshot_script(company_identifier: str, external_id: str) -> str:
+    return browser_snapshot_script(
+        r"""
+  const expectedCompany = __EXPECTED_COMPANY__;
+  const expectedJobId = __EXPECTED_JOB_ID__;
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Verify you are human|Cloudflare Ray ID/i.test(document.body?.innerText || "");
+  if (isChallenge()) return {status: "challenge"};
+
+  const main = document.querySelector(
+    'main.jobad-main[itemtype$="JobPosting"], main[role="main"].job'
+  );
+  const pathMatch = location.pathname.match(/^\/([^/?#]+)\/([^/?#]+)/);
+  const pageCompany = pathMatch?.[1] || main?.dataset.companyIdentifier || "";
+  const rawPathJobId = pathMatch?.[2] || "";
+  const pageJobId = main?.dataset.jobId ||
+    (rawPathJobId === expectedJobId || rawPathJobId.startsWith(`${expectedJobId}-`)
+      ? expectedJobId
+      : rawPathJobId);
+  if (!pageCompany || !pageJobId || !main) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  if (
+    pageCompany.toLocaleLowerCase() !== expectedCompany.toLocaleLowerCase() ||
+    pageJobId !== expectedJobId
+  ) {
+    return {status: "unavailable", error_code: "job_identity_mismatch"};
+  }
+
+  const title = main.querySelector("h1.job-title");
+  const details = main.querySelector(".job-details");
+  const sectionIds = [
+    "st-companyDescription",
+    "st-jobDescription",
+    "st-qualifications",
+    "st-additionalInformation",
+  ];
+  const sections = sectionIds
+    .map((id) => main.querySelector(`#${id}`))
+    .filter(Boolean)
+    .map((section) => section.cloneNode(true));
+  if (!title || !details || !sections.some((section) => section.id === "st-jobDescription")) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+
+  const detailsClone = details.cloneNode(true);
+  for (const locationElement of detailsClone.querySelectorAll("spl-job-location")) {
+    const text = locationElement.getAttribute("formattedaddress") || "";
+    const replacement = document.createElement("span");
+    replacement.className = "job-detail-location";
+    replacement.textContent = text;
+    locationElement.replaceWith(replacement);
+  }
+  for (const section of sections) {
+    for (const action of section.querySelectorAll(
+      "a, button, form, input, select, textarea"
+    )) {
+      action.remove();
+    }
+  }
+  return buildJobSnapshot({
+    snapshotKey: `smartrecruiters:${expectedCompany.toLocaleLowerCase()}:${expectedJobId}`,
+    title: (title.innerText || title.textContent || "").trim(),
+    sourceLabel: "SmartRecruiters",
+    accent: "#005a9c",
+    roots: [title, detailsClone, ...sections],
+    stylesheetOrigins: ["https://c.smartrecruiters.com"],
+  });
+""".strip()
+        .replace("__EXPECTED_COMPANY__", json.dumps(company_identifier))
+        .replace("__EXPECTED_JOB_ID__", json.dumps(external_id))
+    )
+
+
 class SmartRecruitersAdapter:
     """Read one SmartRecruiters company's public postings and details."""
 
@@ -55,6 +140,7 @@ class SmartRecruitersAdapter:
         company_name: str,
         page_size: int = _DEFAULT_PAGE_SIZE,
         today: Callable[[], date] | None = None,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         company_identifier = company_identifier.strip()
         company_name = company_name.strip()
@@ -70,6 +156,7 @@ class SmartRecruitersAdapter:
         self._company_name = company_name
         self._page_size = page_size
         self._today = today or _utc_today
+        self._capture_snapshot = capture_snapshot
         self._details: dict[str, FetchedOccurrence | Exception] = {}
         self.source_instance = company_identifier.casefold()
         encoded_identifier = quote(company_identifier, safe="")
@@ -179,6 +266,25 @@ class SmartRecruitersAdapter:
             reference.detail_url,
             reference.platform_url or HttpUrl(posting_url),
         ) or reference.listing_company_industry_source
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.platform_url or HttpUrl(posting_url)),
+                    script=_snapshot_script(
+                        self._company_identifier,
+                        reference.external_id,
+                    ),
+                    source_name="smartrecruiters",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if snapshot_html is None:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -192,6 +298,8 @@ class SmartRecruitersAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_industry_source=company_industry_source,
         )
 

@@ -254,6 +254,59 @@ def test_fetch_detail_returns_full_description_and_simplify_platform_url(
     assert not state_path.exists()
 
 
+def test_new_simplify_job_carries_transient_snapshot_html(tmp_path: Path) -> None:
+    snapshot_html = (
+        f'<html data-job-scan-snapshot="simplify:de:{JOB_ID}">'
+        "<body>Backend Engineer</body></html>"
+    )
+    executable, state_path, _eval_log_path = fake_opencli(
+        tmp_path,
+        [
+            {"status": "ok", "rows": [search_row()]},
+            detail_payload(),
+            {"status": "ok", "html": snapshot_html},
+        ],
+    )
+    adapter = adapter_type()(
+        config(simplify_de_limit=1),
+        opencli_executable=executable,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    reference = adapter.discover()[0]
+    occurrence = adapter.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+    assert not state_path.exists()
+
+
+def test_simplify_snapshot_failure_does_not_discard_the_job(tmp_path: Path) -> None:
+    executable, state_path, _eval_log_path = fake_opencli(
+        tmp_path,
+        [
+            {"status": "ok", "rows": [search_row()]},
+            detail_payload(),
+            {"status": "unavailable", "error_code": "structure_mismatch"},
+        ],
+    )
+    adapter = adapter_type()(
+        config(simplify_de_limit=1),
+        opencli_executable=executable,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    result = run_source(adapter)
+
+    assert len(result.occurrences) == 1
+    assert result.occurrences[0].description.startswith("Build reliable services.")
+    assert result.occurrences[0].job_snapshot_html is None
+    assert result.occurrences[0].job_snapshot_error_code == "snapshot_capture_failed"
+    assert not state_path.exists()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("active", False), ("visible", False), ("archive", True)],
@@ -478,6 +531,66 @@ def test_search_script_waits_for_delayed_public_search_contract() -> None:
         assert parameters["x-typesense-api-key"] == ["scoped-test-key"]
         assert parameters["filter_by"] == ["countries:=[`Germany`] && locations:`Berlin`"]
         assert "scoped-test-key" not in json.dumps(payload)
+        browser.close()
+
+
+def test_snapshot_page_script_keeps_only_simplify_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.simplify import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            f"""
+            <style>.title-block {{ color: rgb(124, 58, 237); }}</style>
+            <div data-testid="details-view" id="details-card-{JOB_ID}">
+              <div>
+                <div class="left-column">
+                  <div><button>Full-Time</button></div>
+                  <div class="title-block"><h1>Backend Engineer</h1><h2>Platform</h2></div>
+                  <div><h2>Example GmbH</h2><span>51-200 employees</span></div>
+                  <p>Developer tools</p>
+                  <div></div>
+                  <div>Berlin, Germany Remote Senior</div>
+                  <div></div>
+                  <div><h3>Required Skills</h3><span>Python</span></div>
+                  <div></div>
+                  <button>Get referrals → Referral advertisement</button>
+                  <div>History</div>
+                </div>
+                <div class="right-column">
+                  <div><h1>Add a resume to see your match</h1></div>
+                  <div><h3>Get referred to Example GmbH</h3></div>
+                  <div><h3>Job Description</h3><p>Build reliable services.</p></div>
+                  <div><h3>Job Responsibilities</h3><p>Own production APIs.</p></div>
+                  <div><h3>Job Requirements</h3><p>Strong Python skills.</p></div>
+                  <div><h3>Simplify's Take</h3><p>Platform commentary.</p></div>
+                  <div><h3>Benefits</h3><p>Remote work.</p></div>
+                  <div><h3>Growth &amp; Insights and Company News</h3></div>
+                </div>
+              </div>
+            </div>
+            """
+        )
+        payload = page.evaluate(_snapshot_script(JOB_ID))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert f'data-job-scan-snapshot="simplify:de:{JOB_ID}"' in html
+        assert "Backend Engineer" in html
+        assert "Example GmbH" in html
+        assert "Berlin, Germany" in html
+        assert "Build reliable services." in html
+        assert "Own production APIs." in html
+        assert "Strong Python skills." in html
+        assert "Remote work." in html
+        assert "rgb(124, 58, 237)" in html
+        assert "Referral advertisement" not in html
+        assert "Add a resume to see your match" not in html
+        assert "Platform commentary." not in html
+        assert "Company News" not in html
+        assert ">History<" not in html
         browser.close()
 
 

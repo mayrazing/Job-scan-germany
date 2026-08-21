@@ -11,6 +11,7 @@ from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.domain import SourceKind
 from job_scan.http_client import PublicHttpClient
 from job_scan.sources import ExplicitlyClosed
+from job_scan.sources.base import JobReference
 from job_scan.sources.telekom import TelekomAdapter
 
 SEARCH_URL = "https://careers.telekom.com/api/jobs-proxy/search"
@@ -416,3 +417,136 @@ def test_fetch_detail_marks_explicit_http_closure_statuses_closed(
 
     assert error.value.source_job_key == "telekom:telekom:907522"
     assert error.value.reason == reason
+
+
+def _snapshot_reference() -> JobReference:
+    return JobReference(
+        source=SourceKind.TELEKOM,
+        source_instance="telekom",
+        external_id="907522",
+        detail_url=DETAIL_URL,
+        platform_url=DETAIL_URL,
+        listing_title="Senior Software Engineer",
+        listing_company="Deutsche Telekom",
+        listing_location="Berlin",
+    )
+
+
+def _snapshot_detail_html() -> str:
+    return (
+        '<script id="job-posting-jsonld" type="application/ld+json">'
+        + json.dumps(
+            {
+                "@type": "JobPosting",
+                "title": "Senior Software Engineer",
+                "description": "<p>Build Java backend services.</p>",
+                "identifier": {"value": "senior-software-engineer-907522"},
+                "url": DETAIL_URL,
+                "hiringOrganization": {"name": "T-Systems International GmbH"},
+                "jobLocation": {
+                    "address": {
+                        "addressLocality": "Berlin",
+                        "addressCountry": "Germany",
+                    }
+                },
+            }
+        )
+        + "</script>"
+    )
+
+
+@respx.mock
+def test_new_telekom_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(200, text=_snapshot_detail_html())
+    )
+    snapshot_html = (
+        '<html data-job-scan-snapshot="telekom:telekom:907522">'
+        "<body>Senior Software Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.telekom.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = TelekomAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(_snapshot_reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_telekom_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(200, text=_snapshot_detail_html())
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.telekom.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = TelekomAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(_snapshot_reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_telekom_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.telekom import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.jobDetailsHeader_details { color: rgb(226, 0, 116); }</style>
+            <div class="jobDetailsHeader_details">
+              <h1 class="jobDetailsHeader_title">Senior Software Engineer</h1>
+              <p>Job ID 907522</p><p>Berlin · Professional · Full-time</p>
+            </div>
+            <button data-test="apply-button">Apply now</button>
+            <section class="TextCardCombo_section SectionWrapper_root">
+              <h2>About this job</h2>
+              <h3>Tasks</h3><p>Build Java backend services.</p>
+              <h3>Profile</h3><p>Cloud experience.</p>
+              <h3>Job Benefits</h3><p>Flexible working hours.</p>
+            </section>
+            <section><h2>Similar jobs</h2><p>Unrelated recommendation.</p></section>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("907522"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="telekom:telekom:907522"' in html
+        assert "Senior Software Engineer" in html
+        assert "Build Java backend services." in html
+        assert "Cloud experience." in html
+        assert "Flexible working hours." in html
+        assert "rgb(226, 0, 116)" in html
+        assert "Apply now" not in html
+        assert "Unrelated recommendation." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

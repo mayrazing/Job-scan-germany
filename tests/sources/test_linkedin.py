@@ -67,6 +67,55 @@ def fake_opencli(
     return executable
 
 
+def snapshot_opencli(
+    tmp_path: Path,
+    snapshot_payload: object,
+) -> tuple[Path, Path]:
+    executable = tmp_path / "opencli-linkedin-snapshot"
+    calls_path = tmp_path / "opencli-linkedin-snapshot-calls"
+    search_payload = [
+        {
+            "rank": 1,
+            "title": "Java Backend Engineer",
+            "company": "Example GmbH",
+            "location": "Berlin, Germany (Hybrid)",
+            "listed": "2026-08-03",
+            "salary": "",
+            "url": "https://www.linkedin.com/jobs/view/4423914728",
+            "description": "Build Java and Spring Boot services.",
+            "apply_url": None,
+            "detail_error": None,
+        }
+    ]
+    script = "\n".join(
+        [
+            f"#!{sys.executable}",
+            "import json",
+            "import pathlib",
+            "import sys",
+            f"calls = pathlib.Path({str(calls_path)!r})",
+            f"search_payload = {search_payload!r}",
+            f"snapshot_payload = {snapshot_payload!r}",
+            "args = sys.argv[1:]",
+            "with calls.open('a', encoding='utf-8') as output:",
+            "    output.write(json.dumps(args) + '\\n')",
+            "if args[:2] == ['linkedin', 'search']:",
+            "    print(json.dumps(search_payload))",
+            "elif len(args) >= 3 and args[0] == 'browser' and args[2] == 'open':",
+            "    print(json.dumps({'url': args[3]}))",
+            "elif len(args) >= 3 and args[0] == 'browser' and args[2] == 'eval':",
+            "    print(json.dumps(snapshot_payload))",
+            "elif len(args) >= 3 and args[0] == 'browser' and args[2] == 'close':",
+            "    print('Browser session tab lease released')",
+            "else:",
+            "    raise SystemExit(78)",
+        ]
+    )
+    executable.write_text(script, encoding="utf-8")
+    executable.chmod(0o755)
+    return executable, calls_path
+
+
 def exiting_opencli(tmp_path: Path, exit_code: int) -> Path:
     executable = tmp_path / "opencli"
     executable.write_text(
@@ -417,6 +466,106 @@ def test_discover_maps_opencli_search_details_into_source_occurrences(
     assert source is not None
     assert source.source_name == "linkedin"
     assert str(source.lookup_url) == "https://www.linkedin.com/jobs/view/4423914728"
+
+
+def test_new_linkedin_job_carries_transient_snapshot_html(tmp_path: Path) -> None:
+    snapshot_html = (
+        '<!doctype html><html data-job-scan-snapshot="linkedin:default:4423914728">'
+        "<body>Java Backend Engineer</body></html>"
+    )
+    executable, calls_path = snapshot_opencli(
+        tmp_path,
+        {"status": "ok", "html": snapshot_html},
+    )
+    linkedin = LinkedinAdapter(
+        config(),
+        opencli_executable=executable,
+        limit=2,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    reference = linkedin.discover()[0]
+    occurrence = linkedin.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+    calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+    assert any(call[:3:2] == ["browser", "open"] for call in calls)
+    assert any(call[:3:2] == ["browser", "eval"] for call in calls)
+    assert any(call[:3:2] == ["browser", "close"] for call in calls)
+
+
+def test_linkedin_snapshot_failure_does_not_discard_the_job(tmp_path: Path) -> None:
+    executable, _calls_path = snapshot_opencli(
+        tmp_path,
+        {"status": "unavailable", "error_code": "structure_mismatch"},
+    )
+    linkedin = LinkedinAdapter(
+        config(),
+        opencli_executable=executable,
+        limit=2,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    result = run_source(linkedin)
+
+    assert len(result.occurrences) == 1
+    assert result.occurrences[0].description == "Build Java and Spring Boot services."
+    assert result.occurrences[0].job_snapshot_html is None
+    assert result.occurrences[0].job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_linkedin_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.linkedin import _snapshot_page_js
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <title>Java Backend Engineer | Example GmbH | LinkedIn</title>
+            <style>.top-card{color:#0a66c2}.description{font-size:16px}</style>
+            <main data-job-id="4423914728">
+              <section class="top-card">
+                <a href="https://www.linkedin.com/jobs/view/4423914728">
+                  <p>Java Backend Engineer</p>
+                </a>
+                <div>Example GmbH</div><div>Berlin · Full-time</div>
+                <button>Apply</button><button>Save</button>
+              </section>
+              <div data-sdui-component="com.linkedin.sdui.generated.jobseeker.dsl.impl.aboutTheJob">
+                <h2>About the job</h2>
+                <div class="description">Build Java and Spring Boot services.</div>
+              </div>
+              <div data-sdui-component="com.linkedin.sdui.generated.jobseeker.dsl.impl.howYouFitGuide">
+                <h2>Use AI to assess how you fit</h2>
+              </div>
+              <div data-sdui-component="com.linkedin.sdui.generated.jobseeker.dsl.impl.similarJobs">
+                <h2>More jobs</h2>
+              </div>
+            </main>
+            """
+        )
+        payload = page.evaluate(_snapshot_page_js("4423914728"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert "Java Backend Engineer" in html
+        assert "Example GmbH" in html
+        assert "Build Java and Spring Boot services." in html
+        assert "Use AI to assess how you fit" not in html
+        assert "More jobs" not in html
+        assert ">Apply<" not in html
+        assert ">Save<" not in html
+        assert "https://www.linkedin.com/jobs/view/4423914728" not in html
+        assert page.evaluate(_snapshot_page_js("4423914729")) == {
+            "status": "unavailable",
+            "error_code": "job_identity_mismatch",
+        }
+        browser.close()
 
 
 def test_linkedin_company_about_page_returns_company_size(tmp_path: Path) -> None:

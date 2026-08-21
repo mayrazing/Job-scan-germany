@@ -20,6 +20,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.job_snapshot import JobSnapshotReference
 from job_scan.normalization import content_hash
 from job_scan.sources.base import FetchedOccurrence
 
@@ -42,6 +43,8 @@ def fetched(
     detail_complete: bool = True,
     fetch_error_code: str | None = None,
     company_industry_source: object | None = None,
+    job_snapshot: JobSnapshotReference | None = None,
+    job_snapshot_error_code: str | None = None,
 ) -> FetchedOccurrence:
     instance = source_instance or f"{source.value}.example"
     occurrence_url = url or f"https://{instance}/jobs/{external_id}"
@@ -64,6 +67,8 @@ def fetched(
         detail_complete=detail_complete,
         fetch_error_code=fetch_error_code,
         company_industry_source=company_industry_source,
+        job_snapshot=job_snapshot,
+        job_snapshot_error_code=job_snapshot_error_code,
     )
 
 
@@ -1364,6 +1369,52 @@ def test_deduplicated_occurrence_preserves_company_industry_source_locator() -> 
     source = result.jobs[0].source_occurrences[0].company_industry_source
     assert source is not None
     assert source.source_name == "linkedin"
+
+
+def test_new_occurrence_preserves_the_captured_job_snapshot() -> None:
+    reference = JobSnapshotReference(
+        snapshot_id=f"sha256:{'a' * 64}",
+        captured_at=NOW,
+    )
+    stepstone = fetched(
+        SourceKind.STEPSTONE,
+        "13889830",
+        source_instance="de",
+        job_snapshot=reference,
+    )
+
+    result = merge_occurrences(empty_snapshot(), [stepstone], NOW)
+
+    occurrence = result.jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot == reference
+    assert occurrence.job_snapshot_error_code is None
+
+
+def test_existing_occurrence_is_not_backfilled_with_a_job_snapshot() -> None:
+    existing = fetched(
+        SourceKind.STEPSTONE,
+        "13889830",
+        source_instance="de",
+    )
+    stored = stored_occurrence(existing)
+    previous = Snapshot(
+        meta=StoreMeta(data_revision=7),
+        jobs=[stored_job("existing-stepstone", [stored])],
+    )
+    incoming = existing.model_copy(
+        update={
+            "job_snapshot": JobSnapshotReference(
+                snapshot_id=f"sha256:{'b' * 64}",
+                captured_at=NOW,
+            )
+        }
+    )
+
+    result = merge_occurrences(previous, [incoming], NOW)
+
+    occurrence = result.jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is None
+    assert occurrence.job_snapshot_error_code is None
 
 
 def test_smartrecruiters_occurrence_enters_the_deduplicated_snapshot() -> None:

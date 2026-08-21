@@ -15,7 +15,16 @@ from job_scan.config import AppConfig
 from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
-from job_scan.sources.base import ExplicitlyClosed, FetchedOccurrence, JobReference
+from job_scan.sources.base import (
+    BrowserSourceError,
+    ExplicitlyClosed,
+    FetchedOccurrence,
+    JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
+)
 
 _CAREER_ORIGIN = "https://jobs.bosch.com"
 _CAREER_URL = f"{_CAREER_ORIGIN}/en/"
@@ -43,6 +52,42 @@ _CITY_QUERY_NAMES = {
 }
 
 
+def _snapshot_script(external_id: str) -> str:
+    expected_id = json.dumps(external_id)
+    return browser_snapshot_script(
+        rf"""
+  const expectedId = {expected_id};
+  const metadata = document.querySelector(".ApplyButton[data-job-reference]");
+  const rawReference = metadata?.getAttribute("data-job-reference") || "";
+  const actualId = rawReference.trim().split(/\s+/).at(-1) || "";
+  if (actualId !== expectedId) {{
+    return {{status: "unavailable", error_code: "job_identity_mismatch"}};
+  }}
+  const titleStage = [...document.querySelectorAll(".M-Stage-Two")]
+    .find((element) => element.querySelector("h1"));
+  const facts = document.querySelector(".Stage-Two__facts");
+  const sections = [...document.querySelectorAll("section")];
+  const sectionByHeading = (pattern) => sections.find((section) =>
+    [...section.querySelectorAll("h1, h2, h3")]
+      .some((heading) => pattern.test((heading.textContent || "").trim()))
+  );
+  const tasks = sectionByHeading(/^(Your tasks|Your profile|Deine Aufgaben|Ihr Aufgabenbereich|Aufgaben)$/i);
+  const contact = sectionByHeading(/^(Contact & additional information|Kontakt(?: & weitere Informationen)?)$/i);
+  const benefits = sections.filter((section) =>
+    section.matches(".M-Text-StagedTypography") &&
+    /benefits|vorteile|was wir bieten/i.test(section.textContent || "")
+  );
+  return buildJobSnapshot({{
+    snapshotKey: `bosch:bosch:${{expectedId}}`,
+    title: titleStage?.querySelector("h1")?.textContent?.trim() || document.title,
+    sourceLabel: "Bosch",
+    accent: "#ea0016",
+    roots: [titleStage, facts, tasks, contact, ...benefits],
+  }});
+"""
+    )
+
+
 @dataclass(frozen=True)
 class _SearchConfig:
     endpoint: str
@@ -63,6 +108,7 @@ class BoschAdapter:
         *,
         page_size: int = _DEFAULT_PAGE_SIZE,
         today: Callable[[], date] | None = None,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         if not 1 <= page_size <= 100:
             raise ValueError("page_size must be between 1 and 100")
@@ -70,6 +116,7 @@ class BoschAdapter:
         self._http_client = http_client
         self._page_size = page_size
         self._today = today or _utc_today
+        self._capture_snapshot = capture_snapshot
         self._search_config: _SearchConfig | None = None
 
     def discover(self) -> list[JobReference]:
@@ -145,6 +192,21 @@ class BoschAdapter:
         company = reference.listing_company or _COMPANY_NAME
         description = _detail_description(soup)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.detail_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="Bosch",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
+                snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -158,6 +220,8 @@ class BoschAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_html=snapshot_html,
+            job_snapshot_error_code=snapshot_error_code,
         )
 
     def _official_search_config(self) -> _SearchConfig:

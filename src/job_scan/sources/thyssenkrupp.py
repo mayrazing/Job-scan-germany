@@ -16,9 +16,14 @@ from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
 from job_scan.sources.base import (
+    BrowserSourceError,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
 )
 
 _ORIGIN = "https://jobs.thyssenkrupp.com"
@@ -41,6 +46,44 @@ _CITY_ALIASES = {
 }
 
 
+def _snapshot_script(external_id: str) -> str:
+    expected_id = json.dumps(external_id)
+    return browser_snapshot_script(
+        rf"""
+  const expectedId = {expected_id};
+  const identityFound = location.pathname.endsWith(`/${{expectedId}}`) ||
+    [...document.querySelectorAll('script[type="application/ld+json"]')]
+      .some((script) => (script.textContent || "").includes(expectedId));
+  if (!identityFound) {{
+    return {{status: "unavailable", error_code: "job_identity_mismatch"}};
+  }}
+  const main = document.querySelector("main.outer-container");
+  const title = main?.querySelector(":scope > section#job");
+  const article = main ? [...main.children].find((child) =>
+    child.tagName === "ARTICLE"
+  ) : null;
+  const metadataContainer = main ? [...main.children].find((child) =>
+    child !== title && child !== article &&
+    /Job details|Job number|Type of contract/i.test(child.textContent || "")
+  ) : null;
+  const metadataSource = metadataContainer?.firstElementChild || null;
+  const metadata = metadataSource?.cloneNode(true) || null;
+  metadata?.querySelectorAll("a, button, form, [role=button]")
+    .forEach((element) => element.remove());
+  metadata?.querySelectorAll("tr").forEach((row) => {{
+    if (/^Share job:/i.test((row.textContent || "").trim())) row.remove();
+  }});
+  return buildJobSnapshot({{
+    snapshotKey: `thyssenkrupp:thyssenkrupp:${{expectedId}}`,
+    title: title?.querySelector("h1")?.textContent?.trim() || document.title,
+    sourceLabel: "thyssenkrupp",
+    accent: "#00465f",
+    roots: [title, metadata, article],
+  }});
+"""
+    )
+
+
 class ThyssenkruppAdapter:
     """Read jobs from thyssenkrupp's public search API and detail pages."""
 
@@ -53,10 +96,12 @@ class ThyssenkruppAdapter:
         http_client: PublicHttpClient,
         *,
         today: Callable[[], date] | None = None,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         self._config = config
         self._http_client = http_client
         self._today = today or _utc_today
+        self._capture_snapshot = capture_snapshot
 
     def discover(self) -> list[JobReference]:
         """Return unique Germany jobs for each configured Setup search term."""
@@ -135,6 +180,21 @@ class ThyssenkruppAdapter:
             "thyssenkrupp JobPosting datePosted",
         )
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(reference.detail_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="thyssenkrupp",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
+                snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -148,6 +208,8 @@ class ThyssenkruppAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_html=snapshot_html,
+            job_snapshot_error_code=snapshot_error_code,
         )
 
     def _city_filters(self) -> list[str]:

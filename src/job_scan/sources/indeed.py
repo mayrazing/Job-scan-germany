@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -36,6 +36,7 @@ from job_scan.sources.base import (
     JobReference,
     SourceError,
 )
+from job_scan.sources.job_snapshot_capture import browser_snapshot_script
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -160,6 +161,35 @@ _DETAIL_PAGE_JS_TEMPLATE = r"""
   };
 })()
 """.strip()
+
+_SNAPSHOT_PAGE_JS = browser_snapshot_script(
+    r"""
+  const jobId = new URLSearchParams(location.search).get("jk") ||
+    document.querySelector("[data-jk]")?.getAttribute("data-jk") || "";
+  const title = document.querySelector(
+    '[data-testid="jobsearch-JobInfoHeader-title"], h1.jobsearch-JobInfoHeader-title'
+  );
+  const header = document.querySelector(".jobsearch-InfoHeaderContainer");
+  const description = document.querySelector("#jobDescriptionText");
+  if (!/^[a-f0-9]{16}$/.test(jobId) || !title || !header || !description) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `indeed:de:${jobId}`,
+    title: (title.innerText || title.textContent || "").trim(),
+    sourceLabel: "Indeed",
+    accent: "#2557a7",
+    roots: [
+      header,
+      document.querySelector("#jobDetailsSection"),
+      document.querySelector("#jobLocationSectionWrapper"),
+      document.querySelector("#benefits"),
+      document.querySelector("#jobDescriptionTitle"),
+      description,
+    ],
+  });
+""".strip()
+)
 
 _COMPANY_PAGE_JS = r"""
 (async () => {
@@ -341,6 +371,7 @@ class IndeedDeAdapter:
         limit: int | None = None,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
         challenge_wait_seconds: float = DEFAULT_CHALLENGE_WAIT_SECONDS,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         resolved_limit = config.indeed_de_limit if limit is None else limit
         if not 1 <= resolved_limit <= 100:
@@ -356,6 +387,7 @@ class IndeedDeAdapter:
         self._limit = resolved_limit
         self._timeout_seconds = timeout_seconds
         self._challenge_wait_seconds = challenge_wait_seconds
+        self._capture_snapshot = capture_snapshot
         self._session = f"job-scan-indeed-de-{os.getpid()}-{id(self):x}"
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
@@ -469,6 +501,28 @@ class IndeedDeAdapter:
         company_size_source = _company_size_source(job.get("company_url"))
         company_industry_source = _company_industry_source(company_size_source)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(
+                title=title,
+                posted_at=reference.listing_posted_at,
+            )
+        ):
+            try:
+                snapshot_payload = self._evaluate(_SNAPSHOT_PAGE_JS)
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and snapshot_payload.get("status") == "ok"
+                    and isinstance(snapshot_payload.get("html"), str)
+                    and snapshot_payload["html"].strip()
+                ):
+                    snapshot_html = snapshot_payload["html"]
+                else:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -482,6 +536,8 @@ class IndeedDeAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_size_source=company_size_source,
             company_industry_source=company_industry_source,
         )

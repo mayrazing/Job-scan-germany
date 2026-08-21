@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
+from collections.abc import Callable
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -13,10 +15,15 @@ from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash, normalize_job_url
 from job_scan.sources.base import (
+    BrowserSourceError,
     ExplicitlyClosed,
     FetchedOccurrence,
     JobReference,
     ListingFilteredOut,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
 )
 
 _ORIGIN = "https://www.dallmeier.com"
@@ -41,15 +48,53 @@ _CITY_ALIASES = {
 }
 
 
+def _snapshot_script(external_id: str) -> str:
+    expected_id = json.dumps(external_id)
+    return browser_snapshot_script(
+        rf"""
+  const expectedId = {expected_id};
+  const canonical = document.querySelector('link[rel~="canonical"]')?.href || "";
+  const expectedPath = `/about-us/careers/${{expectedId}}`;
+  if (!location.pathname.endsWith(expectedPath) && !canonical.endsWith(expectedPath)) {{
+    return {{status: "unavailable", error_code: "job_identity_mismatch"}};
+  }}
+  const title = document.querySelector(".page-header");
+  const jobSection = [...document.querySelectorAll("section.acontent")].find((section) =>
+    [...section.querySelectorAll("h1, h2, h3")]
+      .some((heading) => /^Job Description$/i.test((heading.textContent || "").trim()))
+  );
+  const jobHeading = jobSection ? [...jobSection.querySelectorAll("h1, h2, h3")]
+    .find((heading) => /^Job Description$/i.test((heading.textContent || "").trim())) : null;
+  const jobContent = jobSection?.querySelector(
+    ":scope > .container > .row.content > .col-lg-9"
+  ) || jobSection;
+  return buildJobSnapshot({{
+    snapshotKey: `dallmeier:dallmeier:${{expectedId}}`,
+    title: title?.querySelector("h1")?.textContent?.trim() || document.title,
+    sourceLabel: "Dallmeier",
+    accent: "#0e4964",
+    roots: [title, jobHeading, jobContent],
+  }});
+"""
+    )
+
+
 class DallmeierAdapter:
     """Read ordinary jobs from Dallmeier's official static careers pages."""
 
     source = SourceKind.DALLMEIER
     source_instance = _SOURCE_INSTANCE
 
-    def __init__(self, config: AppConfig, http_client: PublicHttpClient) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        http_client: PublicHttpClient,
+        *,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
+    ) -> None:
         self._config = config
         self._http_client = http_client
+        self._capture_snapshot = capture_snapshot
 
     def discover(self) -> list[JobReference]:
         """Return each ordinary job linked under Career Opportunities once."""
@@ -122,6 +167,24 @@ class DallmeierAdapter:
             raise ListingFilteredOut
         company = _detail_company(job_frame)
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(
+                title=title,
+                posted_at=reference.listing_posted_at,
+            )
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(canonical_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="Dallmeier",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
+                snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -135,6 +198,8 @@ class DallmeierAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_html=snapshot_html,
+            job_snapshot_error_code=snapshot_error_code,
         )
 
     def _require_reference(self, reference: JobReference) -> None:

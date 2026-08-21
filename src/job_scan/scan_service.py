@@ -4,7 +4,7 @@ import hashlib
 import sys
 import uuid
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -36,16 +36,32 @@ from job_scan.company_size import (
 )
 from job_scan.config import AppConfig, load_config
 from job_scan.dashboard.render import render_dashboard
-from job_scan.domain import JobRecord, MachineStatus, Snapshot
+from job_scan.dedup import requires_source_generation_rollover
+from job_scan.domain import (
+    AvailabilityStatus,
+    JobRecord,
+    MachineStatus,
+    Snapshot,
+    SourceOccurrence,
+)
 from job_scan.http_client import PublicHttpClient
+from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock, LockUnavailable
+from job_scan.normalization import normalize_text
 from job_scan.paths import AppPaths
 from job_scan.policy import apply_review, apply_review_failure, refresh_review_decision
 from job_scan.repository import JsonlRepository
 from job_scan.review_queue import select_jobs_for_review
 from job_scan.reviewer import ClaudeReviewer, ReviewBatchOutcome, ReviewBatchProgress
 from job_scan.run_log import RunLogger
-from job_scan.sources.base import SourceAdapter, SourceError, SourceRunResult, run_source
+from job_scan.sources.base import (
+    FetchedOccurrence,
+    JobReference,
+    SourceAdapter,
+    SourceError,
+    SourceRunResult,
+    run_source,
+)
 from job_scan.sources.bosch import BoschAdapter
 from job_scan.sources.dallmeier import DallmeierAdapter
 from job_scan.sources.dhl import DhlAdapter
@@ -226,11 +242,21 @@ class ScanService:
                 SourceNativeCompanyIndustryLookup(),
             )
         )
+        config, profile, profile_hash, stored = self._load_inputs()
+        stored_occurrences: dict[str, SourceOccurrence] = {}
+        for job in stored.jobs:
+            for occurrence in job.source_occurrences:
+                current = stored_occurrences.get(occurrence.source_job_key)
+                if (
+                    current is None
+                    or occurrence.source_generation > current.source_generation
+                ):
+                    stored_occurrences[occurrence.source_job_key] = occurrence
         source_factory = self._source_factory or _default_source_factory(
             self._paths,
             cache_dir=run_cache_dir,
+            existing_source_occurrences=stored_occurrences,
         )
-        config, profile, profile_hash, stored = self._load_inputs()
         initial = Snapshot(meta=stored.meta)
         try:
             adapters = list(source_factory(config))
@@ -254,6 +280,7 @@ class ScanService:
             else None
         )
         source_results: list[SourceRunResult] = []
+        job_snapshot_store = JobSnapshotStore(self._paths.job_snapshots_dir)
         scanned = update_availability(initial, source_results, started_at)
         for completed_sources, adapter in enumerate(adapters, start=1):
             def report_source_progress(
@@ -282,6 +309,12 @@ class ScanService:
                 adapter,
                 posted_since=posted_since,
                 progress=report_source_progress if progress is not None else None,
+            )
+            _carry_existing_job_snapshots(result.occurrences, stored_occurrences)
+            _persist_job_snapshots(
+                result.occurrences,
+                job_snapshot_store,
+                started_at,
             )
             source_snapshot = update_availability(initial, [result], started_at)
             company_size_service.collect_native(source_snapshot, config, started_at)
@@ -441,41 +474,216 @@ def _default_source_factory(
     paths: AppPaths,
     *,
     cache_dir: Path | None = None,
+    existing_source_occurrences: Mapping[str, SourceOccurrence] | None = None,
 ) -> SourceFactory:
     """Return a factory for every enabled discovery site."""
 
     def build(config: AppConfig) -> Sequence[SourceAdapter]:
         http_client = PublicHttpClient(cache_dir or paths.cache_dir)
         adapters: list[SourceAdapter] = []
+
+        def should_capture_snapshot(reference: JobReference) -> bool:
+            source_job_key = (
+                f"{reference.source.value}:{reference.source_instance}:"
+                f"{reference.external_id}"
+            )
+            stored = (
+                existing_source_occurrences.get(source_job_key)
+                if existing_source_occurrences is not None
+                else None
+            )
+            if stored is None:
+                return True
+            if not stored.detail_complete:
+                return False
+            baseline_title = stored.identity_baseline_title or stored.title
+            if normalize_text(baseline_title) == normalize_text(
+                reference.listing_title
+            ):
+                return False
+            if stored.availability_status is AvailabilityStatus.CLOSED:
+                return True
+            return bool(
+                stored.posted_at is not None
+                and reference.listing_posted_at is not None
+                and (reference.listing_posted_at - stored.posted_at).days >= 60
+            )
+
         if config.arbeitsagentur_enabled:
-            adapters.append(JobsucheAdapter(config, http_client))
+            adapters.append(
+                JobsucheAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "bosch" in config.target_companies:
-            adapters.append(BoschAdapter(config, http_client))
+            adapters.append(
+                BoschAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "telekom" in config.target_companies:
-            adapters.append(TelekomAdapter(config, http_client))
+            adapters.append(
+                TelekomAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "rohde-schwarz" in config.target_companies:
-            adapters.append(RohdeSchwarzAdapter(config, http_client))
+            adapters.append(
+                RohdeSchwarzAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "siemens" in config.target_companies:
-            adapters.append(SiemensAdapter(config, http_client))
+            adapters.append(
+                SiemensAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "dhl" in config.target_companies:
-            adapters.append(DhlAdapter(config, http_client))
+            adapters.append(
+                DhlAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "thyssenkrupp" in config.target_companies:
-            adapters.append(ThyssenkruppAdapter(config, http_client))
+            adapters.append(
+                ThyssenkruppAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if "dallmeier" in config.target_companies:
-            adapters.append(DallmeierAdapter(config, http_client))
+            adapters.append(
+                DallmeierAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.linkedin_enabled:
-            adapters.append(LinkedinAdapter(config))
+            adapters.append(
+                LinkedinAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.indeed_de_enabled:
-            adapters.append(IndeedDeAdapter(config))
+            adapters.append(
+                IndeedDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.stepstone_de_enabled:
-            adapters.append(StepstoneDeAdapter(config))
+            adapters.append(
+                StepstoneDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.glassdoor_de_enabled:
-            adapters.append(GlassdoorDeAdapter(config))
+            adapters.append(
+                GlassdoorDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.simplify_de_enabled:
-            adapters.append(SimplifyDeAdapter(config))
+            adapters.append(
+                SimplifyDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         return adapters
 
     return build
+
+
+def _persist_job_snapshots(
+    occurrences: Sequence[FetchedOccurrence],
+    store: JobSnapshotStore,
+    captured_at: datetime,
+) -> None:
+    """Save optional capture output without making it a source failure."""
+    for occurrence in occurrences:
+        html = occurrence.job_snapshot_html
+        if html is None:
+            continue
+        try:
+            occurrence.job_snapshot = store.save(
+                source_job_key=occurrence.source_job_key,
+                captured_at=captured_at,
+                html=html,
+            )
+            occurrence.job_snapshot_error_code = None
+        except Exception:  # noqa: BLE001
+            # A snapshot is optional evidence. Keep the fetched job when its
+            # archive cannot be validated or written.
+            occurrence.job_snapshot = None
+            occurrence.job_snapshot_error_code = "snapshot_save_failed"
+        finally:
+            occurrence.job_snapshot_html = None
+
+
+def _carry_existing_job_snapshots(
+    occurrences: Sequence[FetchedOccurrence],
+    stored_occurrences: Mapping[str, SourceOccurrence],
+) -> None:
+    """Keep snapshot state only when a source ID still means the same posting."""
+    for occurrence in occurrences:
+        stored = stored_occurrences.get(occurrence.source_job_key)
+        if stored is None:
+            continue
+        if requires_source_generation_rollover(stored, occurrence):
+            stored_snapshot_id = (
+                stored.job_snapshot.snapshot_id
+                if stored.job_snapshot is not None
+                else None
+            )
+            if (
+                stored_snapshot_id is not None
+                and occurrence.job_snapshot is not None
+                and occurrence.job_snapshot.snapshot_id == stored_snapshot_id
+            ):
+                occurrence.job_snapshot = None
+            if occurrence.job_snapshot_html is not None and stored_snapshot_id == (
+                "sha256:"
+                + hashlib.sha256(
+                    occurrence.job_snapshot_html.encode("utf-8")
+                ).hexdigest()
+            ):
+                occurrence.job_snapshot_html = None
+            if (
+                occurrence.job_snapshot is None
+                and occurrence.job_snapshot_error_code is None
+                and occurrence.job_snapshot_html is None
+            ):
+                occurrence.job_snapshot_error_code = "snapshot_capture_failed"
+            continue
+        # A conservative pre-detail decision may have captured an existing job.
+        # Discard that transient page rather than backfilling or replacing the
+        # immutable snapshot for the current source generation.
+        occurrence.job_snapshot_html = None
+        occurrence.job_snapshot = (
+            stored.job_snapshot.model_copy(deep=True)
+            if stored.job_snapshot is not None
+            else None
+        )
+        occurrence.job_snapshot_error_code = stored.job_snapshot_error_code
 
 
 def _change_counts(initial: Snapshot, scanned: Snapshot) -> tuple[int, int]:

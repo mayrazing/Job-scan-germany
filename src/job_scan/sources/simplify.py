@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from job_scan.sources.base import (
     JobReference,
     SourceError,
 )
+from job_scan.sources.job_snapshot_capture import browser_snapshot_script
 from job_scan.sources.opencli_challenge import (
     DEFAULT_CHALLENGE_WAIT_SECONDS,
     is_challenge_error,
@@ -38,6 +40,58 @@ _SEARCH_PAGE_URL = "https://simplify.jobs/jobs?state=Germany&country=Germany"
 _DETAIL_API = "https://api.simplify.jobs/v2/job-posting/:id/{job_id}/company"
 _DETAIL_PAGE = "https://simplify.jobs/jobs?jobId={job_id}"
 _APPLICATION_URL = "https://simplify.jobs/jobs/click/{job_id}"
+
+_SNAPSHOT_PAGE_JS_TEMPLATE = browser_snapshot_script(
+    r"""
+  const expectedJobId = __EXPECTED_JOB_ID__;
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Cloudflare Ray ID|Verify you are human/i.test(document.body?.innerText || "") ||
+    !!document.querySelector('[id^="cf-"], iframe[src*="captcha" i]');
+  if (isChallenge()) return {status: "challenge"};
+
+  let details = document.querySelector('[data-testid="details-view"]');
+  for (let index = 0; index < 30 && !details && !isChallenge(); index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    details = document.querySelector('[data-testid="details-view"]');
+  }
+  if (isChallenge()) return {status: "challenge"};
+  const currentJobId = new URLSearchParams(location.search).get("jobId") ||
+    details?.id.replace(/^details-card-/, "") || "";
+  if (currentJobId !== expectedJobId || !details) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+
+  const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+  const title = [...details.querySelectorAll("h1")].find(
+    (heading) => !/^Add a resume/i.test(normalize(heading.innerText))
+  );
+  const leftColumn = title?.parentElement?.parentElement;
+  const leftRoots = [...(leftColumn?.children || [])].filter((element) => {
+    const text = normalize(element.innerText);
+    return text && !/^(Get referrals|History)\b/i.test(text);
+  });
+  const allowedSectionHeadings = new Set([
+    "Job Description",
+    "Job Responsibilities",
+    "Job Requirements",
+    "Benefits",
+  ]);
+  const jobRoots = [...details.querySelectorAll("h3")]
+    .filter((heading) => allowedSectionHeadings.has(normalize(heading.innerText)))
+    .map((heading) => heading.parentElement)
+    .filter(Boolean);
+  if (!title || leftRoots.length < 2 || jobRoots.length === 0) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey: `simplify:de:${expectedJobId}`,
+    title: normalize(title.innerText || title.textContent),
+    sourceLabel: "Simplify",
+    accent: "#7c3aed",
+    roots: [...leftRoots, ...jobRoots],
+  });
+""".strip()
+)
 
 
 def lookup_company_size(
@@ -74,6 +128,7 @@ class SimplifyDeAdapter:
         limit: int | None = None,
         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
         challenge_wait_seconds: float = DEFAULT_CHALLENGE_WAIT_SECONDS,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
     ) -> None:
         resolved_limit = config.simplify_de_limit if limit is None else limit
         if not 1 <= resolved_limit <= 100:
@@ -89,6 +144,7 @@ class SimplifyDeAdapter:
         self._limit = resolved_limit
         self._timeout_seconds = timeout_seconds
         self._challenge_wait_seconds = challenge_wait_seconds
+        self._capture_snapshot = capture_snapshot
         self._session = f"job-scan-simplify-de-{os.getpid()}-{id(self):x}"
         self._discovery_errors: list[SourceError] = []
         self._completed_listing = True
@@ -210,6 +266,28 @@ class SimplifyDeAdapter:
         description = _full_description(job)
         posted_at = _posted_date(job.get("start_date")) or reference.listing_posted_at
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                self._open_page(str(reference.detail_url))
+                snapshot_payload = self._evaluate(
+                    _snapshot_script(reference.external_id)
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_error_code = "snapshot_capture_failed"
+            else:
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and snapshot_payload.get("status") == "ok"
+                    and isinstance(snapshot_payload.get("html"), str)
+                    and snapshot_payload["html"].strip()
+                ):
+                    snapshot_html = snapshot_payload["html"]
+                else:
+                    snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -223,6 +301,8 @@ class SimplifyDeAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_error_code=snapshot_error_code,
+            job_snapshot_html=snapshot_html,
             company_size_source=reference.listing_company_size_source,
         )
 
@@ -385,6 +465,14 @@ def _detail_script(job_id: str) -> str:
   }}
 }})()
 """.strip()
+
+
+def _snapshot_script(job_id: str) -> str:
+    """Bind one expected job ID to the browser snapshot reader."""
+    return _SNAPSHOT_PAGE_JS_TEMPLATE.replace(
+        "__EXPECTED_JOB_ID__",
+        json.dumps(job_id),
+    )
 
 
 def _posted_cutoff(config: AppConfig) -> int | None:

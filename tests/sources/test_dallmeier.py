@@ -296,3 +296,102 @@ def test_fetch_detail_marks_explicit_http_closure_statuses_closed(
 
     assert error.value.source_job_key == ("dallmeier:dallmeier:java-developer-w/m/d-backend")
     assert error.value.reason == reason
+
+
+@respx.mock
+def test_new_dallmeier_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(f"{ORIGIN}{JAVA_PATH}").mock(
+        return_value=httpx.Response(200, text=detail_html())
+    )
+    snapshot_html = (
+        '<html data-job-scan-snapshot="dallmeier:dallmeier:java-developer-w/m/d-backend">'
+        "<body>Java Backend Developer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.dallmeier.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = DallmeierAdapter(
+        config(locations=[]),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(source_reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_dallmeier_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(f"{ORIGIN}{JAVA_PATH}").mock(
+        return_value=httpx.Response(200, text=detail_html())
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.dallmeier.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = DallmeierAdapter(
+        config(locations=[]),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(source_reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_dallmeier_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.dallmeier import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            f"""
+            <head><link rel="canonical" href="{ORIGIN}{JAVA_PATH}">
+              <style>.page-header {{ color: rgb(14, 73, 100); }}</style></head>
+            <main>
+              <div class="page-header"><h1>(Senior) Java Backend Developer</h1></div>
+              <section id="acontent1860" class="acontent">
+                <h2>Job Description</h2><div class="container"><div class="row content">
+                  <div class="col-lg-9"><h3>Standort: München</h3>
+                    <p>Build backend services.</p><h3>Your profile</h3><p>Java experience.</p></div>
+                  <div class="col-lg-3"><h2>Contact</h2><p>Generic footer contact.</p></div>
+                </div></div>
+              </section>
+              <section><h2>More careers</h2><p>Unrelated jobs.</p></section>
+            </main>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("java-developer-w/m/d-backend"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert (
+            'data-job-scan-snapshot="dallmeier:dallmeier:java-developer-w/m/d-backend"'
+            in html
+        )
+        assert "(Senior) Java Backend Developer" in html
+        assert "Build backend services." in html
+        assert "Java experience." in html
+        assert "rgb(14, 73, 100)" in html
+        assert "Generic footer contact." not in html
+        assert "Unrelated jobs." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

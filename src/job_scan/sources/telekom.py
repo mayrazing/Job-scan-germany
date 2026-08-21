@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -15,7 +15,16 @@ from job_scan.config import AppConfig
 from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.normalization import content_hash
-from job_scan.sources.base import ExplicitlyClosed, FetchedOccurrence, JobReference
+from job_scan.sources.base import (
+    BrowserSourceError,
+    ExplicitlyClosed,
+    FetchedOccurrence,
+    JobReference,
+)
+from job_scan.sources.job_snapshot_capture import (
+    browser_snapshot_script,
+    capture_browser_snapshot,
+)
 
 _ORIGIN = "https://careers.telekom.com"
 _SEARCH_URL = f"{_ORIGIN}/api/jobs-proxy/search"
@@ -32,15 +41,52 @@ _LOCATION_QUERY_NAMES = {
 }
 
 
+def _snapshot_script(external_id: str) -> str:
+    expected_id = json.dumps(external_id)
+    return browser_snapshot_script(
+        rf"""
+  const expectedId = {expected_id};
+  const title = document.querySelector('h1[class*="jobDetailsHeader"]') ||
+    [...document.querySelectorAll("h1")].find((heading) =>
+      (heading.textContent || "").trim()
+    );
+  const headerDetails = title?.closest('div[class*="jobDetailsHeader"]') ||
+    title?.parentElement;
+  if (!headerDetails || !(headerDetails.textContent || "").includes(expectedId)) {{
+    return {{status: "unavailable", error_code: "job_identity_mismatch"}};
+  }}
+  const aboutHeading = [...document.querySelectorAll("h1, h2, h3")]
+    .find((heading) => /^About this job$/i.test((heading.textContent || "").trim()));
+  const about = aboutHeading?.closest("section")?.cloneNode(true) || null;
+  about?.querySelectorAll("a, button, form, [role=button]")
+    .forEach((element) => element.remove());
+  return buildJobSnapshot({{
+    snapshotKey: `telekom:telekom:${{expectedId}}`,
+    title: title?.textContent?.trim() || document.title,
+    sourceLabel: "Deutsche Telekom",
+    accent: "#e20074",
+    roots: [headerDetails, about],
+  }});
+"""
+    )
+
+
 class TelekomAdapter:
     """Read Deutsche Telekom jobs returned by its official career search."""
 
     source = SourceKind.TELEKOM
     source_instance = "telekom"
 
-    def __init__(self, config: AppConfig, http_client: PublicHttpClient) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        http_client: PublicHttpClient,
+        *,
+        capture_snapshot: Callable[[JobReference], bool] | None = None,
+    ) -> None:
         self._config = config
         self._http_client = http_client
+        self._capture_snapshot = capture_snapshot
 
     def discover(self) -> list[JobReference]:
         """Return unique jobs from each configured Telekom search term."""
@@ -129,6 +175,21 @@ class TelekomAdapter:
             str(reference.platform_url or reference.detail_url)
         )
         detail_complete = bool(description)
+        snapshot_html: str | None = None
+        snapshot_error_code: str | None = None
+        if self._capture_snapshot is not None and self._capture_snapshot(
+            reference.with_current_identity(title=title, posted_at=posted_at)
+        ):
+            try:
+                snapshot_html = capture_browser_snapshot(
+                    url=str(canonical_url),
+                    script=_snapshot_script(reference.external_id),
+                    source_name="Deutsche Telekom",
+                )
+            except (BrowserSourceError, InvalidResponse):
+                snapshot_html = None
+            if snapshot_html is None:
+                snapshot_error_code = "snapshot_capture_failed"
         return FetchedOccurrence(
             source=self.source,
             source_instance=self.source_instance,
@@ -142,6 +203,8 @@ class TelekomAdapter:
             content_hash=content_hash(company, title, location, description),
             detail_complete=detail_complete,
             fetch_error_code=None if detail_complete else "missing_full_description",
+            job_snapshot_html=snapshot_html,
+            job_snapshot_error_code=snapshot_error_code,
         )
 
     def _require_reference(self, reference: JobReference) -> None:

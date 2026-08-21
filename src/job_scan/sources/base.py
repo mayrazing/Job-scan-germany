@@ -16,6 +16,7 @@ from job_scan.domain import (
     SourceKind,
 )
 from job_scan.http_client import BlockedResponse, InvalidResponse, ResponseTooLarge
+from job_scan.job_snapshot import JobSnapshotReference
 from job_scan.normalization import content_hash
 
 ErrorCategory = Literal["http", "blocked", "contract", "incomplete", "browser"]
@@ -35,6 +36,17 @@ class JobReference(BaseModel):
     listing_application_url: HttpUrl | None = None
     listing_company_size_source: CompanySizeSource | None = None
     listing_company_industry_source: CompanyIndustrySource | None = None
+
+    def with_current_identity(
+        self,
+        *,
+        title: str,
+        posted_at: date | None,
+    ) -> JobReference:
+        """Return the reference with identity facts confirmed by its detail page."""
+        return self.model_copy(
+            update={"listing_title": title, "listing_posted_at": posted_at}
+        )
 
 
 class SourceError(BaseModel):
@@ -79,6 +91,9 @@ class FetchedOccurrence(BaseModel):
     content_hash: str
     detail_complete: bool
     fetch_error_code: str | None = None
+    job_snapshot: JobSnapshotReference | None = None
+    job_snapshot_error_code: str | None = None
+    job_snapshot_html: str | None = Field(default=None, exclude=True)
     company_size_source: CompanySizeSource | None = None
     company_industry_source: CompanyIndustrySource | None = None
 

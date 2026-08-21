@@ -216,6 +216,68 @@ def test_discover_and_fetch_detail_map_indeed_de_into_source_occurrence(
     assert not state_path.exists()
 
 
+def test_new_indeed_job_carries_transient_snapshot_html(tmp_path: Path) -> None:
+    job_id = "8c683c2df48291d7"
+    snapshot_html = (
+        '<!doctype html><html data-job-scan-snapshot="indeed:de:8c683c2df48291d7">'
+        "<body>Java Backend Engineer</body></html>"
+    )
+    executable, state_path = fake_opencli(
+        tmp_path,
+        {
+            search_url(): {"status": "ok", "rows": [search_row(job_id)]},
+            navigation_url(job_id): [
+                detail_payload(),
+                {"status": "ok", "html": snapshot_html},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(),
+        opencli_executable=executable,
+        limit=1,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    reference = adapter.discover()[0]
+    occurrence = adapter.fetch_detail(reference)
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+    assert not state_path.exists()
+
+
+def test_indeed_snapshot_failure_does_not_discard_the_job(tmp_path: Path) -> None:
+    job_id = "8c683c2df48291d7"
+    executable, state_path = fake_opencli(
+        tmp_path,
+        {
+            search_url(): {"status": "ok", "rows": [search_row(job_id)]},
+            navigation_url(job_id): [
+                detail_payload(),
+                {"status": "unavailable", "error_code": "structure_mismatch"},
+            ],
+        },
+    )
+    adapter = adapter_type()(
+        config(),
+        opencli_executable=executable,
+        limit=1,
+        timeout_seconds=5,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    result = run_source(adapter)
+
+    assert len(result.occurrences) == 1
+    assert result.occurrences[0].detail_complete is True
+    assert result.occurrences[0].job_snapshot_html is None
+    assert result.occurrences[0].job_snapshot_error_code == "snapshot_capture_failed"
+    assert result.errors == []
+    assert not state_path.exists()
+
+
 def test_detail_retains_indeed_company_about_page_for_company_size(
     tmp_path: Path,
 ) -> None:
@@ -693,6 +755,54 @@ def test_detail_waits_for_the_matching_job_heading() -> None:
                 "company_url": "",
             },
         }
+        browser.close()
+
+
+def test_snapshot_page_script_keeps_only_indeed_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.indeed import _SNAPSHOT_PAGE_JS
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.jobsearch-InfoHeaderContainer { color: rgb(37, 87, 167); }</style>
+            <main data-jk="8c683c2df48291d7">
+              <nav>Indeed account and search</nav>
+              <div class="jobsearch-InfoHeaderContainer">
+                <h1 data-testid="jobsearch-JobInfoHeader-title">Java Backend Engineer</h1>
+                <div data-testid="inlineHeader-companyName">Example GmbH</div>
+                <button>Jetzt bewerben</button>
+              </div>
+              <div id="jobDetailsSection">Anstellungsart Festanstellung</div>
+              <div id="jobLocationSectionWrapper">Arbeitsort Berlin</div>
+              <div id="benefits">Leistungen Weiterbildung</div>
+              <div id="jobDescriptionTitle">Vollständige Stellenbeschreibung</div>
+              <div id="jobDescriptionText">
+                <h2>Ihr Aufgabenbereich</h2><p>Build Java services.</p>
+              </div>
+              <aside>Ähnliche Jobs und Werbung</aside>
+              <img src="https://ads.example/tracker.png">
+            </main>
+            """
+        )
+        payload = page.evaluate(_SNAPSHOT_PAGE_JS)
+
+        assert payload["status"] == "ok"
+        snapshot = payload["html"]
+        assert 'data-job-scan-snapshot="indeed:de:8c683c2df48291d7"' in snapshot
+        assert "Java Backend Engineer" in snapshot
+        assert "Anstellungsart Festanstellung" in snapshot
+        assert "Arbeitsort Berlin" in snapshot
+        assert "Leistungen Weiterbildung" in snapshot
+        assert "Build Java services." in snapshot
+        assert "rgb(37, 87, 167)" in snapshot
+        assert "Indeed account and search" not in snapshot
+        assert "Ähnliche Jobs und Werbung" not in snapshot
+        assert "Jetzt bewerben" not in snapshot
+        assert "https://ads.example" not in snapshot
+        assert "<script" not in snapshot
         browser.close()
 
 

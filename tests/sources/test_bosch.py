@@ -580,3 +580,109 @@ def test_fetch_detail_marks_missing_official_page_closed(
     assert error.value.source_job_key == (
         "bosch:bosch:REF300001A"
     )
+
+
+@respx.mock
+def test_new_bosch_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(200, text=detail_html())
+    )
+    snapshot_html = (
+        '<html data-job-scan-snapshot="bosch:bosch:REF300001A">'
+        "<body>Backend Software Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.bosch.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = BoschAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_bosch_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(
+        return_value=httpx.Response(200, text=detail_html())
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.bosch.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = BoschAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_bosch_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.bosch import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.M-Stage-Two { color: rgb(230, 0, 0); }</style>
+            <div class="M-Stage-Two"><h1>Backend Software Engineer</h1></div>
+            <div class="M-Stage-Two"><div class="Stage-Two__facts">
+              Bosch Location Berlin Division Mobility
+            </div></div>
+            <button class="ApplyButton" data-job-reference="Job REF300001A">
+              Apply now
+            </button>
+            <section aria-label="Your tasks-Your profile">
+              <h2>Your tasks</h2><p>Build secure software.</p>
+              <h2>Your profile</h2><p>Java experience.</p>
+            </section>
+            <section class="M-Teaser-Two-Columns">
+              <h2>Contact &amp; additional information</h2><p>Hybrid work is possible.</p>
+              <button>Apply now</button>
+            </section>
+            <section class="M-Text-StagedTypography">
+              <h2>Benefits</h2><p>Flexible working hours.</p>
+            </section>
+            <section><h2>Career events</h2><p>Unrelated event.</p></section>
+            <section><h2>Hiring process</h2><p>Generic site content.</p></section>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("REF300001A"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="bosch:bosch:REF300001A"' in html
+        assert "Backend Software Engineer" in html
+        assert "Build secure software." in html
+        assert "Java experience." in html
+        assert "Flexible working hours." in html
+        assert "rgb(230, 0, 0)" in html
+        assert "Apply now" not in html
+        assert "Unrelated event." not in html
+        assert "Generic site content." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

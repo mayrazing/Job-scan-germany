@@ -489,3 +489,103 @@ def test_fetch_detail_rejects_jobposting_for_another_listing(tmp_path: Path) -> 
 
     with pytest.raises(InvalidResponse, match="identifier did not match"):
         rohde_schwarz.fetch_detail(reference())
+
+
+@respx.mock
+def test_new_rohde_schwarz_job_carries_transient_snapshot_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    snapshot_html = (
+        '<html data-job-scan-snapshot="successfactors:rohdeschwarz:707">'
+        "<body>Embedded Software Engineer</body></html>"
+    )
+    monkeypatch.setattr(
+        "job_scan.sources.rohde_schwarz.capture_browser_snapshot",
+        lambda **_arguments: snapshot_html,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = RohdeSchwarzAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.job_snapshot_html == snapshot_html
+    assert occurrence.job_snapshot_error_code is None
+
+
+@respx.mock
+def test_rohde_schwarz_snapshot_failure_does_not_discard_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get(DETAIL_URL).mock(return_value=httpx.Response(200, text=detail_html()))
+    monkeypatch.setattr(
+        "job_scan.sources.rohde_schwarz.capture_browser_snapshot",
+        lambda **_arguments: None,
+    )
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = RohdeSchwarzAdapter(
+        config(),
+        client,
+        capture_snapshot=lambda _reference: True,
+    )
+
+    occurrence = source.fetch_detail(reference())
+
+    assert occurrence.description
+    assert occurrence.job_snapshot_html is None
+    assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_snapshot_page_script_keeps_only_rohde_schwarz_job_information() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from job_scan.sources.rohde_schwarz import _snapshot_script
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>.stage-title { color: rgb(0, 68, 121); }</style>
+            <div class="stage-container">
+              <h2>Software Development</h2>
+              <h1 class="stage-title">Embedded Software Engineer</h1>
+              <button>Apply now</button>
+            </div>
+            <dl><dt>City/region</dt><dd>Berlin</dd><dt>Ref Number</dt><dd>707</dd></dl>
+            <div id="job-content" class="module module-generic-content center">
+              <h3>Einleitung</h3><p>Build embedded wireless systems.</p>
+              <h3>Aufgaben</h3><p>Develop C++ software.</p>
+            </div>
+            <div id="job-content-profile" class="module module-generic-content center">
+              <h3>Qualifikationen</h3><p>Fluent German and English.</p>
+            </div>
+            <div class="module module-icon-list-benefits">
+              <h2>Benefits</h2><p>Flexible working hours.</p>
+            </div>
+            <section><h2>Contact</h2><p>Share this job.</p></section>
+            <section><h2>Similar jobs</h2><p>Unrelated recommendation.</p></section>
+            """
+        )
+
+        payload = page.evaluate(_snapshot_script("707"))
+
+        assert payload["status"] == "ok"
+        html = payload["html"]
+        assert 'data-job-scan-snapshot="successfactors:rohdeschwarz:707"' in html
+        assert "Embedded Software Engineer" in html
+        assert "Develop C++ software." in html
+        assert "Fluent German and English." in html
+        assert "Flexible working hours." in html
+        assert "rgb(0, 68, 121)" in html
+        assert "Apply now" not in html
+        assert "Share this job." not in html
+        assert "Unrelated recommendation." not in html
+        assert "http://" not in html
+        assert "https://" not in html
+        browser.close()

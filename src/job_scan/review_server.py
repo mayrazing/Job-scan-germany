@@ -69,8 +69,18 @@ from job_scan.company_size import (
 )
 from job_scan.config import AppConfig, load_config, load_config_bytes, serialize_config
 from job_scan.dashboard.render import render_console, render_dashboard
-from job_scan.domain import JobRecord, MachineStatus, Snapshot, StoreMeta, UserStatus
+from job_scan.domain import (
+    JobRecord,
+    MachineStatus,
+    Snapshot,
+    SourceKind,
+    SourceOccurrence,
+    StoreMeta,
+    UserStatus,
+)
 from job_scan.global_jobs import GLOBAL_USER_STATUSES, GlobalJobStore
+from job_scan.http_client import InvalidResponse
+from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock, LockUnavailable
 from job_scan.manual_job_import import (
     AiJobExtractor,
@@ -97,6 +107,8 @@ from job_scan.setup_service import (
     SetupPreparation,
     SetupService,
 )
+from job_scan.sources.base import BrowserSourceError
+from job_scan.sources.job_snapshot_capture import capture_source_job_snapshot_html
 from job_scan.web_workflow import (
     WebRunState,
     WebScheduleState,
@@ -211,6 +223,7 @@ def create_review_app(
         AiRuntimeInvoker(repository.paths)
     )
     company_size_invoker = AiRuntimeInvoker(repository.paths)
+    job_snapshots = JobSnapshotStore(repository.paths.job_snapshots_dir)
     ai_selections = AiSelectionStore(repository.paths.ai_selection_toml)
     provider_store = ai_store or AiProviderStore(repository.paths.ai_config_toml)
     if manual_job_importer is None:
@@ -896,6 +909,62 @@ def create_review_app(
         if archived.jobs == previous.jobs:
             history.replace_snapshot(latest.run_id, updated)
 
+    def capture_missing_snapshot(
+        snapshot: Snapshot,
+        key: str,
+    ) -> SourceOccurrence | None:
+        """Capture one automatic-source snapshot unless this job already has one."""
+        job = _find_job(snapshot, key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        if any(
+            occurrence.job_snapshot is not None
+            for occurrence in job.source_occurrences
+        ):
+            return None
+        primary = next(
+            (
+                occurrence
+                for occurrence in job.source_occurrences
+                if occurrence.source_occurrence_key
+                == job.primary_source_occurrence_key
+                and occurrence.source is not SourceKind.MANUAL
+            ),
+            None,
+        )
+        occurrence = primary or next(
+            (
+                item
+                for item in job.source_occurrences
+                if item.source is not SourceKind.MANUAL
+            ),
+            None,
+        )
+        if occurrence is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Manual jobs do not support snapshots.",
+            )
+        try:
+            html = capture_source_job_snapshot_html(occurrence)
+        except (BrowserSourceError, InvalidResponse):
+            html = None
+        if html is None:
+            occurrence.job_snapshot = None
+            occurrence.job_snapshot_error_code = "snapshot_capture_failed"
+            return occurrence
+        try:
+            occurrence.job_snapshot = job_snapshots.save(
+                source_job_key=occurrence.source_job_key,
+                captured_at=datetime.now(UTC),
+                html=html,
+            )
+            occurrence.job_snapshot_error_code = None
+        except (OSError, RuntimeError, ValueError):
+            occurrence.job_snapshot = None
+            occurrence.job_snapshot_error_code = "snapshot_save_failed"
+        return occurrence
+
     if ai_store is not None:
         discovery = ai_model_discovery or AiModelDiscovery()
 
@@ -1073,6 +1142,112 @@ def create_review_app(
             path="/",
         )
         return response
+
+    @app.get("/api/job-snapshots/{snapshot_id}")
+    def job_snapshot(snapshot_id: str) -> Response:
+        """Serve one inert local HTML snapshot without contacting its source."""
+        try:
+            contents = job_snapshots.read(snapshot_id)
+        except (OSError, ValueError):
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        return Response(
+            content=contents,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "Content-Security-Policy": (
+                    "sandbox; default-src 'none'; img-src data:; "
+                    "style-src 'unsafe-inline'; font-src data:; "
+                    "form-action 'none'; base-uri 'none'"
+                ),
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post(
+        "/api/jobs/{key}/snapshot",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def generate_job_snapshot(key: str) -> Response:
+        try:
+            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
+                blocking=False
+            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
+                blocking=False
+            ):
+                previous = repository.load()
+                working = previous.model_copy(deep=True)
+                occurrence = capture_missing_snapshot(working, key)
+                if occurrence is not None:
+                    updated = _mutate_or_conflict(
+                        repository,
+                        _job_snapshot_mutator(key, occurrence),
+                    )
+                    sync_live_history(previous, updated)
+        except LockUnavailable:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A scan is running; retry the snapshot after it completes.",
+            ) from None
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/api/scan-history/{run_id}/jobs/{key}/snapshot",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def generate_history_job_snapshot(run_id: str, key: str) -> Response:
+        try:
+            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
+                blocking=False
+            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
+                blocking=False
+            ):
+                try:
+                    working = history.load(run_id)
+                except (KeyError, ValueError):
+                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+                occurrence = capture_missing_snapshot(working, key)
+                if occurrence is not None:
+                    _mutate_history_or_conflict(
+                        history,
+                        run_id,
+                        _job_snapshot_mutator(key, occurrence),
+                    )
+        except LockUnavailable:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A scan is running; retry the snapshot after it completes.",
+            ) from None
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/api/global-jobs/{key}/snapshot",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def generate_global_job_snapshot(key: str) -> Response:
+        try:
+            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
+                blocking=False
+            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
+                blocking=False
+            ):
+                working = global_jobs.load()
+                occurrence = capture_missing_snapshot(working, key)
+                if occurrence is not None:
+                    _mutate_global_or_conflict(
+                        global_jobs,
+                        _job_snapshot_mutator(key, occurrence),
+                    )
+        except LockUnavailable:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A scan is running; retry the snapshot after it completes.",
+            ) from None
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     if workflow is not None:
 
@@ -1798,6 +1973,41 @@ def _restore_mutator(key: str) -> Callable[[Snapshot], Snapshot]:
         job.manual_override = "show"
         job.manual_override_content_hash = job.content_hash
         job.manual_override_profile_hash = job.last_successful_review_profile_hash
+        return snapshot
+
+    return mutate
+
+
+def _job_snapshot_mutator(
+    key: str,
+    captured: SourceOccurrence,
+) -> Callable[[Snapshot], Snapshot]:
+    """Write one captured occurrence state without replacing an existing snapshot."""
+    def mutate(snapshot: Snapshot) -> Snapshot:
+        job = _find_job(snapshot, key)
+        if job is None:
+            raise _JobDisappeared
+        if any(
+            occurrence.job_snapshot is not None
+            for occurrence in job.source_occurrences
+        ):
+            return snapshot
+        occurrence = next(
+            (
+                item
+                for item in job.source_occurrences
+                if item.source_occurrence_key == captured.source_occurrence_key
+            ),
+            None,
+        )
+        if occurrence is None:
+            raise _JobDisappeared
+        occurrence.job_snapshot = (
+            captured.job_snapshot.model_copy(deep=True)
+            if captured.job_snapshot is not None
+            else None
+        )
+        occurrence.job_snapshot_error_code = captured.job_snapshot_error_code
         return snapshot
 
     return mutate

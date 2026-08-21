@@ -31,6 +31,7 @@ from job_scan.config import (
     SchedulerSettings,
     save_config,
 )
+from job_scan.dedup import merge_occurrences
 from job_scan.domain import (
     AIReview,
     AvailabilityStatus,
@@ -42,9 +43,11 @@ from job_scan.domain import (
     Snapshot,
     SourceKind,
     SourceOccurrence,
+    StoreMeta,
     UserStatus,
 )
 from job_scan.http_client import BlockedResponse
+from job_scan.job_snapshot import JobSnapshotReference, JobSnapshotStore
 from job_scan.locking import FileRWLock
 from job_scan.normalization import content_hash
 from job_scan.paths import AppPaths
@@ -60,7 +63,9 @@ from job_scan.scan_service import (
     ScanError,
     ScanService,
     ScanSummary,
+    _carry_existing_job_snapshots,
     _default_source_factory,
+    _persist_job_snapshots,
 )
 from job_scan.sources.base import FetchedOccurrence, JobReference, SourceAdapter
 from job_scan.sources.bosch import BoschAdapter
@@ -905,6 +910,392 @@ def test_default_source_factory_includes_opencli_sources_after_jobsuche(
         SourceKind.GLASSDOOR,
         SourceKind.SIMPLIFY,
     ]
+
+
+def test_scan_keeps_a_saved_snapshot_reference_on_the_next_scan(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    config(paths)
+    occurrence = fetched("SNAPSHOT", "Saved Snapshot Role", "Build backend services.")
+    failed_occurrence = fetched(
+        "SNAPSHOT-FAILED",
+        "Failed Snapshot Role",
+        "Operate backend services.",
+    )
+    saved = stored_job("saved-snapshot", occurrence)
+    failed = stored_job("failed-snapshot", failed_occurrence)
+    snapshot_reference = JobSnapshotReference(
+        snapshot_id=f"sha256:{'a' * 64}",
+        captured_at=NOW - timedelta(days=1),
+    )
+    latest = saved.source_occurrences[0]
+    latest.source_generation = 2
+    latest.job_snapshot = snapshot_reference
+    saved.primary_source_occurrence_key = latest.source_occurrence_key
+    older = latest.model_copy(
+        deep=True,
+        update={
+            "source_generation": 1,
+            "availability_status": AvailabilityStatus.CLOSED,
+            "closed_at": NOW - timedelta(days=2),
+            "job_snapshot": JobSnapshotReference(
+                snapshot_id=f"sha256:{'b' * 64}",
+                captured_at=NOW - timedelta(days=3),
+            ),
+        },
+    )
+    saved.source_occurrences.append(older)
+    failed.source_occurrences[0].job_snapshot_error_code = "snapshot_capture_failed"
+    repo = repository(paths)
+    repo.mutate(lambda old: Snapshot(meta=old.meta, jobs=[saved, failed]))
+
+    ScanService(
+        paths,
+        repository=repo,
+        reviewer=RecordingReviewer(),
+        company_size_service=NoopCompanySizeService(),  # type: ignore[arg-type]
+        source_factory=lambda _config: [
+            FakeAdapter(
+                SourceKind.LINKEDIN,
+                "acme/jobs",
+                [occurrence, failed_occurrence],
+            )
+        ],
+        clock=lambda: NOW,
+        run_id_factory=lambda: "run-snapshot-retention",
+    ).run()
+
+    current = {
+        item.external_id: item
+        for job in repo.load().jobs
+        for item in job.source_occurrences
+    }
+    assert current["SNAPSHOT"].job_snapshot == snapshot_reference
+    assert current["SNAPSHOT"].job_snapshot_error_code is None
+    assert current["SNAPSHOT-FAILED"].job_snapshot is None
+    assert (
+        current["SNAPSHOT-FAILED"].job_snapshot_error_code
+        == "snapshot_capture_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "source_instance", "external_id"),
+    [
+        (SourceKind.ARBEITSAGENTUR, "default", "10000-1234567890-S"),
+        (SourceKind.LINKEDIN, "default", "4454519520"),
+        (SourceKind.INDEED, "de", "8c683c2df48291d7"),
+        (SourceKind.STEPSTONE, "de", "14358591"),
+        (SourceKind.GLASSDOOR, "de", "1010232175081"),
+        (SourceKind.SIMPLIFY, "de", "4189a132-d02f-4d3a-90ab-df09f5743198"),
+    ],
+)
+def test_default_browser_source_only_captures_jobs_absent_at_scan_start(
+    tmp_path: Path,
+    source: SourceKind,
+    source_instance: str,
+    external_id: str,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    adapters = _default_source_factory(
+        paths,
+        existing_source_occurrences={
+            f"{source.value}:{source_instance}:{external_id}": SourceOccurrence(
+                source=source,
+                source_instance=source_instance,
+                external_id=external_id,
+                source_generation=1,
+                url=f"https://example.com/jobs/{external_id}",
+                company="Example GmbH",
+                title="Engineer",
+                location="Berlin",
+                description="Build software.",
+                posted_at=date(2026, 8, 1),
+                content_hash=content_hash(
+                    "Example GmbH", "Engineer", "Berlin", "Build software."
+                ),
+                availability_status=AvailabilityStatus.ACTIVE,
+                detail_complete=True,
+            )
+        },
+    )(config(paths))
+    adapter = next(item for item in adapters if item.source is source)
+    existing = JobReference(
+        source=source,
+        source_instance=source_instance,
+        external_id=external_id,
+        detail_url=f"https://example.com/jobs/{external_id}",
+        listing_title="Engineer",
+        listing_company="Example GmbH",
+        listing_location="Berlin",
+    )
+    new = existing.model_copy(update={"external_id": f"{external_id}2"})
+
+    assert adapter._capture_snapshot is not None  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(existing) is False  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(new) is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("company", "source", "source_instance", "external_id"),
+    [
+        ("bosch", SourceKind.BOSCH, "bosch", "REF300001A"),
+        ("telekom", SourceKind.TELEKOM, "telekom", "907522"),
+        ("rohde-schwarz", SourceKind.SUCCESSFACTORS, "rohdeschwarz", "707"),
+        ("siemens", SourceKind.SIEMENS, "siemens", "513387"),
+        ("dhl", SourceKind.DHL, "dhl", "DPDHGLOBALAV361651ENAMEREXTERNAL"),
+        ("thyssenkrupp", SourceKind.THYSSENKRUPP, "thyssenkrupp", "967315"),
+        (
+            "dallmeier",
+            SourceKind.DALLMEIER,
+            "dallmeier",
+            "java-developer-w/m/d-backend",
+        ),
+    ],
+)
+def test_default_company_source_only_captures_jobs_absent_at_scan_start(
+    tmp_path: Path,
+    company: str,
+    source: SourceKind,
+    source_instance: str,
+    external_id: str,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    existing_key = f"{source.value}:{source_instance}:{external_id}"
+    value = config(paths).model_copy(update={"target_companies": [company]})
+    adapters = _default_source_factory(
+        paths,
+        existing_source_occurrences={
+            existing_key: SourceOccurrence(
+                source=source,
+                source_instance=source_instance,
+                external_id=external_id,
+                source_generation=1,
+                url=f"https://example.com/jobs/{external_id}",
+                company="Example GmbH",
+                title="Engineer",
+                location="Berlin",
+                description="Build software.",
+                posted_at=date(2026, 8, 1),
+                content_hash=content_hash(
+                    "Example GmbH", "Engineer", "Berlin", "Build software."
+                ),
+                availability_status=AvailabilityStatus.ACTIVE,
+                detail_complete=True,
+            )
+        },
+    )(value)
+    adapter = next(
+        item
+        for item in adapters
+        if item.source is source and item.source_instance == source_instance
+    )
+    existing = JobReference(
+        source=source,
+        source_instance=source_instance,
+        external_id=external_id,
+        detail_url=f"https://example.com/jobs/{external_id}",
+        listing_title="Engineer",
+        listing_company="Example GmbH",
+        listing_location="Berlin",
+    )
+    new = existing.model_copy(update={"external_id": f"{external_id}-new"})
+
+    assert adapter._capture_snapshot is not None  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(existing) is False  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(new) is True  # type: ignore[attr-defined]
+
+
+def test_closed_reused_source_id_saves_a_new_generation_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    value = config(paths).model_copy(
+        update={
+            "arbeitsagentur_enabled": False,
+            "linkedin_enabled": False,
+            "indeed_de_enabled": False,
+            "stepstone_de_enabled": True,
+            "glassdoor_de_enabled": False,
+            "simplify_de_enabled": False,
+        }
+    )
+    old = fetched(
+        "REUSED",
+        "Old Backend Role",
+        "a" * 100,
+        source=SourceKind.STEPSTONE,
+        source_instance="de",
+    )
+    stored = stored_job("old-canonical", old)
+    old_occurrence = stored.source_occurrences[0]
+    old_occurrence.availability_status = AvailabilityStatus.CLOSED
+    old_occurrence.job_snapshot = JobSnapshotReference(
+        snapshot_id=f"sha256:{'a' * 64}",
+        captured_at=NOW - timedelta(days=100),
+    )
+    stored.availability_status = AvailabilityStatus.CLOSED
+    replacement = fetched(
+        "REUSED",
+        "New Security Role",
+        "z" * 100,
+        source=SourceKind.STEPSTONE,
+        source_instance="de",
+    )
+    reference = JobReference(
+        source=replacement.source,
+        source_instance=replacement.source_instance,
+        external_id=replacement.external_id,
+        detail_url=replacement.url,
+        listing_title=replacement.title,
+        listing_company=replacement.company,
+        listing_location=replacement.location,
+        listing_posted_at=replacement.posted_at,
+    )
+    adapter = _default_source_factory(
+        paths,
+        existing_source_occurrences={old_occurrence.source_job_key: old_occurrence},
+    )(value)[0]
+
+    assert adapter._capture_snapshot is not None  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(reference) is True  # type: ignore[attr-defined]
+    replacement.job_snapshot_html = f"""<!doctype html>
+<html data-job-scan-snapshot="{replacement.source_job_key}">
+<head><style>body {{ color: #0c2577; }}</style></head>
+<body><main>New Security Role</main></body>
+</html>
+"""
+    _carry_existing_job_snapshots(
+        [replacement],
+        {old_occurrence.source_job_key: old_occurrence},
+    )
+    _persist_job_snapshots(
+        [replacement],
+        JobSnapshotStore(paths.job_snapshots_dir),
+        NOW,
+    )
+
+    result = merge_occurrences(
+        Snapshot(meta=StoreMeta(data_revision=1), jobs=[stored]),
+        [replacement],
+        NOW,
+    )
+    generations = sorted(
+        (
+            occurrence
+            for job in result.jobs
+            for occurrence in job.source_occurrences
+            if occurrence.source_job_key == old_occurrence.source_job_key
+        ),
+        key=lambda occurrence: occurrence.source_generation,
+    )
+    assert [occurrence.source_generation for occurrence in generations] == [1, 2]
+    assert generations[0].job_snapshot == old_occurrence.job_snapshot
+    assert generations[1].job_snapshot is not None
+    assert generations[1].job_snapshot.snapshot_id != old_occurrence.job_snapshot.snapshot_id
+
+
+def test_active_reused_source_id_after_sixty_days_requests_a_new_snapshot(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    value = config(paths).model_copy(
+        update={
+            "arbeitsagentur_enabled": False,
+            "linkedin_enabled": False,
+            "indeed_de_enabled": False,
+            "stepstone_de_enabled": True,
+            "glassdoor_de_enabled": False,
+            "simplify_de_enabled": False,
+        }
+    )
+    old = fetched(
+        "REUSED-ACTIVE",
+        "Old Backend Role",
+        "a" * 100,
+        source=SourceKind.STEPSTONE,
+        source_instance="de",
+    )
+    stored = stored_job("old-active-canonical", old).source_occurrences[0]
+    stored.posted_at = date(2026, 1, 1)
+    replacement = fetched(
+        "REUSED-ACTIVE",
+        "New Security Role",
+        "z" * 100,
+        source=SourceKind.STEPSTONE,
+        source_instance="de",
+    )
+    reference = JobReference(
+        source=replacement.source,
+        source_instance=replacement.source_instance,
+        external_id=replacement.external_id,
+        detail_url=replacement.url,
+        listing_title=replacement.title,
+        listing_company=replacement.company,
+        listing_location=replacement.location,
+        listing_posted_at=replacement.posted_at,
+    )
+    adapter = _default_source_factory(
+        paths,
+        existing_source_occurrences={stored.source_job_key: stored},
+    )(value)[0]
+
+    assert adapter._capture_snapshot is not None  # type: ignore[attr-defined]
+    assert adapter._capture_snapshot(reference) is True  # type: ignore[attr-defined]
+
+
+def test_reused_source_id_cannot_copy_the_old_snapshot_into_new_generation() -> None:
+    old = fetched("REUSED-DIRECT", "Old Backend Role", "a" * 100)
+    stored = stored_job("old-direct-canonical", old).source_occurrences[0]
+    stored.availability_status = AvailabilityStatus.CLOSED
+    old_snapshot = JobSnapshotReference(
+        snapshot_id=f"sha256:{'a' * 64}",
+        captured_at=NOW - timedelta(days=100),
+    )
+    stored.job_snapshot = old_snapshot
+    replacement = fetched("REUSED-DIRECT", "New Security Role", "z" * 100)
+    replacement.job_snapshot = old_snapshot.model_copy(deep=True)
+
+    _carry_existing_job_snapshots(
+        [replacement],
+        {stored.source_job_key: stored},
+    )
+
+    assert replacement.job_snapshot is None
+    assert replacement.job_snapshot_error_code == "snapshot_capture_failed"
+
+
+def test_reused_source_id_rejects_html_with_the_old_snapshot_sha() -> None:
+    old = fetched("REUSED-HTML", "Old Backend Role", "a" * 100)
+    stored = stored_job("old-html-canonical", old).source_occurrences[0]
+    stored.availability_status = AvailabilityStatus.CLOSED
+    old_html = f"""<!doctype html>
+<html data-job-scan-snapshot="{stored.source_job_key}">
+<head><style>body {{ color: #0c2577; }}</style></head>
+<body><main>Old Backend Role</main></body>
+</html>
+"""
+    stored.job_snapshot = JobSnapshotReference(
+        snapshot_id=f"sha256:{hashlib.sha256(old_html.encode('utf-8')).hexdigest()}",
+        captured_at=NOW - timedelta(days=100),
+    )
+    replacement = fetched("REUSED-HTML", "New Security Role", "z" * 100)
+    replacement.job_snapshot_html = old_html
+
+    _carry_existing_job_snapshots(
+        [replacement],
+        {stored.source_job_key: stored},
+    )
+
+    assert replacement.job_snapshot_html is None
+    assert replacement.job_snapshot is None
+    assert replacement.job_snapshot_error_code == "snapshot_capture_failed"
 
 
 def test_default_source_factory_includes_selected_bosch_source(
