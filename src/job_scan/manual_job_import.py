@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
@@ -151,6 +152,9 @@ class OpenCliPageReader:
             page_url = safe_url
             page_title = ""
             expected_total: int | None = None
+            page_load_deadline = time.monotonic() + self._timeout_seconds
+            waiting_for_stable_page = False
+            stable_page: tuple[object, ...] | None = None
             while True:
                 payload = self._run_json(
                     [
@@ -165,12 +169,34 @@ class OpenCliPageReader:
                 )
                 page_url = require_public_job_url(_required_text(payload, "url"))
                 _require_public_host_addresses(page_url, self._address_resolver)
-                page_title = _required_text(payload, "title")
                 total_chars = payload.get("total_chars")
                 chunk_start = payload.get("start")
                 chunk_end = payload.get("end")
                 content = payload.get("content")
                 next_start = payload.get("next_start_char")
+                if start == 0 and total_chars == 0 and content == "":
+                    waiting_for_stable_page = True
+                    stable_page = None
+                elif start == 0 and waiting_for_stable_page:
+                    current_page = (
+                        payload.get("title"),
+                        total_chars,
+                        chunk_start,
+                        chunk_end,
+                        content,
+                        next_start,
+                    )
+                    if current_page == stable_page:
+                        waiting_for_stable_page = False
+                    else:
+                        stable_page = current_page
+                if waiting_for_stable_page:
+                    remaining = page_load_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ManualJobImportError("Opening this job page timed out.")
+                    time.sleep(min(0.5, remaining))
+                    continue
+                page_title = _required_text(payload, "title")
                 if (
                     type(total_chars) is not int
                     or total_chars <= 0

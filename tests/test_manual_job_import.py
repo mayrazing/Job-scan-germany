@@ -441,6 +441,77 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
     ]
 
 
+def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> None:
+    partial_content = "Employer Privacy Policy"
+    content = "Backend Engineer\nRendered job content"
+    runner = RecordingRunner(
+        [
+            {
+                "url": "https://careers.example/jobs/42",
+                "page": "PAGE-42",
+            },
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "",
+                "total_chars": 0,
+                "start": 0,
+                "end": 0,
+                "next_start_char": None,
+                "content": "",
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "Career Site",
+                "total_chars": len(partial_content),
+                "start": 0,
+                "end": len(partial_content),
+                "next_start_char": None,
+                "content": partial_content,
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "Career Site",
+                "total_chars": len(content),
+                "start": 0,
+                "end": len(content),
+                "next_start_char": None,
+                "content": content,
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "Career Site",
+                "total_chars": len(content),
+                "start": 0,
+                "end": len(content),
+                "next_start_char": None,
+                "content": content,
+            },
+            {
+                "session": "manual-session",
+                "count": 0,
+                "entries": [],
+            },
+            "Browser session tab lease released",
+        ]
+    )
+
+    page = manual_job_import.OpenCliPageReader(
+        opencli_executable="opencli",
+        runner=runner,
+        session_factory=lambda: "manual-session",
+        address_resolver=lambda _host: ["93.184.216.34"],
+        timeout_seconds=10,
+    ).read("https://careers.example/jobs/42")
+
+    assert page.title == "Career Site"
+    assert page.content == content
+
+
 def test_opencli_page_reader_rejects_a_gap_between_chunks() -> None:
     runner = RecordingRunner(
         [

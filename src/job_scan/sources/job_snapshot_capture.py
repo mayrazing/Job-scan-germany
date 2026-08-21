@@ -133,15 +133,22 @@ def _manual_snapshot_script(source_job_key: str) -> str:
     /Verify you are human|Sicherheitsüberprüfung/i.test(document.body?.innerText || "");
   if (isChallenge()) return {status: "challenge"};
   const root = document.querySelector("main") || document.body;
-  if (!root || !(root.innerText || root.textContent || "").trim()) {
+  const visibleText = root?.innerText?.trim() || "";
+  if (!root || !visibleText) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const settledRoot = document.querySelector("main") || document.body;
+  const settledText = settledRoot?.innerText?.trim() || "";
+  if (!settledRoot || !settledText || settledText !== visibleText) {
     return {status: "unavailable", error_code: "structure_mismatch"};
   }
   return buildJobSnapshot({
     snapshotKey,
-    title: document.title || root.querySelector("h1")?.innerText?.trim() || "",
+    title: document.title || settledRoot.querySelector("h1")?.innerText?.trim() || "",
     sourceLabel: "Manual import",
     accent: "#3b5bdb",
-    roots: [root],
+    roots: [settledRoot],
   });
 """.strip().replace("__EXPECTED_SOURCE_JOB_KEY__", json.dumps(source_job_key))
     )

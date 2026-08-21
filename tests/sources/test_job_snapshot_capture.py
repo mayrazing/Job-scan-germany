@@ -36,6 +36,32 @@ def test_browser_snapshot_script_waits_for_dynamic_job_content() -> None:
         browser.close()
 
 
+def test_manual_snapshot_waits_for_visible_job_content_to_stabilize() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    script = capture_module._manual_snapshot_script("manual:careers.example:1")
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            "<body><div id='loading'></div>"
+            "<script type='application/json'>{\"hidden\":\"loading metadata\"}</script>"
+            "<script>"
+            "setTimeout(() => { document.body.innerHTML = "
+            "'<main><p>Employer Privacy Policy</p></main>'; }, 100);"
+            "setTimeout(() => { document.body.innerHTML = "
+            "'<main><h1>Backend Engineer</h1><p>Build services.</p></main>'; }, 700);"
+            "</script></body>"
+        )
+
+        result = page.evaluate(script)
+
+        assert result["status"] == "ok"
+        assert "Backend Engineer" in result["html"]
+        assert "Build services." in result["html"]
+        browser.close()
+
+
 def test_browser_snapshot_script_removes_active_legacy_css() -> None:
     sync_api = pytest.importorskip("playwright.sync_api")
     script = browser_snapshot_script(
