@@ -480,6 +480,50 @@ def test_ats_history_is_collapsed_and_selected_bundle_is_rendered() -> None:
     assert "%" not in failed_report.get_text(" ", strip=True)
 
 
+def test_ats_history_time_prefers_latest_history_search_when_available() -> None:
+    entry = ats_history_entry("ats-1")
+    bundle = ats_bundle("ats-1")
+    page = BeautifulSoup(
+        render_console(
+            ats_history=[entry],
+            selected_ats=bundle,
+            ats_history_latest_searches={
+                "ats-1": datetime(2026, 8, 20, 15, 30, tzinfo=UTC)
+            },
+        ),
+        "html.parser",
+    )
+
+    history = page.select_one("details#ats-history")
+    assert history is not None
+    time = history.select_one('[data-ats-history-id="ats-1"] time[data-local-datetime]')
+    assert time is not None
+    assert time["datetime"] == "2026-08-20T15:30:00+00:00"
+    assert "2026-08-20 15:30" in time.get_text()
+    context = page.select_one("#ats-history-context")
+    assert context is not None
+    assert "2026-08-20 15:30" in context.get_text()
+
+
+def test_ats_history_time_falls_back_to_check_finish_time() -> None:
+    entry = ats_history_entry("ats-1")
+    bundle = ats_bundle("ats-1")
+    page = BeautifulSoup(
+        render_console(ats_history=[entry], selected_ats=bundle),
+        "html.parser",
+    )
+
+    history = page.select_one("details#ats-history")
+    assert history is not None
+    time = history.select_one('[data-ats-history-id="ats-1"] time[data-local-datetime]')
+    assert time is not None
+    assert time["datetime"] == "2026-08-08T12:30:00+00:00"
+    assert "2026-08-08 12:30" in time.get_text()
+    context = page.select_one("#ats-history-context")
+    assert context is not None
+    assert "2026-08-08 12:30" in context.get_text()
+
+
 def test_console_renders_search_history_with_resume_view_and_delete_actions() -> None:
     entry = SearchHistoryEntry(
         run_id="run-42",

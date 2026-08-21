@@ -997,7 +997,13 @@
     const searchRunId = button.dataset.searchRunId;
     const jobKeys = selectedAtsJobKeys();
     const uploadedResume = atsResumeInput?.files[0];
-    if ((!searchRunId && !uploadedResume) || jobKeys.length === 0) return;
+    const selectedResumeId = document.body.dataset.selectedResumeId;
+    if (
+      (!searchRunId && !uploadedResume && !selectedResumeId)
+      || jobKeys.length === 0
+    ) {
+      return;
+    }
     atsCurrentRequestVersion += 1;
     atsStartInFlight = true;
     syncAtsSelection();
@@ -1006,6 +1012,7 @@
       payload.append("job_keys", JSON.stringify(jobKeys));
       if (searchRunId) payload.append("search_run_id", searchRunId);
       if (uploadedResume) payload.append("resume", uploadedResume, uploadedResume.name);
+      else if (selectedResumeId) payload.append("resume_id", selectedResumeId);
       const response = await fetch("/api/ats-runs", {
         method: "POST",
         credentials: "same-origin",
@@ -1113,6 +1120,23 @@
     syncAtsSelection();
   });
   atsResumeInput?.addEventListener("change", syncAtsSelection);
+  const syncAtsDefaultResumeLabel = () => {
+    const defaultLabel = document.querySelector("[data-ats-default-resume]");
+    const select = document.querySelector("[data-global-resume-select]");
+    if (!defaultLabel || !select) return;
+    const uploaded = atsResumeInput?.files?.[0];
+    if (uploaded) {
+      defaultLabel.textContent = `Default: ${uploaded.name}`;
+    } else {
+      const option = select.selectedOptions[0];
+      const filename = option?.dataset.resumeFilename;
+      const createdAt = option?.dataset.resumeCreatedAt;
+      defaultLabel.textContent = filename
+        ? `Default: ${filename}${createdAt ? ` (${createdAt})` : ""}`
+        : "Upload a PDF or DOCX resume";
+    }
+  };
+  atsResumeInput?.addEventListener("change", syncAtsDefaultResumeLabel);
   atsStartButton.addEventListener("click", () => startAts(atsStartButton));
   syncAtsSelection();
   const restoredSetupDraft = restoreSetupDraft();
@@ -1463,6 +1487,23 @@
       }).format(instant);
     }
   });
+
+  document
+    .querySelectorAll("[data-global-resume-select] option[data-resume-created-at-iso]")
+    .forEach((option) => {
+      const instant = new Date(option.dataset.resumeCreatedAtIso);
+      if (Number.isNaN(instant.getTime())) return;
+      const local = new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(instant);
+      option.dataset.resumeCreatedAt = local;
+      const filename = option.dataset.resumeFilename;
+      if (filename) {
+        option.textContent = `${filename} (${local})`;
+      }
+    });
+  syncAtsDefaultResumeLabel();
 
   reviewLink.addEventListener("click", (event) => {
     event.preventDefault();

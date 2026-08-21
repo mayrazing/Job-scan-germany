@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from functools import lru_cache
 from importlib.resources import files
 from typing import TYPE_CHECKING
@@ -46,6 +47,7 @@ def render_dashboard(
     *,
     resume_catalog: list[ResumeCatalogEntry] | None = None,
     selected_resume_id: str | None = None,
+    resume_latest_searches: dict[str, datetime] | None = None,
 ) -> str:
     """Render one self-contained HTML page derived from a snapshot."""
     template = _environment().get_template("index.html")
@@ -57,6 +59,7 @@ def render_dashboard(
         ),
         resume_catalog=resume_catalog or [],
         selected_resume_id=selected_resume_id,
+        resume_latest_searches=resume_latest_searches or {},
         dashboard_css=_asset_text("dashboard.css"),
         dashboard_js=_asset_text("dashboard.js"),
     )
@@ -71,11 +74,14 @@ def render_console(
     scan_history: list[SearchHistoryEntry] | None = None,
     selected_run_id: str | None = None,
     ats_history: list[AtsHistoryEntry] | None = None,
+    ats_history_latest_searches: dict[str, datetime] | None = None,
     selected_ats: AtsCheckBundle | None = None,
     ats_source_run_id: str | None = None,
     ats_default_resume_filename: str | None = None,
+    ats_default_resume_created_at: datetime | None = None,
     resume_catalog: list[ResumeCatalogEntry] | None = None,
     selected_resume_id: str | None = None,
+    resume_latest_searches: dict[str, datetime] | None = None,
 ) -> str:
     """Render the packaged setup page served by the local review server."""
     snapshot = snapshot or Snapshot(meta=StoreMeta(data_revision=0))
@@ -107,11 +113,14 @@ def render_console(
         scan_history=scan_history,
         selected_run_id=selected_run_id,
         ats_history=ats_history,
+        ats_history_latest_searches=ats_history_latest_searches or {},
         selected_ats=selected_ats,
         ats_source_run_id=ats_source_run_id,
         ats_default_resume_filename=ats_default_resume_filename,
+        ats_default_resume_created_at=ats_default_resume_created_at,
         resume_catalog=resume_catalog or [],
         selected_resume_id=selected_resume_id,
+        resume_latest_searches=resume_latest_searches or {},
         bootstrap_css=_asset_text("bootstrap.min.css"),
         tom_select_css=_asset_text("tom-select.bootstrap5.min.css"),
         dashboard_css=_asset_text("dashboard.css"),

@@ -19,7 +19,12 @@ from job_scan.ai_selection import (
     ClaudeRuntimeSelection,
 )
 from job_scan.ats_history import AtsHistoryStore
-from job_scan.ats_models import AtsRunState
+from job_scan.ats_models import (
+    AtsCheckBundle,
+    AtsResumeAssessment,
+    AtsResumeFinding,
+    AtsRunState,
+)
 from job_scan.ats_workflow import AtsWorkflowInput
 from job_scan.company_size import (
     CompanySizeEvidence,
@@ -203,6 +208,59 @@ def _archive(
         finished_at=NOW,
         profile_bytes=profile_bytes,
         config_bytes=config_bytes,
+    )
+
+
+def _archive_with_time(
+    history: SearchHistoryStore,
+    tmp_path: Path,
+    run_id: str,
+    finished_at: datetime,
+    config_bytes: bytes,
+) -> None:
+    resume = tmp_path / f"{run_id}.pdf"
+    resume.write_bytes(b"ARCHIVED RESUME")
+    history.archive(
+        run_id=run_id,
+        candidate_name="Ada",
+        resume_filename=f"{run_id}.pdf",
+        resume_path=resume,
+        snapshot=_snapshot(),
+        finished_at=finished_at,
+        profile_bytes=b"# History candidate profile",
+        config_bytes=config_bytes,
+    )
+
+
+def _ats_bundle(
+    run_id: str,
+    *,
+    resume_filename: str,
+    finished_at: datetime,
+) -> AtsCheckBundle:
+    return AtsCheckBundle(
+        run_id=run_id,
+        search_run_id="search-1",
+        candidate_name="Ada",
+        resume_filename=resume_filename,
+        started_at=finished_at,
+        finished_at=finished_at,
+        ai_runtime="claude-code",
+        ai_model="sonnet",
+        resume=AtsResumeAssessment(
+            readiness_score=88,
+            verdict="ready",
+            title="Resume content is ATS ready",
+            summary="Core resume content is clear.",
+            findings=[
+                AtsResumeFinding(
+                    label="Text extraction",
+                    status="pass",
+                    detail="Selectable text was extracted.",
+                )
+            ],
+        ),
+        jobs=[],
     )
 
 
@@ -538,6 +596,16 @@ def test_same_global_job_shows_each_history_resumes_own_match(tmp_path: Path) ->
     card_a = page_a.select_one('[data-review-block="global"] [data-job-key]')
     card_b = page_b.select_one('[data-review-block="global"] [data-job-key]')
     assert len(page_a.select("[data-global-resume-id]")) == 3
+    default_a = page_a.select_one("[data-ats-default-resume]")
+    default_b = page_b.select_one("[data-ats-default-resume]")
+    assert default_a is not None
+    assert default_b is not None
+    assert default_a.get_text(" ", strip=True).startswith(
+        f"Default: run-a.pdf ({NOW.strftime('%Y-%m-%d %H:%M')})"
+    )
+    assert default_b.get_text(" ", strip=True).startswith(
+        f"Default: run-b.pdf ({NOW.strftime('%Y-%m-%d %H:%M')})"
+    )
     assert len(global_jobs.load().jobs) == 1
     assert card_a is not None
     assert card_a.get("data-score") == "91"
@@ -711,6 +779,56 @@ def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
     assert inputs.search_run_id == "run-a"
     assert inputs.resume_filename == "run-a.pdf"
     assert inputs.resume_bytes == b"DEFAULT RESUME"
+
+
+def test_ats_uses_resume_selected_in_resume_catalog(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_job = _job("global", external_id="global")
+    repository = _repository(paths)
+    _save_config(paths)
+    history = SearchHistoryStore(paths)
+    _archive(history, tmp_path, "run-a", _snapshot(global_job), b"DEFAULT RESUME")
+    resume_bytes = b"CATALOG RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    ResumeCatalogStore(paths).register(
+        resume_id=resume_id,
+        profile_hash="sha256:" + "c" * 64,
+        candidate_name="Ada",
+        filename="catalog.pdf",
+        profile_bytes=b"profile",
+        config_bytes=b"config",
+        resume_bytes=resume_bytes,
+        created_at=NOW,
+    )
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={
+                "search_run_id": "run-a",
+                "resume_id": resume_id,
+                "job_keys": json.dumps(["global"]),
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202
+    inputs = ats_workflow.inputs[0]
+    assert inputs.resume_filename == "catalog.pdf"
+    assert inputs.resume_bytes == b"CATALOG RESUME"
 
 
 def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path) -> None:
@@ -1107,6 +1225,153 @@ def test_manual_job_import_uses_selected_resume_profile_and_config(
     assert config.ai_runtime == "claude-code"
     assert config.claude.model == "opus"
     assert profile == "# History candidate profile"
+
+
+def test_job_tracker_resume_time_uses_latest_remaining_history_search(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    history_config = AppConfig(
+        candidate_name="Ada",
+        ai_runtime="claude-code",
+        resume_path=paths.root / "history.pdf",
+        resume_sha256="sha256:" + "c" * 64,
+        profile_sha256="sha256:" + "d" * 64,
+        search_terms=["backend"],
+        locations=["Berlin"],
+        german_level="B1",
+        claude=ClaudeSettings(model="sonnet", effort="medium"),
+        scheduler=SchedulerSettings(),
+    )
+    config_bytes = serialize_config(history_config).encode("utf-8")
+    history = SearchHistoryStore(paths)
+    _archive_with_time(
+        history,
+        tmp_path,
+        "run-old",
+        datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+        config_bytes,
+    )
+    _archive_with_time(
+        history,
+        tmp_path,
+        "run-new",
+        datetime(2026, 8, 20, 15, 30, tzinfo=UTC),
+        config_bytes,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        history_store=history,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        assert (
+            client.delete("/api/scan-history/run-new", headers=HEADERS).status_code
+            == 200
+        )
+        page = BeautifulSoup(client.get("/setup").text, "html.parser")
+        option = page.select_one(
+            '[data-global-resume-select] option[data-resume-filename="run-new.pdf"]'
+        )
+        assert option is not None
+        assert option["data-resume-created-at"] == "2026-08-18 09:00"
+        assert "run-new.pdf (2026-08-18 09:00)" in option.get_text()
+        footer = page.select_one("footer#review-actions")
+        assert footer is not None
+        assert (
+            "Default: run-new.pdf (2026-08-18 09:00)"
+            in footer.get_text(" ", strip=True)
+        )
+
+
+def test_ats_history_time_follows_latest_search_history_for_same_resume(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    resume_bytes = b"ARCHIVED RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    history_config = AppConfig(
+        candidate_name="Ada",
+        ai_runtime="claude-code",
+        resume_path=paths.root / "history.pdf",
+        resume_sha256=resume_id,
+        profile_sha256="sha256:" + "d" * 64,
+        search_terms=["backend"],
+        locations=["Berlin"],
+        german_level="B1",
+        claude=ClaudeSettings(model="sonnet", effort="medium"),
+        scheduler=SchedulerSettings(),
+    )
+    config_bytes = serialize_config(history_config).encode("utf-8")
+    history = SearchHistoryStore(paths)
+    _archive_with_time(
+        history,
+        tmp_path,
+        "run-old",
+        datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+        config_bytes,
+    )
+    _archive_with_time(
+        history,
+        tmp_path,
+        "run-new",
+        datetime(2026, 8, 20, 15, 30, tzinfo=UTC),
+        config_bytes,
+    )
+    ats_history = AtsHistoryStore(paths)
+    ats_history.archive(
+        _ats_bundle(
+            "ats-1",
+            resume_filename="history.pdf",
+            finished_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+        ),
+        resume_bytes,
+    )
+    ats_history.archive(
+        _ats_bundle(
+            "ats-2",
+            resume_filename="other.pdf",
+            finished_at=datetime(2026, 8, 19, 11, 0, tzinfo=UTC),
+        ),
+        b"OTHER RESUME",
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        history_store=history,
+        ats_history_store=ats_history,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        page = BeautifulSoup(client.get("/setup").text, "html.parser")
+        ats1_time = page.select_one(
+            '[data-ats-history-id="ats-1"] time[data-local-datetime]'
+        )
+        ats2_time = page.select_one(
+            '[data-ats-history-id="ats-2"] time[data-local-datetime]'
+        )
+        assert ats1_time is not None and ats2_time is not None
+        assert ats1_time["datetime"] == "2026-08-20T15:30:00+00:00"
+        assert ats2_time["datetime"] == "2026-08-19T11:00:00+00:00"
+
+        assert (
+            client.delete("/api/scan-history/run-new", headers=HEADERS).status_code
+            == 200
+        )
+        page = BeautifulSoup(client.get("/setup").text, "html.parser")
+        ats1_time = page.select_one(
+            '[data-ats-history-id="ats-1"] time[data-local-datetime]'
+        )
+        assert ats1_time is not None
+        assert ats1_time["datetime"] == "2026-08-18T09:00:00+00:00"
 
 
 def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(

@@ -31,7 +31,7 @@
           <div><p class="eyebrow">All searches</p><h2>Job Tracker</h2></div>
           {{ manual_job_import() }}
         </header>
-        {{ global_resume_list(resume_catalog, selected_resume_id, '/') }}
+        {{ global_resume_list(resume_catalog, selected_resume_id, '/', resume_latest_searches=resume_latest_searches) }}
         <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
           {{ navigation(global_dashboard, 'Job Tracker groups') }}
           <div class="review-groups">{{ groups(global_dashboard, false, false, 'global', resume_catalog) }}</div>

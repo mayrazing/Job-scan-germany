@@ -229,6 +229,108 @@ def test_console_places_optional_ats_resume_upload_next_to_start_button() -> Non
     assert footer.select_one("[data-open-ats]") is not None
 
 
+def test_console_shows_default_resume_created_at() -> None:
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            ats_default_resume_filename="Current CV.pdf",
+            ats_default_resume_created_at=datetime(2026, 8, 18, 9, 30, tzinfo=UTC),
+        ),
+        "html.parser",
+    )
+
+    footer = page.select_one("footer#review-actions")
+    assert footer is not None
+    assert "Default: Current CV.pdf (2026-08-18 09:30)" in footer.get_text(" ", strip=True)
+
+
+def test_console_default_resume_follows_selected_resume() -> None:
+    resume_id = "sha256:" + "a" * 64
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=resume_id,
+            profile_hash="sha256:" + "b" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+        )
+    ]
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            resume_catalog=resumes,
+            selected_resume_id=resume_id,
+        ),
+        "html.parser",
+    )
+
+    footer = page.select_one("footer#review-actions")
+    assert footer is not None
+    option = page.select_one(
+        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
+    )
+    assert option is not None
+    assert option["data-resume-created-at"] == "2026-08-19 10:00"
+    assert footer.select_one("[data-ats-default-resume]") is not None
+
+
+def test_resume_time_prefers_latest_history_search_when_available() -> None:
+    resume_id = "sha256:" + "a" * 64
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=resume_id,
+            profile_hash="sha256:" + "b" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+        )
+    ]
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            resume_catalog=resumes,
+            selected_resume_id=resume_id,
+            resume_latest_searches={resume_id: datetime(2026, 8, 20, 15, 30, tzinfo=UTC)},
+        ),
+        "html.parser",
+    )
+
+    option = page.select_one(
+        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
+    )
+    assert option is not None
+    assert option["data-resume-created-at"] == "2026-08-20 15:30"
+    assert "backend.pdf (2026-08-20 15:30)" in option.get_text()
+
+
+def test_resume_time_falls_back_to_created_at_without_history_search() -> None:
+    resume_id = "sha256:" + "a" * 64
+    resumes = [
+        ResumeCatalogEntry(
+            resume_id=resume_id,
+            profile_hash="sha256:" + "b" * 64,
+            candidate_name="Backend CV",
+            filename="backend.pdf",
+            created_at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
+        )
+    ]
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            resume_catalog=resumes,
+            selected_resume_id=resume_id,
+        ),
+        "html.parser",
+    )
+
+    option = page.select_one(
+        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
+    )
+    assert option is not None
+    assert option["data-resume-created-at"] == "2026-08-18 09:00"
+    assert "backend.pdf (2026-08-18 09:00)" in option.get_text()
+
+
 def test_console_places_ats_resume_between_new_run_and_start_button() -> None:
     page = BeautifulSoup(
         render_console(

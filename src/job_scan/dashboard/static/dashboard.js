@@ -802,8 +802,46 @@
     );
     document.body.dataset.selectedResumeId =
       refreshedDocument.body.dataset.selectedResumeId || "";
+    localizeResumeOptionTimes(liveBlock);
+    updateAtsDefaultResume();
     updateReviewGroupCounts();
     document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+  };
+
+  const updateAtsDefaultResume = () => {
+    const select = document.querySelector("[data-global-resume-select]");
+    const defaultLabel = document.querySelector("[data-ats-default-resume]");
+    if (!select || !defaultLabel) return;
+    const option = select.selectedOptions[0];
+    if (!option) {
+      defaultLabel.textContent = "Upload a PDF or DOCX resume";
+      return;
+    }
+    const filename = option.dataset.resumeFilename;
+    const createdAt = option.dataset.resumeCreatedAt;
+    defaultLabel.textContent = filename
+      ? `Default: ${filename}${createdAt ? ` (${createdAt})` : ""}`
+      : "Upload a PDF or DOCX resume";
+  };
+
+  const localizeResumeOptionTimes = (root = document) => {
+    root
+      .querySelectorAll(
+        "[data-global-resume-select] option[data-resume-created-at-iso]",
+      )
+      .forEach((option) => {
+        const instant = new Date(option.dataset.resumeCreatedAtIso);
+        if (Number.isNaN(instant.getTime())) return;
+        const local = new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(instant);
+        option.dataset.resumeCreatedAt = local;
+        const filename = option.dataset.resumeFilename;
+        if (filename) {
+          option.textContent = `${filename} (${local})`;
+        }
+      });
   };
 
   const responseError = async (response, fallback) => {
@@ -996,6 +1034,7 @@
     initializeSourceFilter();
     initializeGlobalSourceFilter();
     initializeManualJobImport();
+    localizeResumeOptionTimes();
   };
 
   if (document.readyState === "loading") {
@@ -1071,6 +1110,7 @@
       const refreshedDocument = await fetchReviewDocument(destination.href);
       if (requestVersion !== globalResumeRequestVersion) return;
       reconcileGlobalResumeSelection(refreshedDocument);
+      updateAtsDefaultResume();
       window.history.replaceState(null, "", destination.href);
     } catch (error) {
       if (requestVersion === globalResumeRequestVersion) {

@@ -565,7 +565,7 @@
                   </div>
                   {{ manual_job_import() }}
                 </header>
-                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker') }}
+                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker', resume_latest_searches) }}
                 <div class="review-filters">
                   <div class="source-filter">
                     <label for="global-source-filter">
@@ -589,7 +589,7 @@
               <label class="ats-resume-picker" for="ats-resume" data-job-tracker-only>
                 <span class="field-label">ATS resume</span>
                 <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
-                <small>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
+                <small data-ats-default-resume>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% if ats_default_resume_created_at %} ({{ ats_default_resume_created_at.strftime('%Y-%m-%d %H:%M') }}){% endif %}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
               </label>
               <button class="btn btn-primary primary-button" type="button" data-open-ats data-job-tracker-only data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
             </div>
@@ -654,7 +654,8 @@
                     <div class="ai-provider-copy">
                       <div class="ai-provider-title"><strong>{{ entry.resume_filename }}</strong></div>
                       <p>{{ entry.job_count }} jobs · {{ entry.readiness_score }} resume readiness{% if entry.failed_job_count %} · {{ entry.failed_job_count }} failed{% endif %}</p>
-                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                      {% set display_time = ats_history_latest_searches.get(entry.run_id, entry.finished_at) %}
+                      <small><time data-local-datetime datetime="{{ display_time.isoformat() }}">{{ display_time.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
                     </div>
                     <div class="ai-provider-actions scan-history-actions">
                       <a class="btn btn-outline-secondary" data-ats-history-view href="/setup?ats_run_id={{ entry.run_id }}#ats-check">👁 View</a>
@@ -668,7 +669,8 @@
             </details>
 
             {% if selected_ats %}
-              <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing {{ selected_ats.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ selected_ats.jobs | length }} jobs</p>
+              {% set display_time = ats_history_latest_searches.get(selected_ats.run_id, selected_ats.finished_at) %}
+              <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing {{ display_time.strftime('%Y-%m-%d %H:%M') }} UTC · {{ selected_ats.jobs | length }} jobs</p>
 
               <section class="form-section ats-readiness" id="resume-readiness" aria-labelledby="resume-readiness-title">
                 <div class="ats-readiness-score" aria-label="Resume readiness score {{ selected_ats.resume.readiness_score }} out of 100">

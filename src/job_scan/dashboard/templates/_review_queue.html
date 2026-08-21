@@ -263,7 +263,7 @@
   {% endfor %}
 {%- endmacro %}
 
-{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none, review_hash='review') -%}
+{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none, review_hash='review', resume_latest_searches=none) -%}
   <section class="global-resume-section" aria-labelledby="global-resume-title">
     <div class="global-resume-heading">
       <h4 id="global-resume-title">Resumes</h4>
@@ -271,7 +271,8 @@
     </div>
     <select class="global-resume-select" data-global-resume-select aria-label="Select resume"{% if not resumes %} disabled{% endif %}>
       {% for resume in resumes %}
-        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.filename }} ({{ resume.created_at.strftime('%Y-%m-%d %H:%M') }})</option>
+        {% set display_time = (resume_latest_searches or {}).get(resume.resume_id, resume.created_at) %}
+        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-resume-filename="{{ resume.filename }}" data-resume-created-at="{{ display_time.strftime('%Y-%m-%d %H:%M') }}" data-resume-created-at-iso="{{ display_time.isoformat() }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.filename }} ({{ display_time.strftime('%Y-%m-%d %H:%M') }})</option>
       {% else %}
         <option selected>No resumes associated with tracked jobs yet.</option>
       {% endfor %}

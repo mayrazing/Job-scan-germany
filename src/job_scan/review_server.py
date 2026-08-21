@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -155,6 +156,10 @@ class _AiModelDiscoveryRequest(BaseModel):
 
 class _AtsStartRequest(BaseModel):
     search_run_id: str | None = None
+    resume_id: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
     job_keys: list[str] = Field(min_length=1)
 
     @field_validator("job_keys")
@@ -336,6 +341,38 @@ def create_review_app(
                 )
             except (KeyError, OSError, UnicodeError, ValueError, ValidationError):
                 continue
+
+    def latest_search_times_by_resume() -> dict[str, datetime]:
+        """Map each archived resume to the newest finished search time."""
+        latest: dict[str, datetime] = {}
+        for entry in history.list():
+            try:
+                config = load_config_bytes(
+                    history.read_review_input(entry.run_id).config_bytes
+                )
+            except (KeyError, OSError, UnicodeError, ValueError, ValidationError):
+                continue
+            known = latest.get(config.resume_sha256)
+            if known is None or entry.finished_at > known:
+                latest[config.resume_sha256] = entry.finished_at
+        return latest
+
+    def ats_history_latest_search_times() -> dict[str, datetime]:
+        """Map each ATS check to its resume's newest finished search time."""
+        if ats_history_store is None:
+            return {}
+        latest_by_resume = latest_search_times_by_resume()
+        display: dict[str, datetime] = {}
+        for entry in ats_history_store.list():
+            try:
+                _filename, resume_bytes = ats_history_store.read_resume(entry.run_id)
+            except (KeyError, OSError, UnicodeError, ValueError):
+                continue
+            resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+            search_time = latest_by_resume.get(resume_id)
+            if search_time is not None:
+                display[entry.run_id] = search_time
+        return display
 
     def associate_catalog_profiles() -> list[ResumeCatalogEntry]:
         """Migrate profile-hash-only Global jobs to explicit resume associations."""
@@ -880,6 +917,7 @@ def create_review_app(
     def start_ats_run(
         job_keys: Annotated[str, Form()],
         search_run_id: Annotated[str | None, Form()] = None,
+        resume_id: Annotated[str | None, Form()] = None,
         resume: Annotated[UploadFile | None, File()] = None,
     ) -> AtsRunState:
         if ats_workflow is None:
@@ -888,6 +926,7 @@ def create_review_app(
             payload = _AtsStartRequest.model_validate(
                 {
                     "search_run_id": search_run_id.strip() if search_run_id else None,
+                    "resume_id": resume_id.strip() if resume_id else None,
                     "job_keys": json.loads(job_keys),
                 }
             )
@@ -895,6 +934,15 @@ def create_review_app(
             if resume is not None and resume.filename:
                 resume_filename = Path(resume.filename).name
                 resume_bytes = resume.file.read()
+            elif payload.resume_id is not None:
+                try:
+                    bundle = resume_catalog.read(payload.resume_id)
+                except KeyError:
+                    raise AtsInputError("The selected resume is unavailable.") from None
+                if bundle.resume_bytes is None:
+                    raise AtsInputError("The selected resume has no file content.")
+                resume_filename = bundle.entry.filename
+                resume_bytes = bundle.resume_bytes
             elif payload.search_run_id is not None:
                 resume_filename, resume_bytes = history.read_resume(payload.search_run_id)
             else:
@@ -1205,6 +1253,7 @@ def create_review_app(
         current = repository.load()
         refresh_global_jobs(current)
         resumes = resume_catalog.list()
+        resume_latest_searches = latest_search_times_by_resume()
         selected_resume_id = selected_resume(resumes, resume_id)
         global_snapshot = (
             global_jobs.load_for_resume(selected_resume_id)
@@ -1217,6 +1266,7 @@ def create_review_app(
                 global_snapshot,
                 resume_catalog=resumes,
                 selected_resume_id=selected_resume_id,
+                resume_latest_searches=resume_latest_searches,
             )
         )
         response.set_cookie(
@@ -1368,6 +1418,7 @@ def create_review_app(
                 entries = history.list()
                 refresh_global_jobs(raw_snapshot, entries)
                 resumes = resume_catalog.list()
+                resume_latest_searches = latest_search_times_by_resume()
                 selected_resume_id = selected_resume(resumes, resume_id, run_id)
                 global_snapshot = (
                     global_jobs.load_for_resume(selected_resume_id)
@@ -1376,6 +1427,7 @@ def create_review_app(
                 )
                 snapshot = global_jobs.overlay(raw_snapshot)
                 ats_entries = ats_history_store.list() if ats_history_store is not None else []
+                ats_history_latest = ats_history_latest_search_times()
                 if ats_run_id is not None:
                     if ats_history_store is None:
                         raise KeyError(ats_run_id)
@@ -1387,14 +1439,31 @@ def create_review_app(
             except (KeyError, ValueError):
                 raise HTTPException(status.HTTP_404_NOT_FOUND) from None
             ats_source_run_id = run_id or (entries[0].run_id if entries else None)
-            ats_default_resume_filename = next(
-                (
-                    entry.resume_filename
-                    for entry in entries
-                    if entry.run_id == ats_source_run_id
-                ),
+            ats_default_resume_entry = next(
+                (entry for entry in entries if entry.run_id == ats_source_run_id),
                 None,
             )
+            ats_default_resume_filename = (
+                ats_default_resume_entry.resume_filename
+                if ats_default_resume_entry is not None
+                else None
+            )
+            ats_default_resume_created_at = (
+                ats_default_resume_entry.finished_at
+                if ats_default_resume_entry is not None
+                else None
+            )
+            if selected_resume_id is not None:
+                selected_resume_entry = next(
+                    (entry for entry in resumes if entry.resume_id == selected_resume_id),
+                    None,
+                )
+                if selected_resume_entry is not None:
+                    ats_default_resume_filename = selected_resume_entry.filename
+                    ats_default_resume_created_at = resume_latest_searches.get(
+                        selected_resume_entry.resume_id,
+                        selected_resume_entry.created_at,
+                    )
             setup_answers = workflow.load_setup_answers()
             selection = current_ai_selection()
             if (
@@ -1420,11 +1489,14 @@ def create_review_app(
                     scan_history=entries,
                     selected_run_id=run_id,
                     ats_history=ats_entries,
+                    ats_history_latest_searches=ats_history_latest,
                     selected_ats=selected_ats,
                     ats_source_run_id=ats_source_run_id,
                     ats_default_resume_filename=ats_default_resume_filename,
+                    ats_default_resume_created_at=ats_default_resume_created_at,
                     resume_catalog=resumes,
                     selected_resume_id=selected_resume_id,
+                    resume_latest_searches=resume_latest_searches,
                 )
             )
             response.set_cookie(
