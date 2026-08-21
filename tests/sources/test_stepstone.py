@@ -920,17 +920,17 @@ def test_snapshot_page_script_keeps_only_stepstone_job_information() -> None:
       article {{ color: rgb(12, 37, 119); padding: 12px; }}
       h1 {{ font-size: 32px; }}
     </style>
-    <article><h1>Senior Software Engineer Java</h1>
+    <article class="js-listing-header"><h1>Senior Software Engineer Java</h1>
       <p>IDnow GmbH</p><button>Jetzt bewerben</button>
       <div data-at="header-company-logo-img"><img src="https://ads.example/logo.png"></div>
     </article>
     <article><h2>Passt dieser Job zu mir?</h2><p>Konto-Werbung</p></article>
-    <article data-at="rebranded-version"><h2>Introduction</h2><p>About IDnow.</p></article>
-    <article data-at="rebranded-version"><h2>Key Responsibilities</h2><p>Build Java services.</p></article>
-    <article data-at="rebranded-version"><p>Your profile</p><h2>Preferred Experience</h2><p>Spring Boot.</p></article>
-    <article data-at="rebranded-version"><h2>Perks &amp; Benefits</h2><p>Remote work.</p></article>
-    <article data-at="rebranded-version"><h2>Gehalt</h2><p>Competitive salary.</p></article>
-    <article><h2>Ähnliche Jobs</h2><p>Unrelated recommendation.</p></article>
+    <div class="at-section-text-introduction"><article><h2>Introduction</h2><p>About IDnow.</p></article></div>
+    <div class="at-section-text-description"><article><h2>Key Responsibilities</h2><p>Build Java services.</p></article></div>
+    <div class="at-section-text-profile"><article><p>Your profile</p><h2>Preferred Experience</h2><p>Spring Boot.</p></article></div>
+    <div class="at-section-text-benefits"><article><h2>Perks &amp; Benefits</h2><p>Remote work.</p></article></div>
+    <div class="at-section-text-gehalt"><article><h2>Gehalt</h2><p>Competitive salary.</p></article></div>
+    <div class="recom-similar"><article><h2>Ähnliche Jobs</h2><p>Unrelated recommendation.</p></article></div>
     <script type="application/ld+json">{json.dumps(detail_payload('14358591')['job'])}</script>
     """
     with sync_api.sync_playwright() as engine:

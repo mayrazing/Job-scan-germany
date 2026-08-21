@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,22 @@ class UnavailableCompanySizeLookup:
     ) -> CompanySizeEvidence:
         del location
         raise CompanySizeLookupError("No reliable employee-count source was found.")
+
+
+def _wait_manual_import_completion(
+    client: TestClient,
+    import_id: str,
+) -> dict[str, object]:
+    for _ in range(80):
+        response = client.get(f"/api/manual-job-imports/{import_id}")
+        assert response.status_code == 200
+        state = response.json()
+        if state.get("status") == "running":
+            time.sleep(0.01)
+            continue
+        assert state.get("status") in {"complete", "failed"}
+        return state
+    raise AssertionError(f"Manual import did not finish: {import_id}")
 
 
 def _job(
@@ -994,8 +1011,16 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
-    assert response.json() == {"job_key": "manual", "status": "saved"}
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    assert isinstance(started["import_id"], str)
+    assert started["progress_percent"] >= 0
+    assert started["resume_id"] == "sha256:" + "a" * 64
+    state = _wait_manual_import_completion(client, started["import_id"])
+    assert state["status"] == "complete"
+    assert state["job_key"] == "manual"
+    assert state["result_status"] == "saved"
     assert len(import_inputs) == 1
     url, config, profile, imported_at = import_inputs[0]
     assert url == "https://careers.example/jobs/manual"
@@ -1070,7 +1095,10 @@ def test_manual_job_import_uses_selected_resume_profile_and_config(
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    _wait_manual_import_completion(client, started["import_id"])
     assert len(import_inputs) == 1
     _url, config, profile, _imported_at = import_inputs[0]
     assert isinstance(config, AppConfig)
@@ -1141,12 +1169,12 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
-    assert response.json() == {
-        "job_key": "manual",
-        "status": "saved",
-        "resume_id": resume_id,
-    }
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    state = _wait_manual_import_completion(client, started["import_id"])
+    assert state["result_status"] == "saved"
+    assert state["resume_id"] == resume_id
     assert len(prepared_inputs) == 1
     assert prepared_inputs[0][1].candidate_name == "backend"
     assert paths.config_toml.read_bytes() == old_config
@@ -1220,7 +1248,10 @@ def test_manual_job_import_persists_company_size_before_saving(
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    _wait_manual_import_completion(client, started["import_id"])
     saved = global_jobs.find("manual")
     assert saved is not None
     assert saved.company_size is not None
@@ -1256,7 +1287,10 @@ def test_manual_job_import_stays_saved_when_company_size_is_unknown(
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    _wait_manual_import_completion(client, started["import_id"])
     saved = global_jobs.find("manual")
     assert saved is not None
     assert saved.user_status is UserStatus.SAVED
@@ -1448,7 +1482,7 @@ def test_manual_job_import_holds_scan_lock_until_import_finishes(tmp_path: Path)
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
     assert lock_available_during_import == [False]
 
 
@@ -1478,8 +1512,13 @@ def test_reimported_manual_job_preserves_existing_global_status(tmp_path: Path) 
             headers=HEADERS,
         )
 
-    assert response.status_code == 201
-    assert response.json() == {"job_key": "manual", "status": "applied"}
+    assert response.status_code == 202
+    started = response.json()
+    assert started["status"] == "running"
+    state = _wait_manual_import_completion(client, started["import_id"])
+    assert state["status"] == "complete"
+    assert state["result_status"] == "applied"
+    
     saved = global_jobs.find("manual")
     assert saved is not None
     assert saved.user_status is UserStatus.APPLIED

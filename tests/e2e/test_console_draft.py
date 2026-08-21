@@ -1837,16 +1837,49 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
     setup_page: object,
 ) -> None:
     posted: list[dict[str, object]] = []
+    import_id = "manual-import-1"
 
     def import_job(route: object) -> None:
         posted.append(json.loads(route.request.post_data))
         route.fulfill(
-            status=201,
+            status=202,
             content_type="application/json",
-            body=json.dumps({"job_key": "manual-42", "status": "saved"}),
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "running",
+                    "step": "queued",
+                    "message": "Manual import started.",
+                    "progress_percent": 2,
+                    "job_key": None,
+                    "result_status": None,
+                    "resume_id": "sha256:" + "a" * 64,
+                    "error": None,
+                }
+            ),
+        )
+
+    def poll_import(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "complete",
+                    "step": "complete",
+                    "message": "Manual import complete.",
+                    "progress_percent": 100,
+                    "job_key": "manual-42",
+                    "result_status": "saved",
+                    "resume_id": "sha256:" + "a" * 64,
+                    "error": None,
+                }
+            ),
         )
 
     setup_page.route("**/api/global-jobs/import", import_job)
+    setup_page.route(f"**/api/manual-job-imports/{import_id}", poll_import)
     setup_page.locator('[data-nav-step="job-tracker"]').click()
     resume_id = "sha256:" + "a" * 64
     setup_page.evaluate(
@@ -1871,6 +1904,7 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
 
 def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
     posted: list[tuple[str, str]] = []
+    import_id = "manual-import-2"
 
     def import_job(route: object) -> None:
         posted.append(
@@ -1880,18 +1914,44 @@ def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
             )
         )
         route.fulfill(
-            status=201,
+            status=202,
             content_type="application/json",
             body=json.dumps(
                 {
-                    "job_key": "manual-42",
-                    "status": "saved",
+                    "import_id": import_id,
+                    "status": "running",
+                    "step": "queued",
+                    "message": "Manual import started.",
+                    "progress_percent": 2,
+                    "job_key": None,
+                    "result_status": None,
                     "resume_id": "sha256:" + "b" * 64,
+                    "error": None,
+                }
+            ),
+        )
+
+    def poll_import(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "complete",
+                    "step": "complete",
+                    "message": "Manual import complete.",
+                    "progress_percent": 100,
+                    "job_key": "manual-42",
+                    "result_status": "saved",
+                    "resume_id": "sha256:" + "b" * 64,
+                    "error": None,
                 }
             ),
         )
 
     setup_page.route("**/api/global-jobs/import-with-resume", import_job)
+    setup_page.route(f"**/api/manual-job-imports/{import_id}", poll_import)
     setup_page.locator('[data-nav-step="job-tracker"]').click()
     setup_page.locator("[data-open-manual-job]").click()
     dialog = setup_page.locator("#manual-job-dialog")

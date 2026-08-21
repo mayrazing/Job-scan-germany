@@ -4,7 +4,11 @@
       method: "POST",
       credentials: "same-origin",
     };
-    if (action === "restore" || action === "snapshot") {
+    if (
+      action === "restore"
+      || action === "snapshot"
+      || action === "snapshot-force"
+    ) {
       return options;
     }
     if (action === "application-resume") {
@@ -745,15 +749,97 @@
     const urlInput = dialog?.querySelector("#manual-job-url");
     const resumeInput = dialog?.querySelector("#manual-job-resume");
     const errorMessage = dialog?.querySelector("[data-manual-job-error]");
+    const progressMessage = dialog?.querySelector("[data-manual-job-progress]");
     const closeButton = dialog?.querySelector("[data-close-manual-job]");
     const submitButton = dialog?.querySelector("[data-submit-manual-job]");
     if (!dialog || !opener || !form || !urlInput || !errorMessage || !submitButton) {
       return;
     }
     let importing = false;
+    const resetManualImportButton = () => {
+      importing = false;
+      form.setAttribute("aria-busy", "false");
+      opener.disabled = false;
+      closeButton?.removeAttribute("disabled");
+      submitButton.disabled = false;
+      resumeInput?.removeAttribute("disabled");
+      submitButton.textContent = "Import to Saved";
+      if (progressMessage) {
+        progressMessage.hidden = true;
+        progressMessage.classList.remove("manual-job-error");
+      }
+    };
+
+    const renderManualImportState = (state) => {
+      if (!progressMessage) return;
+      const stepText = typeof state?.step === "string" ? ` (${state.step})` : "";
+      progressMessage.hidden = false;
+      progressMessage.textContent = state?.message
+        ? `${state.message}${stepText}`
+        : `Manual import in progress${stepText}`;
+      if (state?.status === "failed") {
+        progressMessage.classList.add("manual-job-error");
+      } else {
+        progressMessage.classList.remove("manual-job-error");
+      }
+    };
+
+    const finalizeManualImport = async (state) => {
+      const destination = new URL(window.location.href);
+      if (typeof state?.resume_id === "string") {
+        destination.searchParams.set("resume_id", state.resume_id);
+      }
+      const refreshedDocument = await fetchReviewDocument(destination.href);
+      reconcileGlobalResumeSelection(refreshedDocument);
+      window.history.replaceState(null, "", destination.href);
+      resetManualImportButton();
+      dialog.close();
+    };
+
+    const pollManualImport = async (importId) => {
+      while (true) {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+        let response;
+        try {
+          response = await fetch(
+            `/api/manual-job-imports/${encodeURIComponent(importId)}`,
+            {
+              credentials: "same-origin",
+              signal: AbortSignal.timeout(10_000),
+            },
+          );
+        } catch (_error) {
+          throw new Error(
+            "Connection to manual import progress lost. Return to Job Tracker and try again.",
+          );
+        }
+        if (response.status === 404) {
+          throw new Error(
+            "Manual import state was lost after the service restarted. Return to Job Tracker and try again.",
+          );
+        }
+        if (!response.ok) {
+          throw new Error(await responseError(response));
+        }
+        const state = await response.json();
+        renderManualImportState(state);
+        if (state.status === "complete") {
+          await finalizeManualImport(state);
+          return;
+        }
+        if (state.status === "failed") {
+          throw new Error(state.error || state.message || "Could not import this job page.");
+        }
+      }
+    };
+
     opener.addEventListener("click", () => {
       errorMessage.hidden = true;
       errorMessage.textContent = "";
+      if (progressMessage) {
+        progressMessage.hidden = true;
+        progressMessage.classList.remove("manual-job-error");
+      }
       dialog.showModal();
       urlInput.focus();
     });
@@ -771,8 +857,14 @@
       opener.disabled = true;
       closeButton?.setAttribute("disabled", "");
       submitButton.disabled = true;
+      resumeInput?.setAttribute("disabled", "");
       submitButton.textContent = "Importing...";
       errorMessage.hidden = true;
+      if (progressMessage) {
+        progressMessage.hidden = false;
+        progressMessage.textContent = "Manual import started.";
+        progressMessage.classList.remove("manual-job-error");
+      }
       try {
         const uploadedResume = resumeInput?.files?.[0];
         let endpoint = "/api/global-jobs/import";
@@ -800,38 +892,26 @@
         }
         const response = await fetch(endpoint, options);
         if (!response.ok) {
-          let message = `Request failed (${response.status}).`;
-          try {
-            const payload = await response.json();
-            if (typeof payload.detail === "string") message = payload.detail;
-          } catch (_error) {
-            // Keep the status fallback when the response is not JSON.
-          }
+          const message = await responseError(response);
           throw new Error(message);
         }
-        let imported = null;
-        try {
-          imported = await response.json();
-        } catch (_error) {
-          // Older local responses can still reload the current selection.
+        const state = await response.json();
+        if (!state?.import_id) {
+          throw new Error("Manual import did not return a tracking ID.");
         }
-        if (typeof imported?.resume_id === "string") {
-          const destination = new URL(window.location.href);
-          destination.searchParams.set("resume_id", imported.resume_id);
-          destination.hash = "job-tracker";
-          window.location.assign(destination.toString());
-        } else {
-          window.location.reload();
+        renderManualImportState(state);
+        if (state.status === "complete") {
+          await finalizeManualImport(state);
+          return;
         }
+        if (state.status === "failed") {
+          throw new Error(state.error || state.message || "Could not import this job page.");
+        }
+        await pollManualImport(state.import_id);
       } catch (error) {
         errorMessage.textContent = error.message || "Could not import this job page.";
         errorMessage.hidden = false;
-        importing = false;
-        form.setAttribute("aria-busy", "false");
-        opener.disabled = false;
-        closeButton?.removeAttribute("disabled");
-        submitButton.disabled = false;
-        submitButton.textContent = "Import to Saved";
+        resetManualImportButton();
       }
     });
   };
@@ -859,18 +939,28 @@
     const jobKey = encodeURIComponent(rawJobKey);
     const runId = document.body.dataset.reviewRunId;
     const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
+    const snapshotAction = action === "snapshot-force" ? "snapshot" : action;
+    const forceSuffix = action === "snapshot-force" ? "?force=1" : "";
     const endpoint = statusScope === "global" && (
-      action === "status" || action === "application-resume" || action === "snapshot"
+      action === "status"
+      || action === "application-resume"
+      || action === "snapshot"
+      || action === "snapshot-force"
     )
-      ? `/api/global-jobs/${jobKey}/${action}`
+      ? `/api/global-jobs/${jobKey}/${snapshotAction}${forceSuffix}`
       : runId
-        ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${action}`
-        : `/api/jobs/${jobKey}/${action}`;
+        ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${snapshotAction}${forceSuffix}`
+        : `/api/jobs/${jobKey}/${snapshotAction}${forceSuffix}`;
     const button = form.querySelector('button[type="submit"]');
     if (button?.disabled) return;
     const buttonText = button?.textContent;
     if (button) button.disabled = true;
-    if (button && action === "snapshot") button.textContent = "Generating...";
+    if (
+      button
+      && (action === "snapshot" || action === "snapshot-force")
+    ) {
+      button.textContent = "Generating...";
+    }
     try {
       const response = await fetch(endpoint, requestOptions(action, form));
       if (!response.ok) {

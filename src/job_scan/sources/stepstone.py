@@ -173,31 +173,10 @@ _SNAPSHOT_PAGE_JS = browser_snapshot_script(
   )?.[1];
   const articles = [...document.querySelectorAll("article")];
   const header = articles.find((article) => article.querySelector("h1"));
-  const allowedHeadings = new Set([
-    "introduction",
-    "einleitung",
-    "key responsibilities",
-    "ihre aufgaben",
-    "deine aufgaben",
-    "aufgaben",
-    "your profile",
-    "ihr profil",
-    "dein profil",
-    "anforderungen",
-    "perks & benefits",
-    "benefits",
-    "wir bieten",
-    "gehalt",
-    "salary",
-  ]);
   const sections = articles.filter((article) => {
     if (article === header) return false;
-    const heading = (article.innerText || article.textContent || "")
-      .split(/\n+/)[0]
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLocaleLowerCase("de-DE");
-    return !!heading && allowedHeadings.has(heading);
+    const parentClass = article.parentElement?.className || "";
+    return /(?:^|\s)at-section-text-[^\s]+/.test(parentClass);
   });
   if (!jobId || !header || sections.length === 0) {
     return {status: "unavailable", error_code: "structure_mismatch"};

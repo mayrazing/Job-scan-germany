@@ -12,7 +12,6 @@ from job_scan.domain import (
     MachineStatus,
     PrimaryView,
     Snapshot,
-    SourceKind,
     UserStatus,
 )
 from job_scan.status import effective_status, primary_view
@@ -228,10 +227,7 @@ def _card(job: JobRecord) -> JobCard:
         job_snapshot_error_code=job_snapshot_error_code,
         job_snapshot_triggerable=(
             job_snapshot_id is None
-            and any(
-                occurrence.source is not SourceKind.MANUAL
-                for occurrence in job.source_occurrences
-            )
+            and bool(job.source_occurrences)
         ),
         score=job.score,
         reason=job.reason,

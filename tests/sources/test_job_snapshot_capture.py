@@ -210,16 +210,18 @@ def test_single_job_capture_dispatches_every_automatic_source(
     assert requests[0]["script"]
 
 
-def test_single_job_capture_does_not_open_manual_jobs(
+def test_single_job_capture_uses_full_source_job_key_for_manual_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     capture = getattr(capture_module, "capture_source_job_snapshot_html", None)
     assert capture is not None
+    requests: list[dict[str, object]] = []
 
-    def unexpected_capture(**_request: object) -> str:
-        raise AssertionError("manual job page was opened")
+    def browser_capture(**request: object) -> str:
+        requests.append(request)
+        return "captured"
 
-    monkeypatch.setattr(capture_module, "capture_browser_snapshot", unexpected_capture)
+    monkeypatch.setattr(capture_module, "capture_browser_snapshot", browser_capture)
     occurrence = SourceOccurrence(
         source=SourceKind.MANUAL,
         source_instance="careers.example",
@@ -236,4 +238,8 @@ def test_single_job_capture_does_not_open_manual_jobs(
         detail_complete=True,
     )
 
-    assert capture(occurrence) is None
+    assert capture(occurrence) == "captured"
+    assert len(requests) == 1
+    assert requests[0]["source_name"] == "manual"
+    script = str(requests[0]["script"])
+    assert "manual:careers.example:manual-1" in script

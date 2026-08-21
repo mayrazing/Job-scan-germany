@@ -177,6 +177,9 @@
         {% if job.job_snapshot_id %}
           <div class="job-snapshot-control">
             <a class="btn btn-outline-secondary" href="/api/job-snapshots/{{ job.job_snapshot_id }}" target="_blank" rel="noopener noreferrer" data-job-snapshot>Job snapshot</a>
+            <form class="job-snapshot-regenerate" data-job-action="snapshot-force" data-job-key="{{ job.canonical_key }}">
+              <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-regenerate>Regenerate snapshot</button>
+            </form>
           </div>
         {% elif job.job_snapshot_triggerable %}
           <div class="job-snapshot-control">
@@ -295,6 +298,7 @@
         <small>Leave empty to use the selected resume above.</small>
       </label>
       <p class="manual-job-error" data-manual-job-error role="alert" hidden></p>
+      <p class="manual-job-progress" data-manual-job-progress hidden role="status"></p>
       <div class="manual-job-actions">
         <button type="button" data-close-manual-job>Cancel</button>
         <button type="submit" data-submit-manual-job>Import to Saved</button>

@@ -394,6 +394,55 @@ def test_generate_snapshot_records_an_unavailable_automatic_source(
     assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
 
 
+def test_generate_snapshot_force_replaces_an_existing_snapshot(
+    repository: JsonlRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def capture(occurrence: SourceOccurrence) -> str:
+        calls.append(occurrence.source_occurrence_key)
+        return (
+            "<!doctype html>"
+            f'<html data-job-scan-snapshot="{occurrence.source_job_key}">'
+            "<head><style>body{color:#2557a7}</style></head>"
+            f"<body><main>version {len(calls)}</main></body></html>"
+        )
+
+    monkeypatch.setattr(
+        review_server_module,
+        "capture_source_job_snapshot_html",
+        capture,
+        raising=False,
+    )
+    review_app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN, OTHER_ALLOWED_ORIGIN}),
+    )
+
+    with TestClient(review_app, base_url=ORIGIN) as client:
+        _open_session(client)
+        first = client.post(
+            "/api/jobs/canonical-42/snapshot",
+            headers=_mutation_headers(),
+        )
+        second = client.post(
+            "/api/jobs/canonical-42/snapshot?force=1",
+            headers=_mutation_headers(),
+        )
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+    assert calls == ["linkedin:acme/jobs:REQ-42@1", "linkedin:acme/jobs:REQ-42@1"]
+    occurrence = repository.load().jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is not None
+    assert occurrence.job_snapshot_error_code is None
+    assert JobSnapshotStore(repository.paths.job_snapshots_dir).read(
+        occurrence.job_snapshot.snapshot_id
+    ).endswith(b"<body><main>version 2</main></body></html>")
+
+
 def test_generate_snapshot_records_a_browser_capture_failure(
     repository: JsonlRepository,
     monkeypatch: pytest.MonkeyPatch,
@@ -425,7 +474,7 @@ def test_generate_snapshot_records_a_browser_capture_failure(
     assert occurrence.job_snapshot_error_code == "snapshot_capture_failed"
 
 
-def test_generate_snapshot_rejects_a_manual_only_job_without_opening_its_page(
+def test_generate_snapshot_captures_a_manual_only_job_page(
     repository: JsonlRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,13 +490,18 @@ def test_generate_snapshot_rejects_a_manual_only_job_without_opening_its_page(
 
     repository.mutate(make_manual)
 
-    def unexpected_capture(_occurrence: SourceOccurrence) -> str:
-        raise AssertionError("manual job page was opened")
+    def capture(_occurrence: SourceOccurrence) -> str:
+        return (
+            "<!doctype html>"
+            '<html data-job-scan-snapshot="manual:careers.example:manual-1">'
+            "<head><style>body{color:#2557a7}</style></head>"
+            "<body><main>Backend Engineer</main></body></html>"
+        )
 
     monkeypatch.setattr(
         review_server_module,
         "capture_source_job_snapshot_html",
-        unexpected_capture,
+        capture,
         raising=False,
     )
     review_app = create_review_app(
@@ -463,8 +517,10 @@ def test_generate_snapshot_rejects_a_manual_only_job_without_opening_its_page(
             headers=_mutation_headers(),
         )
 
-    assert response.status_code == 422
-    assert response.json() == {"detail": "Manual jobs do not support snapshots."}
+    assert response.status_code == 204
+    occurrence = repository.load().jobs[0].source_occurrences[0]
+    assert occurrence.job_snapshot is not None
+    assert occurrence.job_snapshot_error_code is None
 
 
 def test_generate_snapshot_updates_only_the_selected_history(

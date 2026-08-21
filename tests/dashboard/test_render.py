@@ -198,6 +198,17 @@ def test_render_shows_snapshot_links_and_automatic_source_triggers() -> None:
     assert saved_link.get_text(" ", strip=True) == "Job snapshot"
     assert saved_link.get("href") == f"/api/job-snapshots/sha256:{'a' * 64}"
     assert saved_link.get("target") == "_blank"
+    regenerate = page.select_one(
+        '[data-job-key="saved-snapshot"] [data-job-snapshot-regenerate]'
+    )
+    assert regenerate is not None
+    assert regenerate.get_text(" ", strip=True) == "Regenerate snapshot"
+    assert (
+        page.select_one(
+            '[data-job-key="saved-snapshot"] [data-job-snapshot-trigger]'
+        )
+        is None
+    )
     assert page.select_one(
         '[data-job-key="unavailable-snapshot"] [data-job-snapshot-unavailable]'
     ).get_text(" ", strip=True) == "Snapshot unavailable"
@@ -214,9 +225,11 @@ def test_render_shows_snapshot_links_and_automatic_source_triggers() -> None:
     assert page.select_one(
         '[data-job-key="saved-snapshot"] [data-job-snapshot-trigger]'
     ) is None
-    assert page.select_one(
+    manual_generate = page.select_one(
         '[data-job-key="manual-without-snapshot"] [data-job-snapshot-trigger]'
-    ) is None
+    )
+    assert manual_generate is not None
+    assert manual_generate.get_text(" ", strip=True) == "Generate snapshot"
 
 
 def test_render_shows_company_industry_method_source_and_jd_evidence() -> None:

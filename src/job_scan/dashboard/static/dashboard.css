@@ -20,7 +20,7 @@ html {
      75.5% of the browser default (16px -> 12.08px) scales type, spacing and
      controls together. Uses a percentage, not a px value, so a user's own
      browser font-size setting still applies. */
-  font-size: 75.5%;
+  font-size: 85%;
   background: var(--paper);
   color: var(--ink);
   scroll-behavior: auto;
@@ -369,6 +369,14 @@ main {
   color: var(--danger);
 }
 
+.manual-job-progress {
+  margin: 0;
+  padding: 0.75rem;
+  border-left: 4px solid var(--action);
+  background: #EDF4FF;
+  color: var(--ink);
+}
+
 .manual-job-actions {
   display: flex;
   flex-wrap: wrap;
@@ -643,6 +651,29 @@ main {
 }
 
 .job-snapshot-control a:hover {
+  border-color: var(--action);
+  background: var(--surface-soft);
+}
+
+.job-snapshot-regenerate {
+  margin: 0;
+}
+
+.job-snapshot-regenerate button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.job-snapshot-regenerate button:hover {
   border-color: var(--action);
   background: var(--surface-soft);
 }

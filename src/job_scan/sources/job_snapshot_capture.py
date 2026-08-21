@@ -26,8 +26,6 @@ def capture_source_job_snapshot_html(
     occurrence: SourceOccurrence,
 ) -> str | None:
     """Capture one stored automatic-source occurrence with its verified DOM rules."""
-    if occurrence.source is SourceKind.MANUAL:
-        return None
     script, source_name = _source_snapshot_script(occurrence)
     return capture_browser_snapshot(
         url=str(occurrence.url),
@@ -123,7 +121,30 @@ def _source_snapshot_script(
 
             return thyssenkrupp_snapshot_script(external_id), "thyssenkrupp"
         case SourceKind.MANUAL:
-            raise ValueError("manual jobs do not have snapshot rules")
+            return _manual_snapshot_script(occurrence.source_job_key), "manual"
+
+
+def _manual_snapshot_script(source_job_key: str) -> str:
+    """Return one generic DOM whitelist for any manually imported job page."""
+    return browser_snapshot_script(
+        r"""
+  const snapshotKey = __EXPECTED_SOURCE_JOB_KEY__;
+  const isChallenge = () => /Just a moment|Access Denied/i.test(document.title || "") ||
+    /Verify you are human|Sicherheitsüberprüfung/i.test(document.body?.innerText || "");
+  if (isChallenge()) return {status: "challenge"};
+  const root = document.querySelector("main") || document.body;
+  if (!root || !(root.innerText || root.textContent || "").trim()) {
+    return {status: "unavailable", error_code: "structure_mismatch"};
+  }
+  return buildJobSnapshot({
+    snapshotKey,
+    title: document.title || root.querySelector("h1")?.innerText?.trim() || "",
+    sourceLabel: "Manual import",
+    accent: "#3b5bdb",
+    roots: [root],
+  });
+""".strip().replace("__EXPECTED_SOURCE_JOB_KEY__", json.dumps(source_job_key))
+    )
 
 _BROWSER_SNAPSHOT_HELPERS_JS = r"""
   const removeResourceUrls = (value) => value.replace(

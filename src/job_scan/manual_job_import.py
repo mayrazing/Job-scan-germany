@@ -434,11 +434,17 @@ class ManualJobImportService:
         config: AppConfig,
         profile: str,
         imported_at: datetime,
+        on_progress: Callable[[str, str], None] | None = None,
     ) -> JobRecord:
         """Return one reviewed JobRecord built from a public job-detail URL."""
+        if on_progress is None:
+            on_progress = lambda _step, _message: None
         safe_url = require_public_job_url(source_url)
+        on_progress("validate", "Validating the provided job URL.")
         page = self._page_reader.read(safe_url)
+        on_progress("read-page", "Reading the rendered job page.")
         facts = self._extractor.extract(page.url, page.title, page.content, config)
+        on_progress("extract", "Extracting one complete job profile from page content.")
         title = _required_fact(facts.title)
         company = _required_fact(facts.company)
         location = _required_fact(facts.location)
@@ -482,6 +488,7 @@ class ManualJobImportService:
             user_status=UserStatus.NEW,
             user_status_updated_at=imported_at,
         )
+        on_progress("review", "Reviewing and scoring job with the saved candidate profile.")
         outcome = self._reviewer.review([job], profile, config)
         review = outcome.accepted.get(job.canonical_job_key)
         if review is not None:
