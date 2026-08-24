@@ -1,164 +1,203 @@
 # job-scan-germany
 
-`job-scan` is a local, Germany-only job discovery and review tool. It reads public job sources plus LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify through the user's connected Chrome session, deduplicates listings, asks either the locally installed Claude Code CLI or a configured Anthropic-compatible API model to create a factual profile and review complete job descriptions, then publishes a local JSONL store and HTML dashboard.
+**[中文](#中文)**
 
-## Scope and assumptions
+## English
 
-- Python 3.11 or newer on Linux or macOS. The data lock requires POSIX `flock`; native scheduling supports Linux cron and macOS launchd.
-- Linux LAN access requires a running Avahi daemon plus `ip` and `avahi-publish-address`. `job-scan review` uses them to publish `job-scan-germany.local`.
-- `country` is fixed to `DE` and `needs_visa_sponsorship` is fixed to `true` by `setup`.
-- Public adapters do not log in, solve CAPTCHA, or bypass access controls. LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify reuse the user's existing read-only Chrome sessions through OpenCLI and never receive the user's passwords.
-- Every source is keyword-driven. Per-company career-page scraping was removed; there is no way to target one company's careers page.
+`job-scan` is a local job discovery and review tool for Germany. It searches for jobs based on your resume, target roles, and preferred locations, removes duplicate listings, uses AI to review complete job descriptions, and presents eligible, uncertain, and excluded jobs in a browser.
 
-## Install
+The project searches only for jobs in Germany and assumes that the candidate needs visa sponsorship. It does not submit applications, contact recruiters, or bypass logins and CAPTCHA challenges.
 
-Create and activate a virtual environment first:
+### What it does
+
+- Searches Bundesagentur für Arbeit, LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify.
+- Builds a candidate profile from a PDF or DOCX resume.
+- Uses Claude Code or an Anthropic-compatible API to compare jobs with the resume.
+- Lets you review, filter, and track jobs in a local web interface.
+- Keeps a separate history record for each web search.
+- Optionally runs a daily scan.
+
+### Requirements
+
+- Linux or macOS.
+- Python 3.11 or newer.
+- A text-based PDF or DOCX resume. OCR for scanned PDFs is not supported.
+- One AI runtime:
+  - Claude Code CLI, installed and authenticated.
+  - An Anthropic-compatible API endpoint, model, and API key.
+- To search LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, or Simplify:
+  - OpenCLI and its Browser Bridge extension.
+  - Chrome must remain open.
+  - Sign in to sites that require an account and complete any CAPTCHA or browser challenge before scanning.
+
+### Installation
+
+Clone or download the project, then run these commands from the project directory:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-```
-
-Editable install from a checkout:
-
-```bash
 python -m pip install -e .
 ```
 
-Install a built wheel:
+Confirm that `job-scan` is installed:
 
 ```bash
-python -m pip install /path/to/job_scan_germany-0.1.0-py3-none-any.whl
+job-scan version
 ```
 
-Claude Code must be installed and authenticated separately when it is the selected AI runtime. Confirm it before setup:
+If you use Claude Code, confirm that it is installed and authenticated:
 
 ```bash
 claude --version
 claude auth status
 ```
 
-LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify discovery require OpenCLI and its Browser Bridge extension. LinkedIn must already be logged in, and the source pages must be accessible without a pending browser challenge in the connected Chrome profile. Chrome must remain open while a scan runs.
+### Start the app
 
-## Data directory
+Keep the Python virtual environment active, then run:
 
-The default data root is `~/.job-scan`. Override it for every command and scheduler entry with `JOB_SCAN_HOME`:
+```bash
+job-scan review
+```
+
+The terminal prints the Setup URL. Open it in a browser:
+
+- Linux normally prints `http://job-scan-germany.local:8765/setup` and a LAN IP fallback.
+- macOS prints `http://127.0.0.1:8765/setup`.
+
+On first use:
+
+1. Upload a PDF or DOCX resume.
+2. Select Claude Code or configure an Anthropic-compatible API.
+3. Enter job titles, locations, German level, and job sources.
+4. Optionally set a daily scan time.
+5. Submit the setup and wait for the scan to finish.
+6. Review and manage the results on the Review page.
+
+Press `Ctrl-C` to stop the local service.
+
+### Common commands
+
+```bash
+# Check the saved configuration and runtime environment
+job-scan doctor
+
+# Run a scan with the saved configuration
+job-scan scan
+
+# Start the local web interface
+job-scan review
+
+# Start on another port
+job-scan review --port 9123
+```
+
+Data is stored in `~/.job-scan` by default. To use another location, set `JOB_SCAN_HOME` before each command:
 
 ```bash
 export JOB_SCAN_HOME=/path/to/job-scan-data
+job-scan review
 ```
 
-Important paths under the data root:
+---
 
-- `config.toml`: validated scan, Claude, and scheduler settings.
-- `ai-config.toml`: Anthropic-compatible API endpoints, model names, and API keys. The file is written with mode `0600`.
-- `profile.md`: factual profile derived from the resume.
-- `output/jobs.jsonl`: authoritative job data for the latest search only.
-- `output/index.html`: dashboard derived from the matching JSONL revision.
-- `history/<run-id>/`: one independent browser-search bundle containing its resume,
-  profile, configuration, jobs, and history metadata.
-- `cache/`: bounded HTTP cache.
-- `logs/scan.jsonl`: privacy-bounded scan summaries.
-- `logs/scheduler.log`: cron or launchd output.
-- `logs/doctor.jsonl`: check names and statuses, written only by `doctor --log`.
+## 中文
 
-Keep the data root private. It contains resume-derived profile text and complete job descriptions.
+`job-scan` 是一个在本机运行的德国职位搜索和筛选工具. 它根据用户的简历, 求职方向和地点偏好搜索职位, 合并重复结果, 使用 AI 阅读完整职位描述, 最后在浏览器中展示适合, 待确认和不适合的职位.
 
-## First run
+项目只搜索德国职位, 并默认求职者需要签证支持. 它不会自动投递职位, 不会联系招聘人员, 也不会绕过登录或验证码.
 
-On Linux, start the local server and open the published Setup URL for the browser flow:
+### 能做什么
 
-```text
-$ job-scan review --port 8765
-Setup: http://job-scan-germany.local:8765/setup
-LAN fallback: http://192.168.3.28:8765
-```
+- 搜索德国联邦就业局, LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland 和 Simplify 的职位.
+- 从 PDF 或 DOCX 简历生成求职画像.
+- 使用 Claude Code 或 Anthropic-compatible API 分析职位与简历的匹配情况.
+- 在本地网页中查看, 筛选和跟踪职位.
+- 保存每次网页搜索的独立历史记录.
+- 可选配置每日自动扫描.
 
-The displayed fallback address is the server's current LAN IPv4 address and will differ by network. The Setup page can save and activate Anthropic-compatible API configurations. Advanced settings selects either Claude Code CLI or the active API model. The page then saves the uploaded resume and validated settings, reconciles the optional daily schedule, runs the real scan, and opens the Review step after publication.
+### 环境要求
 
-On Linux, `review` listens on the server's network interfaces and publishes `job-scan-germany.local` through mDNS. It checks the active LAN IPv4 address every two seconds and republishes the hostname after an address change. `Ctrl-C` stops both the HTTP server and the project-owned mDNS publisher. Devices must be on the same LAN broadcast domain and support mDNS; the hostname is not a public Internet address. Client isolation, separate VLANs, or a host firewall can still block access. On macOS, `review` keeps its existing loopback-only `127.0.0.1` service; this Avahi-based LAN hostname feature is not enabled.
+- Linux 或 macOS.
+- Python 3.11 或更高版本.
+- 文本型 PDF 或 DOCX 简历. 扫描图片型 PDF 不支持 OCR.
+- 以下 AI 运行方式任选一种:
+  - 已安装并登录的 Claude Code CLI.
+  - 可用的 Anthropic-compatible API 地址, 模型和 API key.
+- 搜索 LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland 或 Simplify 时, 还需要:
+  - 已安装 OpenCLI 及其 Browser Bridge 扩展.
+  - 保持 Chrome 开启.
+  - 在 Chrome 中提前登录需要登录的职位网站, 并处理完验证码或浏览器挑战.
 
-macOS output remains:
+### 安装
 
-```text
-Setup: http://127.0.0.1:8765/setup
-```
-
-The CLI setup flow remains available:
-
-`setup` accepts a text-based PDF or DOCX and prompts for all settings. This illustrative transcript uses synthetic data; digest values are abbreviated:
-
-Leave `Locations` empty to search all of Germany.
-
-Leave `Daily local scan time` empty for manual scans only. Add a time later with `scheduler install --time HH:MM`.
-
-```text
-$ export JOB_SCAN_HOME=/path/to/job-scan-data
-$ job-scan setup --resume /path/to/cv.pdf
-Search terms (comma-separated): Backend Engineer,Platform Engineer
-Locations (comma-separated): Berlin,Hamburg
-LinkedIn jobs per search (0 disables, max 100) [10]: 10
-Indeed Deutschland jobs per search (0 disables, max 100) [10]: 10
-StepStone jobs per search (0 disables, max 100) [10]: 10
-Glassdoor DE jobs per search (0 disables, max 100) [10]: 10
-Simplify DE jobs per search (0 disables, max 100) [10]: 10
-German certificate or level: A2
-Claude model: sonnet
-Claude effort (low/medium/high): medium
-Claude batch size: 10
-Daily local scan time (HH:MM, blank for manual scans only):
-Profile: /path/to/job-scan-data/profile.md
-Profile hash: sha256:...
-Config: /path/to/job-scan-data/config.toml
-Resume hash: sha256:...
-$ job-scan doctor
-$ job-scan scan
-$ job-scan review --port 8765
-Setup: http://job-scan-germany.local:8765/setup
-LAN fallback: http://192.168.3.28:8765
-```
-
-Open `http://job-scan-germany.local:8765/setup` while `review` is running.
-
-## Commands
+克隆或下载项目后, 在项目目录中执行:
 
 ```bash
-job-scan setup --resume /path/to/cv.pdf
-job-scan doctor
-job-scan doctor --log
-job-scan scan
-job-scan scan --force-review
-job-scan review
-job-scan review --port 9123
-job-scan scheduler install
-job-scan scheduler install --time 07:15
-job-scan scheduler status
-job-scan scheduler remove
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+确认命令可用:
+
+```bash
 job-scan version
 ```
 
-- `setup` extracts the resume, sends the private prompt to the selected AI runtime, and atomically writes `profile.md` plus `config.toml`.
-- `doctor` performs bounded readiness checks without fetching jobs or reading resume text. Warnings do not fail the command; errors exit with status 1. `--log` appends names and statuses only.
-- `scan` starts from an empty job set, fetches all configured sources, reviews this run's jobs with complete descriptions, replaces the latest JSONL/dashboard snapshot, and appends a bounded run summary. Browser runs also archive an independent history bundle.
-- `review` rebuilds the dashboard from JSONL, serves Setup plus Review at `/setup`, and maintains the LAN-only `job-scan-germany.local` mDNS publication. Review includes independent search history with resume download, result viewing, and deletion. The browser setup flow reuses the same setup, scan, scheduler, repository, and locking services as the CLI.
-- `scheduler install`, `remove`, and `status` select cron on Linux and launchd on macOS. Install and removal are idempotent. `install` requires either a saved time or `--time HH:MM`; `--time` saves the value in `config.toml`. `remove` also clears the saved time. Installation records the current OpenCLI executable and runtime `PATH`, so the scheduled process can find OpenCLI's Node runtime.
+如果使用 Claude Code, 启动前确认它已安装并登录:
 
-## AI privacy boundary
+```bash
+claude --version
+claude auth status
+```
 
-`job-scan` starts the locally installed `claude` executable with tools disabled, safe mode, no session persistence, bounded runtime/output, and private prompt input on stdin. Setup sends extracted resume text and preferences. Review sends `profile.md` plus complete job descriptions selected for review. Prompts, raw Claude stdout/stderr, resume text, and full job descriptions are excluded from operational logs.
+### 启动
 
-When an Anthropic-compatible API runtime is selected, the same prompt data is sent directly to its configured HTTPS endpoint. API keys remain in the local `ai-config.toml` and are not returned by the local HTTP API or included in operational logs.
+保持 Python 虚拟环境已激活, 然后运行:
 
-This boundary does not make AI processing offline. Authentication, network use, and provider-side data handling remain governed by the selected Claude Code or API provider configuration and terms. Review those before supplying personal data.
+```bash
+job-scan review
+```
 
-## Non-goals
+终端会显示 Setup 地址. 在浏览器中打开该地址:
 
-This project does not provide:
+- Linux 通常显示 `http://job-scan-germany.local:8765/setup`, 并同时提供局域网 IP 地址.
+- macOS 显示 `http://127.0.0.1:8765/setup`.
 
-- searches outside Germany or profiles that do not assume visa sponsorship is needed;
-- a cloud service, account system, database, or public Internet exposure;
-- automatic applications, recruiter contact, or email/calendar integration;
-- credential submission, CAPTCHA solving, or access-control bypass; LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify only reuse the user's existing read-only browser sessions;
-- OCR for scanned PDFs;
-- a second factual store in HTML. `output/index.html` is always derived from `output/jobs.jsonl`.
+首次使用时:
+
+1. 上传 PDF 或 DOCX 简历.
+2. 选择 Claude Code 或配置 Anthropic-compatible API.
+3. 填写职位关键词, 地点, 德语水平和职位来源.
+4. 可选设置每日扫描时间.
+5. 提交设置并等待扫描完成.
+6. 在 Review 页面查看和管理结果.
+
+按 `Ctrl-C` 停止本地服务.
+
+### 常用命令
+
+```bash
+# 检查当前配置和运行环境
+job-scan doctor
+
+# 使用已保存的配置立即扫描
+job-scan scan
+
+# 启动本地网页
+job-scan review
+
+# 使用其他端口启动
+job-scan review --port 9123
+```
+
+默认数据保存在 `~/.job-scan`. 如需修改位置, 在每次运行命令前设置 `JOB_SCAN_HOME`:
+
+```bash
+export JOB_SCAN_HOME=/path/to/job-scan-data
+job-scan review
+```
