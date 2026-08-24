@@ -5,7 +5,8 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import urlparse
+from uuid import UUID
 
 import pytest
 
@@ -24,6 +25,7 @@ from job_scan.domain import (
     AvailabilityStatus,
     CompanyIndustryEvidence,
     CompanySizeEvidence,
+    JobNote,
     JobRecord,
     MachineStatus,
     Snapshot,
@@ -31,8 +33,8 @@ from job_scan.domain import (
     SourceOccurrence,
     StoreMeta,
     UserStatus,
+    UserStatusHistoryEntry,
 )
-from job_scan.resume_catalog import ResumeCatalogEntry
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -64,6 +66,7 @@ def ats_history_entry(run_id: str) -> AtsHistoryEntry:
     return AtsHistoryEntry(
         run_id=run_id,
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada Lovelace",
         resume_filename=f"{run_id}.pdf",
         finished_at=datetime(2026, 8, 8, 12, 30, tzinfo=UTC),
@@ -77,6 +80,7 @@ def ats_bundle(run_id: str, *, job_keys: tuple[str, ...]) -> AtsCheckBundle:
     return AtsCheckBundle(
         run_id=run_id,
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada Lovelace",
         resume_filename=f"{run_id}.pdf",
         started_at=datetime(2026, 8, 8, 12, 25, tzinfo=UTC),
@@ -151,6 +155,7 @@ def ats_state(
         "message": f"ATS {stage} <safe>",
         "progress_percent": progress_percent,
         "tasks": tasks,
+        "result_ids": ["ats-1"] if status == "complete" else [],
         "error": error,
     }
 
@@ -357,6 +362,8 @@ CHANGED_SOURCE_FILTER_SNAPSHOT = Snapshot(
     ],
 )
 
+ATS_RESUME_ID = "sha256:" + "a" * 64
+
 GLOBAL_STATUS_SNAPSHOT = Snapshot(
     meta=StoreMeta(data_revision=44),
     jobs=[
@@ -365,14 +372,74 @@ GLOBAL_STATUS_SNAPSHOT = Snapshot(
             (SourceKind.LINKEDIN,),
             score=85,
             german_requirement="none",
-        ).model_copy(update={"user_status": UserStatus.SAVED})
+        ).model_copy(
+            update={
+                "user_status": UserStatus.SAVED,
+                "application_resume_id": ATS_RESUME_ID,
+                "application_resume_filename": "Ada CV.pdf",
+            }
+        )
+    ],
+)
+
+GLOBAL_LIFECYCLE_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=45),
+    jobs=[
+        source_job(
+            "global-interviewing",
+            (SourceKind.LINKEDIN,),
+        ).model_copy(
+            update={
+                "user_status": UserStatus.INTERVIEWING,
+                "user_status_updated_at": datetime(2026, 8, 10, 9, 0, tzinfo=UTC),
+                "user_status_history": [
+                    UserStatusHistoryEntry(
+                        status=UserStatus.SAVED,
+                        changed_at=datetime(2026, 8, 6, 9, 0, tzinfo=UTC),
+                    ),
+                    UserStatusHistoryEntry(
+                        status=UserStatus.APPLIED,
+                        changed_at=datetime(2026, 8, 8, 9, 0, tzinfo=UTC),
+                    ),
+                    UserStatusHistoryEntry(
+                        status=UserStatus.INTERVIEWING,
+                        changed_at=datetime(2026, 8, 10, 9, 0, tzinfo=UTC),
+                    ),
+                ],
+            }
+        )
+    ],
+)
+
+GLOBAL_MANUAL_FACTS_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=46),
+    jobs=[
+        source_job(
+            "global-manual",
+            (SourceKind.LINKEDIN,),
+            score=85,
+            german_requirement="none",
+        ).model_copy(
+            update={
+                "posted_at": None,
+                "user_status": UserStatus.SAVED,
+                "application_resume_id": ATS_RESUME_ID,
+                "application_resume_filename": "Ada CV.pdf",
+            }
+        )
     ],
 )
 
 GLOBAL_ATS_SNAPSHOT = Snapshot(
     meta=StoreMeta(data_revision=45),
     jobs=[
-        job.model_copy(update={"user_status": UserStatus.SAVED})
+        job.model_copy(
+            update={
+                "user_status": UserStatus.SAVED,
+                "application_resume_id": ATS_RESUME_ID,
+                "application_resume_filename": "Ada CV.pdf",
+            }
+        )
         for job in SOURCE_FILTER_SNAPSHOT.jobs
     ],
 )
@@ -444,7 +511,11 @@ def setup_page() -> Iterator[object]:
                         else SOURCE_FILTER_SNAPSHOT
                     ),
                     global_snapshot=(
-                        GLOBAL_STATUS_SNAPSHOT
+                        GLOBAL_LIFECYCLE_SNAPSHOT
+                        if "lifecycle=1" in request.url
+                        else GLOBAL_MANUAL_FACTS_SNAPSHOT
+                        if "manual-facts=1" in request.url
+                        else GLOBAL_STATUS_SNAPSHOT
                         if "global-status=1" in request.url
                         else GLOBAL_ATS_SNAPSHOT
                         if "ats-jobs=1" in request.url
@@ -453,7 +524,6 @@ def setup_page() -> Iterator[object]:
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
 
@@ -468,6 +538,13 @@ def setup_page() -> Iterator[object]:
 def open_ats_jobs_in_tracker(setup_page: object) -> None:
     setup_page.goto("http://draft.test/setup?ats-jobs=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
+
+
+def open_job_details(card: object) -> object:
+    card.locator("[data-job-preview-open-area]").click()
+    dialog = card.locator("[data-job-detail-dialog]")
+    dialog.wait_for(state="visible")
+    return dialog
 
 
 def test_ai_configuration_modal_saves_one_global_selection(setup_page: object) -> None:
@@ -559,7 +636,7 @@ def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> 
     setup_page.locator('[data-nav-step="job-tracker"]').click()
 
     rectangles = setup_page.locator(
-        "#new-run-button, #ats-resume, [data-open-ats]"
+        "#new-run-button, [data-open-ats]"
     ).evaluate_all(
         """controls => controls.map(control => {
           const rectangle = control.getBoundingClientRect();
@@ -570,18 +647,10 @@ def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> 
           };
         })"""
     )
-    file_heights = setup_page.locator("#ats-resume").evaluate(
-        """input => ({
-          control: input.getBoundingClientRect().height,
-          button: parseFloat(getComputedStyle(input, '::file-selector-button').height),
-        })"""
-    )
-
     for edge in ("top", "bottom", "height"):
         assert max(item[edge] for item in rectangles) == pytest.approx(
             min(item[edge] for item in rectangles), abs=0.1
         )
-    assert file_heights["button"] == pytest.approx(file_heights["control"], abs=0.1)
 
 
 def test_job_tracker_tab_shows_global_jobs_outside_review(setup_page: object) -> None:
@@ -616,7 +685,7 @@ def test_ats_selection_is_available_only_in_job_tracker(setup_page: object) -> N
         '[data-review-block="current"] [data-ats-select-job]'
     ).count() == 0
     assert setup_page.locator("#new-run-button").is_visible()
-    assert setup_page.locator("#ats-resume").is_hidden()
+    assert setup_page.locator("#ats-resume").count() == 0
     assert setup_page.locator("[data-open-ats]").is_hidden()
     job_tracker_button = setup_page.locator(
         '#review-actions [data-review-only][data-back-to-job-tracker]'
@@ -631,7 +700,7 @@ def test_ats_selection_is_available_only_in_job_tracker(setup_page: object) -> N
     ).count() == 1
     assert setup_page.locator("#new-run-button").is_visible()
     assert job_tracker_button.is_hidden()
-    assert setup_page.locator("#ats-resume").is_visible()
+    assert setup_page.locator("#ats-resume").count() == 0
     assert setup_page.locator("[data-open-ats]").is_visible()
 
 
@@ -1175,7 +1244,8 @@ def test_company_size_help_opens_on_click(setup_page: object) -> None:
     setup_page.locator("#review-language-requirement").select_option("")
     card = setup_page.locator('article[data-job-key="bosch-only"]')
 
-    card.locator("[data-company-size-help]").click()
+    dialog = open_job_details(card)
+    dialog.locator("[data-company-size-help]").click()
 
     tooltip = setup_page.locator(".tooltip.show .tooltip-inner")
     assert tooltip.text_content() == (
@@ -1203,14 +1273,15 @@ def test_company_size_search_reports_lookup_failure_on_the_selected_card(
     setup_page.locator("#review-language-requirement").select_option("")
     card = setup_page.locator('article[data-job-key="bosch-only"]')
 
-    card.locator("[data-company-size-search]").click()
+    dialog = open_job_details(card)
+    dialog.locator("[data-company-size-search]").click()
 
-    error = card.locator(".company-size-search-error")
+    error = dialog.locator(".company-size-search-error")
     error.wait_for(state="visible")
     assert error.text_content() == "AI could not verify this company's employee count."
     assert error.is_visible()
-    assert card.locator("[data-company-size-search]").is_enabled()
-    assert card.locator("[data-company-size-search]").text_content() == "AI Search"
+    assert dialog.locator("[data-company-size-search]").is_enabled()
+    assert dialog.locator("[data-company-size-search]").text_content() == "AI Search"
     assert requested == ["http://draft.test/api/jobs/bosch-only/company-size"]
 
 
@@ -1230,7 +1301,7 @@ def test_global_company_size_search_uses_the_global_job_endpoint(
         '[data-review-block="global"] article[data-job-key="global-saved"]'
     )
 
-    global_card.locator("[data-company-size-search]").click()
+    open_job_details(global_card).locator("[data-company-size-search]").click()
     setup_page.wait_for_load_state("networkidle")
 
     assert requested == [
@@ -1252,10 +1323,11 @@ def test_global_job_delete_confirms_and_uses_the_global_endpoint(
     )
     setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    delete_button = setup_page.locator(
+    global_card = setup_page.locator(
         '[data-review-block="global"] '
-        'article[data-job-key="global-saved"] [data-global-job-delete]'
+        'article[data-job-key="global-saved"]'
     )
+    delete_button = open_job_details(global_card).locator("[data-global-job-delete]")
 
     with setup_page.expect_request(
         "**/api/global-jobs/global-saved"
@@ -1298,7 +1370,6 @@ def test_status_change_updates_review_without_page_navigation(
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
             return
@@ -1315,7 +1386,7 @@ def test_status_change_updates_review_without_page_navigation(
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     global_review = setup_page.locator('[data-review-block="global"]')
     status_form = global_review.locator(
-        'article[data-job-key="global-saved"] [data-job-action="status"]'
+        'article[data-job-key="global-saved"] .job-preview-status-form'
     )
 
     status_form.locator('select[name="status"]').select_option("interviewing")
@@ -1345,17 +1416,362 @@ def test_status_change_updates_review_without_page_navigation(
     )
 
 
-def test_global_status_request_includes_the_selected_resume(
+def test_lifecycle_date_change_checks_the_current_adjacent_nodes(
     setup_page: object,
 ) -> None:
-    resume_id = "sha256:" + "a" * 64
-    resume = ResumeCatalogEntry(
-        resume_id=resume_id,
-        profile_hash="sha256:" + "b" * 64,
-        candidate_name="Backend CV",
-        filename="backend.pdf",
-        created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
+    posted: list[dict[str, str]] = []
+    alerts: list[str] = []
+
+    def save_lifecycle_date(route: object) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=204, body="")
+
+    setup_page.route(
+        "**/api/global-jobs/global-interviewing/lifecycle/*/date",
+        save_lifecycle_date,
     )
+    setup_page.on(
+        "dialog",
+        lambda dialog: (alerts.append(dialog.message), dialog.accept()),
+    )
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="interviewing"]'
+    ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-interviewing"]'
+    )
+    dialog = open_job_details(card)
+    middle = dialog.locator(
+        '[data-lifecycle-date-input][data-lifecycle-event-index="1"]'
+    ).first
+
+    middle.fill("2026-08-05")
+    setup_page.wait_for_timeout(100)
+
+    assert middle.input_value() == "2026-08-08"
+    assert posted == []
+
+    middle.fill("2026-08-11")
+    setup_page.wait_for_timeout(100)
+
+    assert middle.input_value() == "2026-08-08"
+    assert posted == []
+
+    middle.fill("2026-08-09")
+    setup_page.wait_for_timeout(100)
+
+    last = dialog.locator(
+        '[data-lifecycle-date-input][data-lifecycle-event-index="2"]'
+    ).first
+    last.fill("2026-08-08")
+    setup_page.wait_for_timeout(100)
+
+    assert last.input_value() == "2026-08-10"
+    assert posted == [{"changed_on": "2026-08-09"}]
+    assert len(alerts) == 3
+
+
+def test_unknown_facts_save_without_a_page_refresh(setup_page: object) -> None:
+    posted: list[dict[str, object]] = []
+
+    def save_fact(route: object) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=204, body="")
+
+    setup_page.route(
+        "**/api/global-jobs/global-manual/facts",
+        save_fact,
+    )
+    setup_page.goto("http://draft.test/setup?manual-facts=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-manual"]'
+    )
+    detail = open_job_details(card)
+
+    for field_name, value in (
+        ("posted_at", "2026-08-12"),
+        ("company_size", "4200"),
+        ("company_industry", "Logistics"),
+    ):
+        detail.locator(f'[data-manual-fact-open="{field_name}"]').click()
+        editor = detail.locator(
+            f'[data-manual-fact-dialog][data-manual-fact-field="{field_name}"]'
+        )
+        editor.locator('input[name="value"]').fill(value)
+        editor.locator("[data-manual-fact-save]").click()
+        editor.wait_for(state="hidden")
+        assert detail.is_visible()
+
+    assert setup_page.url == "http://draft.test/setup?manual-facts=1#job-tracker"
+    assert card.locator(".job-preview-posted").text_content() == (
+        "Posted: 2026-08-12"
+    )
+    assert card.get_attribute("data-posted-at") == "2026-08-12"
+    assert card.get_attribute("data-company-size-minimum") == "4200"
+    assert card.get_attribute("data-company-size-maximum") == "4200"
+    assert card.get_attribute("data-company-industry") == "Logistics"
+    company_size = detail.locator('[data-manual-fact="company_size"]')
+    assert company_size.locator("[data-manual-fact-value]").text_content() == (
+        "4,200 employees"
+    )
+    assert company_size.locator("[data-manual-fact-provenance]").text_content() == (
+        " · Manually added"
+    )
+    company_industry = detail.locator('[data-manual-fact="company_industry"]')
+    assert company_industry.locator("[data-manual-fact-value]").text_content() == (
+        "Logistics"
+    )
+    assert company_industry.locator(
+        "[data-manual-fact-provenance]"
+    ).text_content() == " · Manually added"
+    assert posted == [
+        {"posted_at": "2026-08-12"},
+        {"company_size": 4200},
+        {"company_industry": "Logistics"},
+    ]
+
+
+def test_lifecycle_date_opens_picker_on_first_click(setup_page: object) -> None:
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="interviewing"]'
+    ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-interviewing"]'
+    )
+    dialog = open_job_details(card)
+    date_input = dialog.locator("[data-lifecycle-date-input]").first
+    input_box = date_input.bounding_box()
+
+    assert input_box is not None
+    setup_page.mouse.click(
+        input_box["x"] + (input_box["width"] / 2),
+        input_box["y"] + (input_box["height"] / 2),
+    )
+    setup_page.keyboard.press("Escape")
+
+    assert dialog.is_visible()
+
+
+def test_saved_lifecycle_date_updates_job_tracker_added_date(
+    setup_page: object,
+) -> None:
+    posted: list[dict[str, str]] = []
+
+    def save_lifecycle_date(route: object) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=204, body="")
+
+    setup_page.route(
+        "**/api/global-jobs/global-interviewing/lifecycle/0/date",
+        save_lifecycle_date,
+    )
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="interviewing"]'
+    ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-interviewing"]'
+    )
+    added = card.locator("[data-job-preview-added]")
+
+    assert added.text_content() == "Added: 2026-08-06"
+
+    dialog = open_job_details(card)
+    dialog.locator(
+        '[data-lifecycle-date-input][data-lifecycle-event-index="0"]'
+    ).first.fill("2026-08-07")
+    setup_page.wait_for_timeout(100)
+
+    assert added.text_content() == "Added: 2026-08-07"
+    assert posted == [{"changed_on": "2026-08-07"}]
+
+
+def test_lifecycle_node_delete_requires_confirmation_and_preserves_saved(
+    setup_page: object,
+) -> None:
+    deleted: list[str] = []
+    alerts: list[str] = []
+    lifecycle_deleted = False
+    lifecycle_job = GLOBAL_LIFECYCLE_SNAPSHOT.jobs[0]
+    refreshed_lifecycle = Snapshot(
+        meta=StoreMeta(data_revision=46),
+        jobs=[
+            lifecycle_job.model_copy(
+                update={
+                    "user_status_history": [
+                        lifecycle_job.user_status_history[0],
+                        lifecycle_job.user_status_history[2],
+                    ]
+                }
+            )
+        ],
+    )
+
+    def serve_lifecycle_page(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=(
+                    refreshed_lifecycle
+                    if lifecycle_deleted
+                    else GLOBAL_LIFECYCLE_SNAPSHOT
+                ),
+                ai_providers=AI_PROVIDERS,
+                ats_history=ATS_HISTORY,
+                selected_ats=SELECTED_ATS,
+            ),
+        )
+
+    def delete_lifecycle_node(route: object) -> None:
+        nonlocal lifecycle_deleted
+        deleted.append(route.request.url)
+        lifecycle_deleted = True
+        route.fulfill(status=204, body="")
+
+    setup_page.route("**/setup?lifecycle=1", serve_lifecycle_page)
+    setup_page.route(
+        "**/api/global-jobs/global-interviewing/lifecycle/1",
+        delete_lifecycle_node,
+    )
+    setup_page.on(
+        "dialog",
+        lambda dialog: (alerts.append(dialog.message), dialog.accept()),
+    )
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="interviewing"]'
+    ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-interviewing"]'
+    )
+    job_dialog = open_job_details(card)
+    saved = job_dialog.locator(
+        '[data-lifecycle-step][data-lifecycle-event-index="0"] strong'
+    )
+    applied = job_dialog.locator(
+        '[data-lifecycle-step][data-lifecycle-event-index="1"] strong'
+    )
+    delete_dialog = card.locator("[data-lifecycle-delete-dialog]")
+
+    saved.dblclick()
+
+    assert alerts == [
+        "Saved is the lifecycle starting point and cannot be deleted."
+    ]
+    assert not delete_dialog.is_visible()
+
+    applied.dblclick()
+    assert delete_dialog.is_visible()
+    assert delete_dialog.locator("[data-lifecycle-delete-status]").text_content() == (
+        "Applied"
+    )
+    delete_dialog.locator("[data-cancel-lifecycle-delete]").click()
+
+    assert not delete_dialog.is_visible()
+    assert deleted == []
+
+    applied.dblclick()
+    delete_dialog.locator("[data-confirm-lifecycle-delete]").click()
+    job_dialog.locator(
+        '[data-lifecycle-step][data-lifecycle-status="applied"]'
+    ).wait_for(state="detached")
+
+    assert deleted == [
+        "http://draft.test/api/global-jobs/global-interviewing/lifecycle/1"
+    ]
+    assert job_dialog.is_visible()
+    assert not delete_dialog.is_visible()
+    assert job_dialog.locator("[data-lifecycle-step]").evaluate_all(
+        "steps => steps.map(step => step.dataset.lifecycleStatus)"
+    ) == ["saved", "interviewing"]
+
+    job_dialog.locator(
+        '[data-lifecycle-step][data-lifecycle-status="interviewing"] strong'
+    ).dblclick()
+
+    assert delete_dialog.is_visible()
+    assert delete_dialog.locator("[data-confirm-lifecycle-delete]").is_enabled()
+
+
+def test_job_tracker_card_drag_to_group_updates_status(
+    setup_page: object,
+) -> None:
+    updated_global = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={"user_status": UserStatus.APPLIED}
+            )
+        ],
+    )
+    posted: list[dict[str, object]] = []
+
+    def respond_after_card_drop(route: object) -> None:
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-saved/status"):
+            posted.append(request.post_data_json)
+            route.fulfill(status=204, body="")
+            return
+        if posted and request.method == "GET" and "/setup" in request.url:
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    SOURCE_FILTER_SNAPSHOT,
+                    global_snapshot=updated_global,
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_after_card_drop)
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    assert setup_page.locator(
+        '[data-review-block="current"] [data-job-drag-source]'
+    ).count() == 0
+    global_review = setup_page.locator('[data-review-block="global"]')
+    card = global_review.locator(
+        '#saved article[data-job-key="global-saved"]'
+    )
+    target = global_review.locator('[data-review-group-tab="applied"]')
+
+    assert card.get_attribute("draggable") == "true"
+    card.drag_to(target)
+
+    applied_card = global_review.locator(
+        '#applied article[data-job-key="global-saved"]'
+    )
+    applied_card.wait_for(state="attached")
+    assert posted == [{"status": "applied"}]
+    assert global_review.locator(
+        '[data-review-group-count="saved"]'
+    ).text_content() == "0"
+    assert global_review.locator(
+        '[data-review-group-count="applied"]'
+    ).text_content() == "1"
+    assert global_review.locator(
+        '[data-review-group-tab="saved"]'
+    ).get_attribute("aria-current") == "page"
+
+    target.click()
+    applied_card.drag_to(target)
+    setup_page.wait_for_timeout(100)
+    assert posted == [{"status": "applied"}]
+
+
+def test_global_status_request_does_not_replace_the_job_resume(
+    setup_page: object,
+) -> None:
     posted: list[dict[str, object]] = []
 
     def serve_resume_tracker(route: object) -> None:
@@ -1373,8 +1789,6 @@ def test_global_status_request_includes_the_selected_resume(
             body=render_console(
                 SOURCE_FILTER_SNAPSHOT,
                 global_snapshot=GLOBAL_STATUS_SNAPSHOT,
-                resume_catalog=[resume],
-                selected_resume_id=resume_id,
             ),
         )
 
@@ -1383,37 +1797,20 @@ def test_global_status_request_includes_the_selected_resume(
     setup_page.wait_for_load_state("networkidle")
     form = setup_page.locator(
         '[data-review-block="global"] '
-        '[data-job-key="global-saved"] [data-job-action="status"]'
+        '[data-job-key="global-saved"] .job-preview-status-form'
     )
 
     form.locator('select[name="status"]').select_option("applied")
     form.locator('button[type="submit"]').click()
     setup_page.wait_for_timeout(100)
 
-    assert posted == [{"status": "applied", "resume_id": resume_id}]
+    assert posted == [{"status": "applied"}]
 
 
-def test_application_resume_correction_posts_without_page_navigation(
+def test_job_tracker_omits_saved_resume_picker(
     setup_page: object,
 ) -> None:
     resume_a = "sha256:" + "a" * 64
-    resume_b = "sha256:" + "b" * 64
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=resume_a,
-            profile_hash="sha256:" + "c" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
-        ),
-        ResumeCatalogEntry(
-            resume_id=resume_b,
-            profile_hash="sha256:" + "d" * 64,
-            candidate_name="Platform CV",
-            filename="platform.pdf",
-            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
-        ),
-    ]
     tracked = Snapshot(
         meta=StoreMeta(data_revision=45),
         jobs=[
@@ -1421,20 +1818,13 @@ def test_application_resume_correction_posts_without_page_navigation(
                 update={
                     "user_status": UserStatus.APPLIED,
                     "application_resume_id": resume_a,
+                    "application_resume_filename": "backend.pdf",
                 }
             )
         ],
     )
-    posted: list[dict[str, object]] = []
-
-    def serve_resume_correction(route: object) -> None:
+    def serve_resume_picker_page(route: object) -> None:
         request = route.request
-        if request.url.endswith(
-            "/api/global-jobs/global-saved/application-resume"
-        ):
-            posted.append(request.post_data_json)
-            route.fulfill(status=204, body="")
-            return
         if "resume-correction=1" not in request.url:
             route.fallback()
             return
@@ -1444,152 +1834,304 @@ def test_application_resume_correction_posts_without_page_navigation(
             body=render_console(
                 SOURCE_FILTER_SNAPSHOT,
                 global_snapshot=tracked,
-                resume_catalog=resumes,
-                selected_resume_id=resume_a,
             ),
         )
 
-    setup_page.route("**/*", serve_resume_correction)
+    setup_page.route("**/*", serve_resume_picker_page)
     setup_page.goto("http://draft.test/setup?resume-correction=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
     setup_page.locator(
         '[data-review-block="global"] [data-review-group-tab="applied"]'
     ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] '
+        '[data-job-key="global-saved"]'
+    )
+    detail = open_job_details(card)
+
+    assert detail.locator('[data-job-action="application-resume"]').count() == 0
+    assert detail.get_by_text("Use saved resume").count() == 0
+    assert detail.get_by_text("Change resume").count() == 0
+
+
+def test_job_tracker_resume_upload_posts_without_page_navigation(
+    setup_page: object,
+) -> None:
+    resume_id = "sha256:" + "a" * 64
+    tracked = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "application_resume_id": resume_id,
+                    "application_resume_filename": "backend.pdf",
+                }
+            )
+        ],
+    )
+    refreshed = Snapshot(
+        meta=StoreMeta(data_revision=46),
+        jobs=[
+            tracked.jobs[0].model_copy(
+                update={"application_resume_filename": "updated.pdf"}
+            )
+        ],
+    )
+    visible_snapshot = [tracked]
+    posted: list[tuple[str, str]] = []
+
+    def serve_resume_upload(route: object) -> None:
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-saved/resume"):
+            posted.append(
+                (
+                    request.headers.get("content-type", ""),
+                    request.post_data or "",
+                )
+            )
+            visible_snapshot[0] = refreshed
+            route.fulfill(status=204, body="")
+            return
+        if "resume-upload=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=visible_snapshot[0],
+            ),
+        )
+
+    setup_page.route("**/*", serve_resume_upload)
+    setup_page.goto("http://draft.test/setup?resume-upload=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
-    form = setup_page.locator(
-        '[data-review-block="global"] '
-        '[data-job-key="global-saved"] '
-        '[data-job-action="application-resume"]'
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
     )
+    ats_checkbox = card.locator("[data-ats-select-job]")
+    ats_checkbox.check()
+    detail = open_job_details(card)
+    form = detail.locator('[data-job-action="resume"]')
 
-    form.locator('select[name="resume_id"]').select_option(resume_b)
+    with setup_page.expect_file_chooser() as chooser_info:
+        form.locator("[data-job-resume-replace]").click()
+    chooser_info.value.set_files(
+        {
+            "name": "updated.pdf",
+            "mimeType": "application/pdf",
+            "buffer": b"UPDATED RESUME",
+        }
+    )
+    setup_page.wait_for_timeout(100)
+
+    assert len(posted) == 1
+    assert posted[0][0].startswith("multipart/form-data;")
+    assert "updated.pdf" in posted[0][1]
+    assert navigations == []
+    assert detail.is_visible()
+    assert detail.locator("[data-job-resume-name]").inner_text() == "updated.pdf"
+    assert ats_checkbox.is_checked()
+
+
+def test_job_tracker_notes_add_edit_and_delete_without_closing_details(
+    setup_page: object,
+) -> None:
+    first_note_id = UUID("11111111-1111-4111-8111-111111111111")
+    second_note_id = UUID("22222222-2222-4222-8222-222222222222")
+    tracked = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "notes": [
+                        JobNote(
+                            id=first_note_id,
+                            content="Initial note",
+                            created_at=NOW,
+                        )
+                    ]
+                }
+            )
+        ],
+    )
+    visible_snapshot = [tracked]
+    requests: list[tuple[str, str]] = []
+
+    def serve_notes(route: object) -> None:
+        request = route.request
+        path = urlparse(request.url).path
+        notes_path = "/api/global-jobs/global-saved/notes"
+        if path == notes_path or path.startswith(f"{notes_path}/"):
+            requests.append((request.method, path))
+            job = visible_snapshot[0].jobs[0].model_copy(deep=True)
+            if request.method == "POST":
+                job.notes.append(
+                    JobNote(
+                        id=second_note_id,
+                        content=request.post_data_json["content"],
+                        created_at=NOW + timedelta(days=1),
+                    )
+                )
+            elif request.method == "PUT":
+                note_id = UUID(path.rsplit("/", 1)[-1])
+                note = next(item for item in job.notes if item.id == note_id)
+                note.content = request.post_data_json["content"]
+            elif request.method == "DELETE":
+                note_id = UUID(path.rsplit("/", 1)[-1])
+                job.notes = [item for item in job.notes if item.id != note_id]
+            visible_snapshot[0] = Snapshot(
+                meta=StoreMeta(
+                    data_revision=visible_snapshot[0].meta.data_revision + 1
+                ),
+                jobs=[job],
+            )
+            route.fulfill(status=204, body="")
+            return
+        if "notes-edit=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=visible_snapshot[0],
+            ),
+        )
+
+    setup_page.route("**/*", serve_notes)
+    setup_page.goto("http://draft.test/setup?notes-edit=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
+    )
+    detail = open_job_details(card)
+
+    detail.locator("[data-job-note-add]").click()
+    editor = card.locator("[data-job-note-dialog]")
+    assert editor.is_visible()
+    editor.locator("[data-job-note-input]").fill("Second note")
+    editor.locator("[data-job-note-save]").click()
+    detail.get_by_text("Second note", exact=True).wait_for()
+    assert detail.is_visible()
+    assert detail.locator(
+        f'[data-job-note][data-note-id="{second_note_id}"] [data-job-note-date]'
+    ).inner_text() == "2026-08-07"
+
+    first_note = detail.locator(
+        f'[data-job-note][data-note-id="{first_note_id}"]'
+    )
+    first_note.locator("[data-job-note-edit]").click()
+    editor.locator("[data-job-note-input]").fill("Edited initial note")
+    editor.locator("[data-job-note-save]").click()
+    detail.get_by_text("Edited initial note", exact=True).wait_for()
+    assert detail.is_visible()
+    assert first_note.locator("[data-job-note-date]").inner_text() == "2026-08-06"
+
+    second_note = detail.locator(
+        f'[data-job-note][data-note-id="{second_note_id}"]'
+    )
+    second_note.locator("[data-job-note-delete]").click()
+    delete_dialog = card.locator("[data-job-note-delete-dialog]")
+    assert delete_dialog.is_visible()
+    delete_dialog.locator("[data-job-note-delete-confirm]").click()
+    second_note.wait_for(state="detached")
+
+    assert detail.is_visible()
+    assert detail.locator("[data-job-note]").count() == 1
+    assert requests == [
+        ("POST", "/api/global-jobs/global-saved/notes"),
+        ("PUT", f"/api/global-jobs/global-saved/notes/{first_note_id}"),
+        ("DELETE", f"/api/global-jobs/global-saved/notes/{second_note_id}"),
+    ]
+
+
+def test_job_tracker_salary_values_post_without_page_navigation(
+    setup_page: object,
+) -> None:
+    posted: list[dict[str, object]] = []
+
+    def serve_salary_update(route: object) -> None:
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-saved/salary"):
+            posted.append(request.post_data_json)
+            route.fulfill(status=204, body="")
+            return
+        if "salary-edit=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=GLOBAL_STATUS_SNAPSHOT,
+            ),
+        )
+
+    setup_page.route("**/*", serve_salary_update)
+    setup_page.goto("http://draft.test/setup?salary-edit=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    navigations: list[str] = []
+    setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
+    )
+    form = open_job_details(card).locator('[data-job-action="salary"]')
+
+    form.locator('input[name="expected_salary"]').fill("5,500 EUR")
+    form.locator('select[name="expected_salary_period"]').select_option("month")
+    form.locator('input[name="offer_salary"]').fill("70,000 EUR")
+    form.locator('select[name="offer_salary_period"]').select_option("year")
     form.locator('button[type="submit"]').click()
     setup_page.wait_for_timeout(100)
 
-    assert posted == [{"resume_id": resume_b}]
+    assert posted == [
+        {
+            "expected_salary": "5,500 EUR",
+            "expected_salary_period": "month",
+            "offer_salary": "70,000 EUR",
+            "offer_salary_period": "year",
+        }
+    ]
     assert navigations == []
 
 
-def test_global_resume_selection_updates_only_global_review(
-    setup_page: object,
-) -> None:
-    first_resume_id = "sha256:" + "a" * 64
-    second_resume_id = "sha256:" + "b" * 64
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=first_resume_id,
-            profile_hash="sha256:" + "c" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
-        ),
-        ResumeCatalogEntry(
-            resume_id=second_resume_id,
-            profile_hash="sha256:" + "d" * 64,
-            candidate_name="Platform CV",
-            filename="platform.pdf",
-            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
-        ),
-    ]
-    second_global_snapshot = Snapshot(
-        meta=StoreMeta(data_revision=45),
-        jobs=[
-            source_job(
-                "global-applied",
-                (SourceKind.STEPSTONE,),
-                score=90,
-                german_requirement="none",
-            ).model_copy(update={"user_status": UserStatus.APPLIED})
-        ],
-    )
-
-    def respond_to_resume_selection(route: object) -> None:
-        request = route.request
-        if request.method == "GET" and "/setup" in request.url:
-            selected_resume_id = parse_qs(urlparse(request.url).query).get(
-                "resume_id", [first_resume_id]
-            )[0]
-            selected_second = selected_resume_id == second_resume_id
-            route.fulfill(
-                status=200,
-                content_type="text/html",
-                body=render_console(
-                    SOURCE_FILTER_SNAPSHOT,
-                    global_snapshot=(
-                        second_global_snapshot
-                        if selected_second
-                        else GLOBAL_STATUS_SNAPSHOT
-                    ),
-                    resume_catalog=resumes,
-                    selected_resume_id=selected_resume_id,
-                    ai_providers=AI_PROVIDERS,
-                    ats_history=ATS_HISTORY,
-                    selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
-                ),
-            )
-            return
-        route.fallback()
-
-    setup_page.route("**/*", respond_to_resume_selection)
-    setup_page.goto(
-        f"http://draft.test/setup?resume_id={quote(first_resume_id)}#review"
-    )
+def test_job_detail_save_buttons_show_saving_animation(setup_page: object) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.evaluate(
-        "document.querySelector('#source-filter').tomselect.setValue(['linkedin'])"
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
     )
-    current_review = setup_page.locator('[data-review-block="current"]')
-    global_review = setup_page.locator('[data-review-block="global"]')
-    current_review.locator('[data-review-group-tab="excluded"]').click()
+    detail = open_job_details(card)
+    setup_page.evaluate("window.fetch = () => new Promise(() => {});")
+
+    for action in ("status", "salary"):
+        button = detail.locator(
+            f'[data-job-action="{action}"] button[type="submit"]'
+        )
+        button.click()
+        assert button.is_disabled()
+        assert button.get_attribute("class") == "is-saving"
+        assert button.get_text() == "Saving..."
+        assert button.evaluate(
+            "button => getComputedStyle(button, '::before').animationName"
+        ) == "job-save-spin"
+
+
+def test_job_tracker_omits_global_resume_selection(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="job-tracker"]').click()
-    global_review.locator('[data-review-group-tab="applied"]').click()
-    setup_page.locator("body").evaluate(
-        "body => { body.dataset.resumeLocalMarker = 'preserved'; }"
-    )
 
-    resume_select = global_review.locator("[data-global-resume-select]")
-    resume_select.select_option(second_resume_id)
-
-    global_review.locator(
-        'article[data-job-key="global-applied"]'
-    ).wait_for(state="visible")
-    assert global_review.locator(
-        "[data-global-resume-select]"
-    ).input_value() == second_resume_id
-    assert setup_page.locator("body").get_attribute(
-        "data-resume-local-marker"
-    ) == "preserved"
-    assert setup_page.evaluate(
-        "document.querySelector('#source-filter').tomselect.items"
-    ) == ["linkedin"]
-    assert current_review.locator(
-        '[data-review-group-tab="excluded"]'
-    ).get_attribute("aria-current") == "page"
-    assert global_review.locator(
-        '[data-review-group-tab="applied"]'
-    ).get_attribute("aria-current") == "page"
-    assert global_review.locator(
-        'article[data-job-key="global-saved"]'
-    ).count() == 0
-    assert global_review.locator(
-        '[data-review-group-count="saved"]'
-    ).text_content() == "0"
-    assert global_review.locator(
-        '[data-review-group-count="applied"]'
-    ).text_content() == "1"
-    assert setup_page.locator("body").get_attribute(
-        "data-selected-resume-id"
-    ) == second_resume_id
-    assert parse_qs(urlparse(setup_page.url).query)["resume_id"] == [
-        second_resume_id
-    ]
-    assert urlparse(setup_page.url).fragment == "applied"
-    assert setup_page.locator("#job-tracker-view").is_visible()
+    global_review = setup_page.locator('[data-review-block="global"]')
+    assert global_review.locator("[data-global-resume-select]").count() == 0
+    assert global_review.locator(".global-resume-section").count() == 0
 
 
-def test_status_change_exposes_ats_selection_only_after_job_enters_tracker(
+def test_status_change_requires_resume_upload_before_ats_selection(
     setup_page: object,
 ) -> None:
     current_job = source_job(
@@ -1626,7 +2168,6 @@ def test_status_change_exposes_ats_selection_only_after_job_enters_tracker(
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
             return
@@ -1640,7 +2181,7 @@ def test_status_change_exposes_ats_selection_only_after_job_enters_tracker(
         'article[data-job-key="current-status-local"]'
     )
     assert current_card.locator("[data-ats-select-job]").count() == 0
-    status_form = current_card.locator('[data-job-action="status"]')
+    status_form = current_card.locator(".job-preview-status-form")
     status_form.locator('select[name="status"]').select_option("saved")
 
     status_form.locator('button[type="submit"]').click()
@@ -1654,10 +2195,8 @@ def test_status_change_exposes_ats_selection_only_after_job_enters_tracker(
     assert current_card.count() == 0
     selector = global_card.locator("[data-ats-select-job]")
     assert not selector.is_checked()
-    selector.check()
-    assert setup_page.locator("[data-open-ats]").text_content() == (
-        "Check 1 selected jobs"
-    )
+    assert selector.is_disabled()
+    assert global_card.get_by_text("No resume").count() == 1
 
 
 def test_restore_updates_only_the_affected_review_card(
@@ -1696,7 +2235,6 @@ def test_restore_updates_only_the_affected_review_card(
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
             return
@@ -1710,8 +2248,10 @@ def test_restore_updates_only_the_affected_review_card(
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
 
-    current_review.locator(
-        '#excluded article[data-job-key="excluded-local"] '
+    excluded_card = current_review.locator(
+        '#excluded article[data-job-key="excluded-local"]'
+    )
+    open_job_details(excluded_card).locator(
         '[data-job-action="restore"] button'
     ).click()
 
@@ -1720,7 +2260,7 @@ def test_restore_updates_only_the_affected_review_card(
     )
     restored_card.wait_for(state="attached")
     assert navigations == []
-    assert restored_card.locator(".restored-label").text_content() == "Restored"
+    assert restored_card.locator(".job-preview-restored").text_content() == "Restored"
     assert restored_card.locator('[data-job-action="restore"]').count() == 0
     assert current_review.locator(
         '[data-review-group-count="recommended"]'
@@ -1766,7 +2306,6 @@ def test_company_size_search_updates_only_the_affected_review_card(
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
             return
@@ -1781,7 +2320,7 @@ def test_company_size_search_updates_only_the_affected_review_card(
         'article[data-job-key="company-size-local"]'
     ).first
 
-    card.locator("[data-company-size-search]").click()
+    open_job_details(card).locator("[data-company-size-search]").click()
 
     refreshed_card = setup_page.locator(
         'article[data-job-key="company-size-local"]'
@@ -1822,7 +2361,6 @@ def test_global_job_delete_updates_review_without_page_navigation(
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
-                    ats_source_run_id="search-1",
                 ),
             )
             return
@@ -1836,9 +2374,8 @@ def test_global_job_delete_updates_review_without_page_navigation(
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     global_review = setup_page.locator('[data-review-block="global"]')
 
-    global_review.locator(
-        'article[data-job-key="global-saved"] [data-global-job-delete]'
-    ).click()
+    global_card = global_review.locator('article[data-job-key="global-saved"]')
+    open_job_details(global_card).locator("[data-global-job-delete]").click()
 
     card = global_review.locator('article[data-job-key="global-saved"]')
     card.wait_for(state="detached")
@@ -1862,66 +2399,18 @@ def test_global_job_delete_cancel_keeps_the_card(setup_page: object) -> None:
         'article[data-job-key="global-saved"]'
     )
 
-    card.locator("[data-global-job-delete]").click()
+    dialog = open_job_details(card)
+    dialog.locator("[data-global-job-delete]").click()
 
     assert requested == []
     assert card.is_visible()
-    assert card.locator("[data-global-job-delete]").is_enabled()
+    assert dialog.locator("[data-global-job-delete]").is_enabled()
 
 
-def test_manual_job_dialog_submits_url_and_refreshes_review(
+def test_manual_job_dialog_requires_a_new_resume(
     setup_page: object,
 ) -> None:
-    posted: list[dict[str, object]] = []
-    import_id = "manual-import-1"
-
-    def import_job(route: object) -> None:
-        posted.append(json.loads(route.request.post_data))
-        route.fulfill(
-            status=202,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "import_id": import_id,
-                    "status": "running",
-                    "step": "queued",
-                    "message": "Manual import started.",
-                    "progress_percent": 2,
-                    "job_key": None,
-                    "result_status": None,
-                    "resume_id": "sha256:" + "a" * 64,
-                    "error": None,
-                }
-            ),
-        )
-
-    def poll_import(route: object) -> None:
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "import_id": import_id,
-                    "status": "complete",
-                    "step": "complete",
-                    "message": "Manual import complete.",
-                    "progress_percent": 100,
-                    "job_key": "manual-42",
-                    "result_status": "saved",
-                    "resume_id": "sha256:" + "a" * 64,
-                    "error": None,
-                }
-            ),
-        )
-
-    setup_page.route("**/api/global-jobs/import", import_job)
-    setup_page.route(f"**/api/manual-job-imports/{import_id}", poll_import)
     setup_page.locator('[data-nav-step="job-tracker"]').click()
-    resume_id = "sha256:" + "a" * 64
-    setup_page.evaluate(
-        "resumeId => { document.body.dataset.selectedResumeId = resumeId; }",
-        resume_id,
-    )
     dialog = setup_page.locator("#manual-job-dialog")
 
     setup_page.locator("[data-open-manual-job]").click()
@@ -1931,11 +2420,11 @@ def test_manual_job_dialog_submits_url_and_refreshes_review(
         "https://careers.example/jobs/42"
     )
     dialog.locator("[data-submit-manual-job]").click()
-    dialog.wait_for(state="hidden")
 
-    assert posted == [
-        {"url": "https://careers.example/jobs/42", "resume_id": resume_id}
-    ]
+    assert dialog.is_visible()
+    assert dialog.locator("#manual-job-resume").evaluate(
+        "input => input.validity.valueMissing"
+    )
 
 
 def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
@@ -2017,7 +2506,7 @@ def test_manual_job_dialog_keeps_url_and_shows_import_failure(
     setup_page: object,
 ) -> None:
     setup_page.route(
-        "**/api/global-jobs/import",
+        "**/api/global-jobs/import-with-resume",
         lambda route: route.fulfill(
             status=422,
             content_type="application/json",
@@ -2032,6 +2521,13 @@ def test_manual_job_dialog_keeps_url_and_shows_import_failure(
     url_input = dialog.locator("#manual-job-url")
     submit = dialog.locator("[data-submit-manual-job]")
     url_input.fill("https://careers.example/jobs/empty")
+    dialog.locator("#manual-job-resume").set_input_files(
+        {
+            "name": "backend.pdf",
+            "mimeType": "application/pdf",
+            "buffer": b"PDF resume",
+        }
+    )
 
     submit.click()
 
@@ -2742,7 +3238,6 @@ def test_ats_start_polls_common_then_parallel_job_states(setup_page: object) -> 
 
     assert posted == [
         {
-            "search_run_id": "search-1",
             "job_keys": ["linkedin-only", "stepstone-only"],
         }
     ]
@@ -2772,6 +3267,177 @@ def test_ats_job_checkbox_uses_a_visible_unchecked_border(setup_page: object) ->
     ) == "rgb(81, 97, 90)"
 
 
+def test_review_job_list_row_has_fixed_sections_and_opens_full_details(
+    setup_page: object,
+) -> None:
+    setup_page.locator('[data-nav-step="review"]').click()
+    card = setup_page.locator(
+        '[data-review-block="current"] .job-card:visible'
+    ).first
+
+    rectangle = card.bounding_box()
+    grid_rectangle = card.locator("xpath=..").bounding_box()
+    assert rectangle is not None
+    assert grid_rectangle is not None
+    assert abs(rectangle["width"] - grid_rectangle["width"]) <= 1
+    assert rectangle["width"] > rectangle["height"] * 3
+    assert rectangle["height"] <= 180
+
+    regions = card.locator(
+        ":scope > .job-preview-status, "
+        ":scope > .job-preview-body > .job-preview-summary, "
+        ":scope > .job-preview-body > .job-preview-status-form, "
+        ":scope > .job-preview-body > .job-preview-footer"
+    ).evaluate_all(
+        "regions => regions.map(region => { const box = region.getBoundingClientRect(); "
+        "return { top: box.top, right: box.right, bottom: box.bottom, left: box.left }; })"
+    )
+    assert len(regions) == 4
+    status, summary, status_form, footer = regions
+    assert status["right"] <= summary["left"]
+    assert summary["right"] <= status_form["left"]
+    assert status_form["bottom"] <= footer["top"]
+
+    card.locator("[data-job-preview-open-area]").click()
+    dialog = card.locator("[data-job-detail-dialog]")
+    assert dialog.is_visible()
+    assert dialog.locator(".job-detail-status > span").count() == 4
+    assert dialog.locator(".facts").is_visible()
+    assert dialog.locator(".evidence").is_visible()
+    assert dialog.locator('[data-job-action="status"]').is_visible()
+    dialog.locator("[data-close-job-detail]").click()
+
+    card.locator('.job-preview-status-form select[name="status"]').click()
+    assert dialog.is_hidden()
+
+
+def test_job_tracker_list_row_keeps_ats_outside_full_action_dialog(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] .job-card:visible'
+    ).first
+
+    assert card.locator(
+        ":scope > .job-preview-body > .job-preview-footer [data-ats-select-job]"
+    ).count() == 1
+    card.locator("[data-job-preview-open-area]").click()
+    dialog = card.locator("[data-job-detail-dialog]")
+    assert dialog.is_visible()
+    assert dialog.locator("[data-company-size-search]").is_visible()
+    assert dialog.locator("[data-global-job-delete]").is_visible()
+    assert dialog.locator("[data-ats-select-job]").count() == 0
+
+
+def test_job_list_row_truncates_very_long_title_without_clipping_score(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] .job-card:visible'
+    ).first
+
+    layout = card.locator(".job-preview-header").evaluate(
+        """header => {
+          document.documentElement.style.fontSize = "100%";
+          const title = header.querySelector("h3");
+          const score = header.querySelector(".score");
+          title.textContent =
+            "Softwareentwickler Online-Banking-Backend and Distributed Payments " +
+            "Platform Reliability Engineer (m/w/d)";
+          const headerBox = header.getBoundingClientRect();
+          const scoreBox = score.getBoundingClientRect();
+          const headerStyle = getComputedStyle(header);
+          const titleStyle = getComputedStyle(title);
+          const unclampedTitle = title.cloneNode(true);
+          unclampedTitle.style.position = "absolute";
+          unclampedTitle.style.visibility = "hidden";
+          unclampedTitle.style.display = "block";
+          unclampedTitle.style.width = `${title.clientWidth}px`;
+          unclampedTitle.style.setProperty("-webkit-line-clamp", "unset");
+          header.append(unclampedTitle);
+          const unclampedHeight = unclampedTitle.getBoundingClientRect().height;
+          unclampedTitle.remove();
+          return {
+            titleIsTruncated:
+              unclampedHeight > title.getBoundingClientRect().height + 0.5,
+            titleWidth: title.clientWidth,
+            titleHeight: title.getBoundingClientRect().height,
+            unclampedHeight,
+            titleOverflow: titleStyle.textOverflow,
+            scoreRight: scoreBox.right,
+            contentRight: headerBox.right - parseFloat(headerStyle.paddingRight),
+          };
+        }"""
+    )
+
+    assert layout["titleIsTruncated"] is True, (
+        layout["titleWidth"],
+        layout["titleHeight"],
+        layout["unclampedHeight"],
+    )
+    assert layout["titleOverflow"] == "ellipsis"
+    assert layout["scoreRight"] <= layout["contentRight"] + 0.5
+
+
+def test_job_list_row_keeps_reason_above_labels_without_clipping(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup#review")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator("#review-language-requirement").select_option("")
+    card = setup_page.locator(
+        '[data-review-block="current"] article.job-card:visible'
+    ).first
+
+    layout = card.locator(".job-preview-summary").evaluate(
+        """summary => {
+          document.documentElement.style.fontSize = "100%";
+          let message = summary.querySelector(".job-preview-message");
+          if (!message) {
+            message = document.createElement("p");
+            message.className = "job-preview-message";
+            summary.append(message);
+          }
+          message.textContent =
+            "Very strong core match. The JD's must-haves map almost one-to-one " +
+            "onto demonstrated professional work: 5+ years backend development " +
+            "with Spring Boot and RESTful APIs.";
+          let labels = summary.querySelector(".labels");
+          if (!labels) {
+            labels = document.createElement("ul");
+            labels.className = "labels";
+            labels.innerHTML =
+              "<li>Visa details to verify</li>" +
+              "<li>Work authorization to verify</li>";
+            summary.append(labels);
+          }
+          summary.insertBefore(message, labels);
+          const summaryBox = summary.getBoundingClientRect();
+          const labelsBox = labels.getBoundingClientRect();
+          const messageStyle = getComputedStyle(message);
+          return {
+            messageClientHeight: message.clientHeight,
+            messageScrollHeight: message.scrollHeight,
+            messageWhiteSpace: messageStyle.whiteSpace,
+            messageTextOverflow: messageStyle.textOverflow,
+            labelsClientHeight: labels.clientHeight,
+            labelsScrollHeight: labels.scrollHeight,
+            labelsInsideSummary: labelsBox.bottom <= summaryBox.bottom + 0.5,
+          };
+        }"""
+    )
+
+    assert layout["messageClientHeight"] == layout["messageScrollHeight"]
+    assert layout["messageWhiteSpace"] == "nowrap"
+    assert layout["messageTextOverflow"] == "ellipsis"
+    assert layout["labelsClientHeight"] == layout["labelsScrollHeight"]
+    assert layout["labelsInsideSummary"] is True
+
+
 def test_review_cards_have_a_framed_non_collapsible_area(setup_page: object) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
     current_review = setup_page.locator('[data-review-block="current"]')
@@ -2799,6 +3465,82 @@ def test_review_jobs_scroll_without_moving_the_page(setup_page: object) -> None:
 
     assert groups.evaluate("node => node.scrollTop") > 0
     assert setup_page.evaluate("window.scrollY") == page_scroll_before
+
+
+@pytest.mark.parametrize(
+    ("page_url", "groups_selector"),
+    [
+        (
+            "http://draft.test/setup#review",
+            '[data-review-block="current"] .review-groups',
+        ),
+        (
+            "http://draft.test/setup?ats-jobs=1#job-tracker",
+            '[data-review-block="global"] .review-groups',
+        ),
+    ],
+)
+def test_job_cards_chain_scroll_to_the_page_at_both_boundaries(
+    setup_page: object,
+    page_url: str,
+    groups_selector: str,
+) -> None:
+    setup_page.goto(page_url)
+    setup_page.wait_for_load_state("networkidle")
+    language_filter = setup_page.locator("#review-language-requirement")
+    if language_filter.is_visible():
+        language_filter.select_option("")
+    setup_page.evaluate(
+        """() => {
+          document.documentElement.style.scrollBehavior = "auto";
+          const spacer = document.createElement("div");
+          spacer.style.height = "1000px";
+          document.body.append(spacer);
+        }"""
+    )
+    groups = setup_page.locator(groups_selector)
+    assert groups.evaluate("node => node.scrollHeight > node.clientHeight") is True
+    assert groups.evaluate(
+        "node => getComputedStyle(node).overscrollBehaviorY"
+    ) == "auto"
+
+    groups.evaluate(
+        """node => {
+          const top = node.getBoundingClientRect().top + window.scrollY;
+          window.scrollTo(0, Math.max(1, top - 100));
+          node.scrollTop = 0;
+        }"""
+    )
+    setup_page.wait_for_timeout(100)
+    groups_box = groups.bounding_box()
+    assert groups_box is not None
+    setup_page.mouse.move(groups_box["x"] + 10, groups_box["y"] + 10)
+    page_scroll_before = setup_page.evaluate("window.scrollY")
+    setup_page.mouse.wheel(0, -900)
+    setup_page.wait_for_timeout(100)
+
+    assert groups.evaluate("node => node.scrollTop") == 0
+    assert setup_page.evaluate("window.scrollY") < page_scroll_before
+
+    groups.evaluate(
+        """node => {
+          const top = node.getBoundingClientRect().top + window.scrollY;
+          window.scrollTo(0, Math.max(1, top - 100));
+          node.scrollTop = node.scrollHeight;
+        }"""
+    )
+    setup_page.wait_for_timeout(100)
+    groups_box = groups.bounding_box()
+    assert groups_box is not None
+    setup_page.mouse.move(groups_box["x"] + 10, groups_box["y"] + 10)
+    page_scroll_before = setup_page.evaluate("window.scrollY")
+    setup_page.mouse.wheel(0, 900)
+    setup_page.wait_for_timeout(100)
+
+    assert groups.evaluate(
+        "node => node.scrollTop + node.clientHeight >= node.scrollHeight"
+    ) is True
+    assert setup_page.evaluate("window.scrollY") > page_scroll_before
 
 
 def test_review_group_tabs_switch_the_visible_panel(setup_page: object) -> None:
@@ -3283,7 +4025,6 @@ def test_ats_top_nav_opens_just_completed_result(
                 ai_providers=AI_PROVIDERS,
                 ats_history=ATS_HISTORY if has_saved_result else [],
                 selected_ats=SELECTED_ATS if has_saved_result else None,
-                ats_source_run_id="search-1",
             ),
         ),
     )
@@ -3299,6 +4040,7 @@ def test_ats_top_nav_opens_just_completed_result(
         ],
     )
     completed["run_id"] = "ats/new result"
+    completed["result_ids"] = ["ats/new result"]
     setup_page.route(
         "**/api/ats-runs",
         lambda route: route.fulfill(
@@ -3334,7 +4076,6 @@ def test_ats_check_nav_without_saved_result_opens_empty_results(
             body=render_console(
                 SOURCE_FILTER_SNAPSHOT,
                 ai_providers=AI_PROVIDERS,
-                ats_source_run_id="search-1",
             ),
         ),
     )

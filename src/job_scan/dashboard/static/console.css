@@ -147,12 +147,15 @@
   margin: 0 !important;
 }
 
-.page-header {
+.console-sticky-header {
   position: sticky;
   top: 0;
   z-index: 20;
-  padding-block: 0.4rem;
   background: var(--paper);
+}
+
+.page-header {
+  padding-block: 0.4rem;
 }
 
 .page-header h1 {
@@ -761,6 +764,12 @@ label > small {
   margin-bottom: 1rem;
 }
 
+.job-tracker-filters {
+  grid-template-columns: minmax(0, 16rem) max-content;
+  column-gap: clamp(1rem, 3vw, 2rem);
+  align-items: end;
+}
+
 .source-filter label {
   display: grid;
   gap: 0.35rem;
@@ -797,7 +806,6 @@ label > small {
 .embedded-review .review-groups {
   max-height: clamp(28rem, 45dvh, 42rem);
   overflow-y: auto;
-  overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
 }
 
@@ -811,39 +819,16 @@ label > small {
   font-weight: 700;
 }
 
-.ats-resume-picker {
-  display: grid;
-  gap: 0.25rem;
-  width: min(100%, 36rem);
-}
-
-.ats-resume-picker small {
-  color: var(--muted);
-}
-
 .review-ats-controls {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
-  grid-template-rows: auto 44px auto;
+  display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  align-items: stretch;
-  gap: 0.25rem 1rem;
+  align-items: center;
+  gap: 1rem;
   width: 100%;
 }
 
-/* The picker spans all three rows via subgrid so its control sits on row 2,
-   the same row the two buttons are pinned to. */
-.review-ats-controls .ats-resume-picker {
-  width: auto;
-  min-width: 14rem;
-  grid-row: 1 / -1;
-  grid-template-rows: subgrid;
-  gap: 0.25rem;
-}
-
 .review-ats-controls > .btn {
-  grid-row: 2;
   margin-top: 0;
 }
 
@@ -1260,20 +1245,10 @@ label > small {
   }
 
   .review-ats-controls {
-    grid-auto-flow: row;
-    grid-auto-columns: auto;
-    grid-template-rows: none;
+    flex-direction: column;
     justify-content: stretch;
+    align-items: stretch;
     gap: 1rem;
-  }
-
-  .review-ats-controls .ats-resume-picker {
-    grid-row: auto;
-    grid-template-rows: none;
-  }
-
-  .review-ats-controls > .btn {
-    grid-row: auto;
   }
 
   .field-grid,

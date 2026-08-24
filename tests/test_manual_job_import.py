@@ -12,7 +12,16 @@ from job_scan import manual_job_import
 from job_scan.claude_process import ClaudeInvocation, ClaudeRequest
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.domain import AIReview, MachineStatus
+from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.reviewer import ReviewBatchOutcome, ReviewFailure
+
+_MANUAL_SNAPSHOT_HTML = (
+    "<!doctype html>"
+    '<html data-job-scan-snapshot="manual:careers.example:'
+    '012a125eb63d741726a6e7b75a5afffa53c6725e5d231bb652fa377998b48a83">'
+    "<head><style>h1{color:#2557a7}</style></head>"
+    "<body><main><h1>Backend Engineer</h1></main></body></html>"
+)
 
 
 def _config(tmp_path: Path) -> AppConfig:
@@ -266,7 +275,142 @@ def test_ai_job_extractor_accepts_markdown_blank_line_variation(
     assert result.description == "\n\n".join(sections)
 
 
-def test_ai_job_extractor_rejects_facts_not_copied_from_page(tmp_path: Path) -> None:
+def test_ai_job_extractor_accepts_visible_text_from_rendered_body_html(
+    tmp_path: Path,
+) -> None:
+    title = "Senior Platform Engineer"
+    description = (
+        "Responsibilities:\n"
+        "- Build reliable backend services for international banking customers.\n"
+        "- Operate production systems, improve observability, and automate delivery."
+    )
+    page_html = (
+        "<section><h1>Senior <span>Platform</span> Engineer</h1>"
+        "<p>Acme <strong>GmbH</strong></p><p>Berlin, Germany</p>"
+        "<section><h2><strong>Responsibilities</strong>:</h2><ul>"
+        "<li>Build reliable <strong>backend services</strong> for international banking "
+        "customers.</li></ul><button>Apply now</button><ul>"
+        "<li>Operate production systems, improve observability, and "
+        "automate delivery.</li></ul></section></section>"
+    )
+    invoker = RecordingInvoker(
+        {
+            "is_job_detail": True,
+            "title": title,
+            "company": "Acme GmbH",
+            "location": "Berlin, Germany",
+            "description_sections": [description],
+            "posted_at": None,
+            "posted_at_evidence": None,
+        }
+    )
+
+    result = manual_job_import.AiJobExtractor(invoker).extract(
+        "https://careers.example/jobs/42",
+        "Career page",
+        page_html,
+        _config(tmp_path),
+    )
+
+    assert result.title == title
+    assert result.company == "Acme GmbH"
+    assert result.description == description
+    assert "rendered body HTML" in invoker.requests[0].prompt
+    assert "visible text" in invoker.requests[0].prompt
+
+
+def test_ai_job_extractor_ignores_only_layout_unicode_characters(
+    tmp_path: Path,
+) -> None:
+    description = (
+        "Develop C++ and C# services with JavaEE and PostgreSQL. Preserve German "
+        "Fähigkeiten, salaries, dates, and visible-hyphens in production systems."
+    )
+    page_description = (
+        description.replace("C++", "C+\u200b+")
+        .replace("JavaEE", "Java\u2060EE")
+        .replace("PostgreSQL", "Post\ufeffgreSQL")
+    )
+    page_html = (
+        "<main><h1>Java Backend Devel\u00adoper (m/w/d)</h1>"
+        "<p>FERCHAU GmbH</p><p>Stutt\u00adgart, Deutschland</p>"
+        f"<section>{page_description}</section></main>"
+    )
+    invoker = RecordingInvoker(
+        {
+            "is_job_detail": True,
+            "title": "Java Backend Developer (m/w/d)",
+            "company": "FERCHAU GmbH",
+            "location": "Stuttgart, Deutschland",
+            "description_sections": [description],
+            "posted_at": None,
+            "posted_at_evidence": None,
+        }
+    )
+
+    result = manual_job_import.AiJobExtractor(invoker).extract(
+        "https://touch.ferchau.com/de/de/job/351172/java-backend-developer",
+        "FERCHAU job page",
+        page_html,
+        _config(tmp_path),
+    )
+
+    assert result.title == "Java Backend Developer (m/w/d)"
+    assert result.location == "Stuttgart, Deutschland"
+    assert result.description == description
+    assert result.source_validation_errors == ()
+
+
+@pytest.mark.parametrize(
+    ("source_title", "extracted_title"),
+    [
+        ("C# Devel\u00adoper", "C Developer"),
+        ("C++ Devel\u00adoper", "C+ Developer"),
+        ("Fähige Devel\u00adoper", "Fahige Developer"),
+        ("Backend-Devel\u00adoper", "Backend Developer"),
+        ("Java\u200dDevel\u00adoper", "JavaDeveloper"),
+    ],
+)
+def test_ai_job_extractor_keeps_meaningful_unicode_and_symbols_strict(
+    tmp_path: Path,
+    source_title: str,
+    extracted_title: str,
+) -> None:
+    description = (
+        "Develop reliable backend services and maintain production observability "
+        "for international customers using stable engineering practices."
+    )
+    page_html = (
+        f"<main><h1>{source_title}</h1><p>FERCHAU GmbH</p>"
+        f"<p>Stuttgart, Deutschland</p><section>{description}</section></main>"
+    )
+    invoker = RecordingInvoker(
+        {
+            "is_job_detail": True,
+            "title": extracted_title,
+            "company": "FERCHAU GmbH",
+            "location": "Stuttgart, Deutschland",
+            "description_sections": [description],
+            "posted_at": None,
+            "posted_at_evidence": None,
+        }
+    )
+
+    result = manual_job_import.AiJobExtractor(invoker).extract(
+        "https://touch.ferchau.com/de/de/job/351172/java-backend-developer",
+        "FERCHAU job page",
+        page_html,
+        _config(tmp_path),
+    )
+
+    assert len(result.source_validation_errors) == 1
+    assert result.source_validation_errors[0].startswith(
+        f'Job title: AI read "{extracted_title}".'
+    )
+    assert "Check that this information is correct." in result.source_validation_errors[0]
+
+
+def test_ai_job_extractor_records_facts_not_copied_from_page(tmp_path: Path) -> None:
     invented_description = (
         "Invented responsibilities that never appeared anywhere in the supplied job "
         "page and therefore must not be accepted as source content."
@@ -284,16 +428,60 @@ def test_ai_job_extractor_rejects_facts_not_copied_from_page(tmp_path: Path) -> 
     )
     page_text = "# Backend Engineer\n\nAcme\n\nBerlin\n\nReal page text."
 
-    with pytest.raises(
-        manual_job_import.ManualJobImportError,
-        match="copied exactly",
-    ):
-        manual_job_import.AiJobExtractor(invoker).extract(
-            "https://careers.example/jobs/42",
-            "Backend Engineer | Acme",
-            page_text,
-            _config(tmp_path),
-        )
+    result = manual_job_import.AiJobExtractor(invoker).extract(
+        "https://careers.example/jobs/42",
+        "Backend Engineer | Acme",
+        page_text,
+        _config(tmp_path),
+    )
+
+    expected_error = (
+        f'Job description: AI read "{invented_description}". The same wording was not '
+        "found on the original page. Check that this information is correct."
+    )
+    assert result.source_validation_errors == (expected_error,)
+
+
+def test_ai_job_extractor_records_description_stitched_across_page_regions(
+    tmp_path: Path,
+) -> None:
+    first_job_text = (
+        "Build reliable payment APIs and maintain production observability for "
+        "international banking customers."
+    )
+    unrelated_job_text = (
+        "Operate Kubernetes clusters and design data pipelines for a separate "
+        "analytics vacancy."
+    )
+    page_html = (
+        "<main><article><h1>Backend Engineer</h1><p>Acme GmbH</p><p>Berlin</p>"
+        f"<section>{first_job_text}</section></article>"
+        "<aside><h2>Other vacancy</h2>"
+        f"<section>{unrelated_job_text}</section></aside></main>"
+    )
+    invoker = RecordingInvoker(
+        {
+            "is_job_detail": True,
+            "title": "Backend Engineer",
+            "company": "Acme GmbH",
+            "location": "Berlin",
+            "description_sections": [f"{first_job_text} {unrelated_job_text}"],
+            "posted_at": None,
+            "posted_at_evidence": None,
+        }
+    )
+
+    result = manual_job_import.AiJobExtractor(invoker).extract(
+        "https://careers.example/jobs/42",
+        "Backend Engineer | Acme GmbH",
+        page_html,
+        _config(tmp_path),
+    )
+
+    assert len(result.source_validation_errors) == 1
+    assert result.source_validation_errors[0].startswith(
+        f'Job description: AI read "{first_job_text} {unrelated_job_text}".'
+    )
 
 
 def test_ai_job_extractor_rejects_posted_date_that_disagrees_with_evidence(
@@ -373,6 +561,7 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
                 "next_start_char": None,
                 "content": "second chunk",
             },
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
             {
                 "session": "manual-session",
                 "count": 0,
@@ -393,7 +582,8 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
     assert page.url == "https://careers.example/jobs/42"
     assert page.title == "Backend Engineer"
     assert page.content == "first chunk\nsecond chunk"
-    assert runner.commands == [
+    assert page.snapshot_html == _MANUAL_SNAPSHOT_HTML
+    assert runner.commands[:2] == [
         [
             "opencli",
             "browser",
@@ -410,26 +600,34 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
             "network",
             "--all",
         ],
-        [
-            "opencli",
-            "browser",
-            "manual-session",
-            "extract",
-            "--chunk-size",
-            "20000",
-            "--start",
-            "0",
-        ],
-        [
-            "opencli",
-            "browser",
-            "manual-session",
-            "extract",
-            "--chunk-size",
-            "20000",
-            "--start",
-            "12",
-        ],
+    ]
+    assert runner.commands[2][:4] == [
+        "opencli",
+        "browser",
+        "manual-session",
+        "eval",
+    ]
+    assert runner.commands[3][:4] == [
+        "opencli",
+        "browser",
+        "manual-session",
+        "eval",
+    ]
+    first_script = runner.commands[2][4]
+    assert "document.body" in first_script
+    assert "clone.querySelectorAll('img')" in first_script
+    assert "image.remove()" in first_script
+    assert "image.replaceWith" not in first_script
+    assert "script, style, noscript, template" in first_script
+    assert "nav, header, footer, aside" not in first_script
+    assert "form, iframe, dialog" not in first_script
+    assert runner.commands[4][:4] == [
+        "opencli",
+        "browser",
+        "manual-session",
+        "eval",
+    ]
+    assert runner.commands[5:] == [
         [
             "opencli",
             "browser",
@@ -439,6 +637,54 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
         ],
         ["opencli", "browser", "manual-session", "close"],
     ]
+
+
+def test_opencli_page_reader_captures_ai_html_and_snapshot_in_one_session() -> None:
+    runner = RecordingRunner(
+        [
+            {
+                "url": "https://careers.example/jobs/42",
+                "page": "PAGE-42",
+            },
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "Backend Engineer",
+                "total_chars": 24,
+                "start": 0,
+                "end": 24,
+                "next_start_char": None,
+                "content": "Backend Engineer content",
+            },
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            "Browser session tab lease released",
+        ]
+    )
+
+    page = manual_job_import.OpenCliPageReader(
+        opencli_executable="opencli",
+        runner=runner,
+        session_factory=lambda: "manual-session",
+        address_resolver=lambda _host: ["93.184.216.34"],
+        timeout_seconds=10,
+    ).read("https://careers.example/jobs/42")
+
+    assert page.content == "Backend Engineer content"
+    assert page.snapshot_html == _MANUAL_SNAPSHOT_HTML
+    assert [command[3] for command in runner.commands if len(command) > 3].count("open") == 1
+    eval_commands = [command for command in runner.commands if command[3] == "eval"]
+    assert len(eval_commands) == 2
+    assert "manual:careers.example:012a125e" in eval_commands[1][4]
+    assert runner.commands[-1] == ["opencli", "browser", "manual-session", "close"]
 
 
 def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> None:
@@ -491,6 +737,7 @@ def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> Non
                 "next_start_char": None,
                 "content": content,
             },
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
             {
                 "session": "manual-session",
                 "count": 0,
@@ -648,6 +895,7 @@ def test_opencli_page_reader_rejects_private_request_during_extraction() -> None
                 "next_start_char": None,
                 "content": content,
             },
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
             {
                 "session": "manual-session",
                 "count": 1,
@@ -670,7 +918,7 @@ def test_opencli_page_reader_rejects_private_request_during_extraction() -> None
     assert runner.commands[-1] == ["opencli", "browser", "manual-session", "close"]
 
 
-def test_manual_job_import_service_builds_and_reviews_stable_job(
+def test_manual_job_import_service_builds_job_and_keeps_source_validation_errors(
     tmp_path: Path,
 ) -> None:
     service_type = getattr(manual_job_import, "ManualJobImportService", None)
@@ -683,6 +931,7 @@ def test_manual_job_import_service_builds_and_reviews_stable_job(
         url="https://careers.example/jobs/42",
         title="Backend Engineer",
         content=f"Backend Engineer\nAcme GmbH\nBerlin\n{description}",
+        snapshot_html=_MANUAL_SNAPSHOT_HTML,
     )
     facts = manual_job_import.ManualJobFacts(
         is_job_detail=True,
@@ -693,6 +942,11 @@ def test_manual_job_import_service_builds_and_reviews_stable_job(
         posted_at=date(2026, 8, 18),
         posted_at_evidence="Posted 2026-08-18",
     )
+    source_validation_error = (
+        'Job title: AI read "Backend Engineer". The same wording was not found on the '
+        "original page. Check that this information is correct."
+    )
+    facts._source_validation_errors.append(source_validation_error)
     extracted_titles: list[str] = []
 
     class PageReader:
@@ -740,7 +994,8 @@ def test_manual_job_import_service_builds_and_reviews_stable_job(
                 invocations=[],
             )
 
-    service = service_type(PageReader(), Extractor(), Reviewer())
+    snapshot_store = JobSnapshotStore(tmp_path / "job-snapshots")
+    service = service_type(PageReader(), Extractor(), Reviewer(), snapshot_store)
     imported_at = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
     first = service.import_url(
@@ -767,6 +1022,11 @@ def test_manual_job_import_service_builds_and_reviews_stable_job(
     assert first.posted_at == date(2026, 8, 18)
     assert first.machine_status is MachineStatus.ELIGIBLE
     assert first.score == 88
+    assert first.manual_import_errors == [source_validation_error]
+    snapshot_reference = first.source_occurrences[0].job_snapshot
+    assert snapshot_reference is not None
+    assert snapshot_reference.captured_at == imported_at
+    assert snapshot_store.read(snapshot_reference.snapshot_id) == page.snapshot_html.encode("utf-8")
     assert extracted_titles == ["Backend Engineer", "Backend Engineer"]
 
 
@@ -781,6 +1041,7 @@ def test_manual_job_import_service_keeps_failed_review_as_pending_card(
         url="https://careers.example/jobs/42",
         title="Backend Engineer",
         content=f"Backend Engineer\nAcme GmbH\nBerlin\n{description}",
+        snapshot_html=_MANUAL_SNAPSHOT_HTML,
     )
     facts = manual_job_import.ManualJobFacts(
         is_job_detail=True,
@@ -829,6 +1090,7 @@ def test_manual_job_import_service_keeps_failed_review_as_pending_card(
         PageReader(),
         Extractor(),
         FailedReviewer(),
+        JobSnapshotStore(tmp_path / "job-snapshots"),
     ).import_url(
         "https://careers.example/jobs/42",
         _config(tmp_path),

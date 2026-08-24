@@ -165,7 +165,20 @@ class ClaudeReviewer:
             return
         if len(keys) == 1:
             key = keys[0]
-            failed[key] = parsed.failed[key]
+            failure = parsed.failed[key]
+            if retry_failures is None and failure.category == "schema":
+                self._review_subset(
+                    keys,
+                    jobs_by_key,
+                    profile,
+                    config,
+                    accepted,
+                    failed,
+                    invocations,
+                    {key: failure},
+                )
+            else:
+                failed[key] = failure
             return
 
         midpoint = max(1, len(unresolved) // 2)
@@ -219,21 +232,21 @@ class ClaudeReviewer:
             try:
                 invocation = self._claude.invoke(request)
             except ClaudeTimeout:
-                last_failure = ("timeout", "Claude review timed out.")
+                last_failure = ("timeout", "AI review timed out.")
                 continue
             except ClaudeOutputLimitExceeded:
                 last_failure = (
                     "output_limit",
-                    "Claude review exceeded the configured output limit.",
+                    "AI review exceeded the configured output limit.",
                 )
                 continue
             except ClaudeProcessError:
-                last_failure = ("process", "Claude review process failed.")
+                last_failure = ("process", "AI review process failed.")
                 continue
 
             invocations.append(invocation)
             if invocation.exit_code != 0:
-                last_failure = ("process", "Claude review process exited unsuccessfully.")
+                last_failure = ("process", "AI review process exited unsuccessfully.")
                 continue
             envelope, last_failure = _parse_top_level(invocation.stdout)
             if envelope is not None:
@@ -277,15 +290,15 @@ def _parse_top_level(
     try:
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None, ("json", "Claude returned invalid review JSON.")
+        return None, ("json", "AI returned invalid review JSON.")
     if not isinstance(payload, dict):
-        return None, ("schema", "Claude review output was not a JSON object.")
+        return None, ("schema", "AI review output was not a JSON object.")
     structured_output = payload.get("structured_output")
     if not isinstance(structured_output, dict):
-        return None, ("schema", "Claude review output lacked structured output.")
+        return None, ("schema", "AI review output lacked structured output.")
     results = structured_output.get("results")
     if not isinstance(results, list):
-        return None, ("schema", "Claude structured output lacked a results list.")
+        return None, ("schema", "AI structured output lacked a results list.")
     return _EnvelopeResult(results=results), None
 
 
@@ -317,7 +330,7 @@ def _parse_members(
         key: _failure(
             key,
             "duplicate",
-            "Claude returned duplicate results for this job.",
+            "AI returned duplicate results for this job.",
             config,
         )
         for key in duplicate_keys
@@ -333,11 +346,11 @@ def _parse_members(
             continue
         try:
             review = AIReview.model_validate(_sanitize_company_industry(item))
-        except ValidationError:
+        except ValidationError as error:
             failed[raw_key] = _failure(
                 raw_key,
                 "schema",
-                "Claude returned an invalid result for this job.",
+                _validation_failure_message(error),
                 config,
             )
             continue
@@ -350,7 +363,7 @@ def _parse_members(
                 raw_key,
                 "schema",
                 validation_error
-                or "Claude returned invalid eligibility evidence for this job.",
+                or "AI returned invalid eligibility evidence for this job.",
                 config,
             )
             continue
@@ -361,10 +374,23 @@ def _parse_members(
             failed[key] = _failure(
                 key,
                 "missing",
-                "Claude returned no result for this job.",
+                "AI returned no result for this job.",
                 config,
             )
     return _ParsedMembers(accepted=accepted, failed=failed)
+
+
+def _validation_failure_message(error: ValidationError) -> str:
+    """Describe invalid review fields without retaining model-returned values."""
+    details = "; ".join(
+        f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
+        for issue in error.errors(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )
+    )
+    return f"AI returned an invalid result for this job. {details}"
 
 
 def _sanitize_company_industry(item: dict[str, Any]) -> dict[str, Any]:

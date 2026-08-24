@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from uuid import UUID
 
 from bs4 import BeautifulSoup
 from pydantic import HttpUrl
@@ -9,14 +10,16 @@ from job_scan.dashboard import view_model
 from job_scan.dashboard.render import render_console, render_dashboard
 from job_scan.domain import (
     AvailabilityStatus,
+    JobNote,
     JobRecord,
     MachineStatus,
     PrimaryView,
+    SalaryPeriod,
+    SalaryValue,
     Snapshot,
     StoreMeta,
     UserStatus,
 )
-from job_scan.resume_catalog import ResumeCatalogEntry
 
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 
@@ -114,7 +117,6 @@ def test_console_splits_current_search_and_tracked_jobs_into_two_views() -> None
         render_console(
             current,
             global_snapshot=global_jobs,
-            ats_default_resume_filename="Current CV.pdf",
         ),
         "html.parser",
     )
@@ -165,6 +167,12 @@ def test_job_tracker_card_shows_actual_status_lifecycle_and_expandable_history()
         "html.parser",
     )
 
+    added = page.select_one('[data-job-key="applied"] [data-job-preview-added]')
+    assert added is not None
+    assert added.get_text(" ", strip=True) == "Added: 2026-08-16"
+    assert added.select_one("time").get("datetime") == (
+        NOW - timedelta(days=2)
+    ).isoformat()
     lifecycle = page.select_one('[data-job-key="applied"] [data-job-lifecycle]')
     assert lifecycle is not None
     assert [
@@ -183,6 +191,13 @@ def test_job_tracker_card_shows_actual_status_lifecycle_and_expandable_history()
         "Lifecycle details"
     )
     assert len(history.select("[data-lifecycle-event]")) == 2
+    date_inputs = lifecycle.select("[data-lifecycle-date-input]")
+    assert [item.get("value") for item in date_inputs] == [
+        "2026-08-16",
+        "2026-08-18",
+        "2026-08-16",
+        "2026-08-18",
+    ]
     lifecycle_text = lifecycle.get_text(" ", strip=True)
     assert "Found" not in lifecycle_text
     assert "Outcome" not in lifecycle_text
@@ -209,134 +224,21 @@ def test_console_status_picker_contains_every_global_job_status() -> None:
     assert picker.select_one('option[value=""][disabled][selected]') is not None
 
 
-def test_console_places_optional_ats_resume_upload_next_to_start_button() -> None:
+def test_console_places_ats_start_without_a_shared_resume_upload() -> None:
     page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            ats_default_resume_filename="Current CV.pdf",
-        ),
+        render_console(_snapshot(_job("recommended"))),
         "html.parser",
     )
 
     footer = page.select_one("footer#review-actions")
     assert footer is not None
-    upload = footer.select_one(
-        'input#ats-resume[name="resume"][type="file"][accept=".pdf,.docx"]'
-    )
-    assert upload is not None
-    assert not upload.has_attr("required")
-    assert "Default: Current CV.pdf" in footer.get_text(" ", strip=True)
+    assert footer.select_one("#ats-resume") is None
     assert footer.select_one("[data-open-ats]") is not None
 
 
-def test_console_shows_default_resume_created_at() -> None:
+def test_console_places_ats_start_after_job_tracker_navigation() -> None:
     page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            ats_default_resume_filename="Current CV.pdf",
-            ats_default_resume_created_at=datetime(2026, 8, 18, 9, 30, tzinfo=UTC),
-        ),
-        "html.parser",
-    )
-
-    footer = page.select_one("footer#review-actions")
-    assert footer is not None
-    assert "Default: Current CV.pdf (2026-08-18 09:30)" in footer.get_text(" ", strip=True)
-
-
-def test_console_default_resume_follows_selected_resume() -> None:
-    resume_id = "sha256:" + "a" * 64
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=resume_id,
-            profile_hash="sha256:" + "b" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
-        )
-    ]
-    page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            resume_catalog=resumes,
-            selected_resume_id=resume_id,
-        ),
-        "html.parser",
-    )
-
-    footer = page.select_one("footer#review-actions")
-    assert footer is not None
-    option = page.select_one(
-        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
-    )
-    assert option is not None
-    assert option["data-resume-created-at"] == "2026-08-19 10:00"
-    assert footer.select_one("[data-ats-default-resume]") is not None
-
-
-def test_resume_time_prefers_latest_history_search_when_available() -> None:
-    resume_id = "sha256:" + "a" * 64
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=resume_id,
-            profile_hash="sha256:" + "b" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
-        )
-    ]
-    page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            resume_catalog=resumes,
-            selected_resume_id=resume_id,
-            resume_latest_searches={resume_id: datetime(2026, 8, 20, 15, 30, tzinfo=UTC)},
-        ),
-        "html.parser",
-    )
-
-    option = page.select_one(
-        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
-    )
-    assert option is not None
-    assert option["data-resume-created-at"] == "2026-08-20 15:30"
-    assert "backend.pdf (2026-08-20 15:30)" in option.get_text()
-
-
-def test_resume_time_falls_back_to_created_at_without_history_search() -> None:
-    resume_id = "sha256:" + "a" * 64
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=resume_id,
-            profile_hash="sha256:" + "b" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
-        )
-    ]
-    page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            resume_catalog=resumes,
-            selected_resume_id=resume_id,
-        ),
-        "html.parser",
-    )
-
-    option = page.select_one(
-        '[data-global-resume-select] option[data-resume-filename="backend.pdf"]'
-    )
-    assert option is not None
-    assert option["data-resume-created-at"] == "2026-08-18 09:00"
-    assert "backend.pdf (2026-08-18 09:00)" in option.get_text()
-
-
-def test_console_places_ats_resume_between_new_run_and_start_button() -> None:
-    page = BeautifulSoup(
-        render_console(
-            _snapshot(_job("recommended")),
-            ats_default_resume_filename="Current CV.pdf",
-        ),
+        render_console(_snapshot(_job("recommended"))),
         "html.parser",
     )
 
@@ -347,7 +249,7 @@ def test_console_places_ats_resume_between_new_run_and_start_button() -> None:
     assert footer.select_one("#ats-ai-choice") is None
     assert [child.name for child in controls.find_all(recursive=False)] == [
         "button",
-        "label",
+        "a",
         "button",
     ]
 
@@ -360,11 +262,16 @@ def test_console_job_tracker_has_manual_job_url_dialog() -> None:
 
     global_block = page.select_one('[data-review-block="global"]')
     assert global_block is not None
+    filters = global_block.select_one(".review-filters.job-tracker-filters")
+    assert filters is not None
     button = global_block.select_one(
         'button[data-open-manual-job][aria-controls="manual-job-dialog"]'
     )
     assert button is not None
+    assert button.parent == filters
     assert button.get_text(" ", strip=True) == "Add job from URL"
+    assert "All searches" not in global_block.get_text(" ", strip=True)
+    assert "Tracked jobs" not in global_block.get_text(" ", strip=True)
     dialog = global_block.select_one('dialog#manual-job-dialog[aria-labelledby]')
     assert dialog is not None
     form = dialog.select_one('form[data-manual-job-form][method="dialog"]')
@@ -377,41 +284,281 @@ def test_console_job_tracker_has_manual_job_url_dialog() -> None:
     assert form.select_one('[data-manual-job-error][role="alert"]') is not None
 
 
-def test_console_job_tracker_lists_resumes_and_accepts_a_new_upload() -> None:
-    resume_id = "sha256:" + "a" * 64
-    resume = ResumeCatalogEntry(
-        resume_id=resume_id,
-        profile_hash="sha256:" + "b" * 64,
-        candidate_name="Backend CV",
-        filename="backend.pdf",
-        created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+def test_console_job_tracker_omits_resume_block_and_requires_a_new_upload() -> None:
+    page = BeautifulSoup(
+        render_console(_snapshot(_job("recommended"))),
+        "html.parser",
     )
 
+    global_block = page.select_one('[data-review-block="global"]')
+    assert global_block is not None
+    assert global_block.select_one(".global-resume-section") is None
+    assert global_block.select_one("[data-global-resume-select]") is None
+    upload = global_block.select_one(
+        'input#manual-job-resume[name="resume"][type="file"]'
+        '[accept=".pdf,.docx"][required]'
+    )
+    assert upload is not None
+    assert upload.find_parent("label").select_one("span").get_text(
+        " ", strip=True
+    ) == "New resume"
+    assert upload.find_next_sibling("small") is None
+    assert page.body.get("data-selected-resume-id") is None
+
+
+def test_standalone_job_tracker_omits_resume_selector() -> None:
     page = BeautifulSoup(
-        render_console(
+        render_dashboard(
             _snapshot(_job("recommended")),
-            resume_catalog=[resume],
-            selected_resume_id=resume_id,
+            _snapshot(_job("saved", user=UserStatus.SAVED)),
         ),
         "html.parser",
     )
 
     global_block = page.select_one('[data-review-block="global"]')
     assert global_block is not None
-    selector = global_block.select_one("select[data-global-resume-select]")
-    assert selector is not None
-    selected = selector.select_one(
-        f'option[data-global-resume-id="{resume_id}"][selected]'
+    assert global_block.select_one(".global-resume-section") is None
+    assert global_block.select_one("[data-global-resume-select]") is None
+
+
+def test_job_tracker_saved_job_shows_download_and_resume_replacement() -> None:
+    resume_id = "sha256:" + "a" * 64
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "application_resume_id": resume_id,
+                "application_resume_filename": "backend.pdf",
+            }
+        )
     )
-    assert selected is not None
-    assert "backend.pdf" in selected.get_text(" ", strip=True)
-    assert "2026-08-19 10:00" in selected.get_text(" ", strip=True)
-    assert selected.get("data-review-url").endswith("#job-tracker")
-    upload = global_block.select_one(
-        'input#manual-job-resume[name="resume"][type="file"][accept=".pdf,.docx"]'
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+
+    card = page.select_one('[data-review-block="global"] [data-job-key="saved"]')
+    assert card is not None
+    resume_summary = card.select_one("[data-job-resume]")
+    assert resume_summary is not None
+    resume_name = resume_summary.select_one("[data-job-resume-name]")
+    assert resume_name is not None
+    assert resume_name.get_text(" ", strip=True) == "backend.pdf"
+    download = card.select_one('[data-job-resume-download][href="/api/global-jobs/saved/resume"]')
+    assert download is not None
+    assert download.get_text(" ", strip=True) == "Download"
+    upload = card.select_one(
+        'form[data-job-action="resume"] input[name="resume"][type="file"][required][hidden]'
     )
     assert upload is not None
-    assert page.body.get("data-selected-resume-id") == resume_id
+    replace = card.select_one("[data-job-resume-replace]")
+    assert replace is not None
+    assert replace.get_text(" ", strip=True) == "Replace"
+    assert "Use saved resume" not in card.get_text(" ", strip=True)
+
+
+def test_job_tracker_renders_dated_notes_with_add_edit_and_delete_controls() -> None:
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "notes": [
+                    JobNote(
+                        id=UUID("11111111-1111-4111-8111-111111111111"),
+                        content="Follow up with recruiter.",
+                        created_at=NOW,
+                    )
+                ]
+            }
+        )
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+
+    card = page.select_one('[data-review-block="global"] [data-job-key="saved"]')
+    assert card is not None
+    notes = card.select_one("[data-job-notes]")
+    assert notes is not None
+    assert notes.select_one("[data-job-note-add]").get_text(strip=True) == "+"
+    item = notes.select_one(
+        '[data-job-note][data-note-id="11111111-1111-4111-8111-111111111111"]'
+    )
+    assert item is not None
+    assert item.select_one("[data-job-note-content]").get_text(strip=True) == (
+        "Follow up with recruiter."
+    )
+    assert item.select_one("[data-job-note-date]").get_text(strip=True) == "2026-08-18"
+    assert item.select_one("[data-job-note-edit]") is not None
+    assert item.select_one("[data-job-note-delete]") is not None
+    assert card.select_one("[data-job-note-dialog]") is not None
+    assert card.select_one("[data-job-note-delete-dialog]") is not None
+
+
+def test_job_tracker_renders_editable_expected_and_offer_salaries() -> None:
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "expected_salary": SalaryValue(
+                    amount="5,500 EUR",
+                    period=SalaryPeriod.MONTH,
+                ),
+                "offer_salary": SalaryValue(
+                    amount="70,000 EUR",
+                    period=SalaryPeriod.YEAR,
+                ),
+            }
+        )
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+    card = page.select_one('[data-review-block="global"] [data-job-key="saved"]')
+    assert card is not None
+    preview = card.select_one("[data-job-preview-salaries]")
+    assert preview is not None
+    assert [
+        item.get_text(" ", strip=True) for item in preview.select(":scope > div")
+    ] == [
+        "Expected salary: 5,500 EUR /month",
+        "Offer salary: 70,000 EUR /year",
+    ]
+    form = card.select_one('form[data-job-action="salary"]')
+    assert form is not None
+    assert form.select_one('input[name="expected_salary"]').get("value") == "5,500 EUR"
+    assert form.select_one(
+        'select[name="expected_salary_period"] option[selected]'
+    ).get("value") == "month"
+    assert form.select_one('input[name="offer_salary"]').get("value") == "70,000 EUR"
+    assert form.select_one(
+        'select[name="offer_salary_period"] option[selected]'
+    ).get("value") == "year"
+
+
+def test_review_and_job_tracker_previews_show_posted_date() -> None:
+    current = _snapshot(_job("recommended"))
+    tracked = _snapshot(_job("saved", user=UserStatus.SAVED))
+
+    page = BeautifulSoup(
+        render_console(current, global_snapshot=tracked),
+        "html.parser",
+    )
+
+    tracker_posted = page.select_one(
+        '[data-review-block="global"] [data-job-key="saved"] .job-preview-posted'
+    )
+    review_posted = page.select_one(
+        '[data-review-block="current"] [data-job-key="recommended"] .job-preview-posted'
+    )
+    assert tracker_posted is not None
+    assert review_posted is not None
+    for posted in (tracker_posted, review_posted):
+        assert posted.get_text(" ", strip=True) == "Posted: 2026-08-18"
+        assert posted.select_one('time[datetime="2026-08-18"]') is not None
+
+
+def test_job_tracker_preview_labels_missing_posted_date_as_unknown() -> None:
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(update={"posted_at": None})
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+    posted = page.select_one(
+        '[data-review-block="global"] [data-job-key="saved"] .job-preview-posted'
+    )
+    assert posted is not None
+    assert posted.get_text(" ", strip=True) == "Posted: Unknown"
+    assert posted.select_one("time") is None
+
+
+def test_only_job_tracker_unknown_facts_render_clickable_text_editors() -> None:
+    current = _snapshot(
+        _job("recommended").model_copy(update={"posted_at": None})
+    )
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(update={"posted_at": None})
+    )
+
+    page = BeautifulSoup(
+        render_console(current, global_snapshot=tracked),
+        "html.parser",
+    )
+    tracker = page.select_one(
+        '[data-review-block="global"] [data-job-key="saved"]'
+    )
+    review = page.select_one(
+        '[data-review-block="current"] [data-job-key="recommended"]'
+    )
+    assert tracker is not None
+    assert review is not None
+    for field_name, input_type in (
+        ("posted_at", "date"),
+        ("company_size", "number"),
+        ("company_industry", "text"),
+    ):
+        trigger = tracker.select_one(
+            f'[data-manual-fact-open="{field_name}"]'
+        )
+        editor = tracker.select_one(
+            f'[data-manual-fact-dialog][data-manual-fact-field="{field_name}"]'
+        )
+        assert trigger is not None
+        assert trigger.name == "button"
+        assert trigger.get_text(" ", strip=True) == "Unknown"
+        assert editor is not None
+        assert editor.select_one(f'input[name="value"][type="{input_type}"]')
+        assert editor.select_one('[data-manual-fact-save]') is not None
+        assert editor.select_one('[data-manual-fact-cancel]') is not None
+    assert review.select_one("[data-manual-fact-open]") is None
+
+
+def test_job_tracker_displays_manually_added_facts() -> None:
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "posted_at": None,
+                "manual_posted_at": date(2026, 8, 12),
+                "manual_company_size": 4200,
+                "manual_company_industry": "Logistics",
+            }
+        )
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+    card = page.select_one('[data-review-block="global"] [data-job-key="saved"]')
+    assert card is not None
+    assert card.get("data-posted-at") == "2026-08-12"
+    assert card.get("data-company-size-minimum") == "4200"
+    assert card.get("data-company-size-maximum") == "4200"
+    assert card.get("data-company-industry") == "Logistics"
+    assert card.select_one(".job-preview-posted").get_text(" ", strip=True) == (
+        "Posted: 2026-08-12"
+    )
+    assert card.select_one('[data-manual-fact="posted_at"]').get_text(
+        " ", strip=True
+    ) == "2026-08-12"
+    assert card.select_one('[data-manual-fact="company_size"]').get_text(
+        " ", strip=True
+    ) == "4,200 employees · Manually added"
+    assert card.select_one('[data-manual-fact="company_industry"]').get_text(
+        " ", strip=True
+    ) == "Logistics · Manually added"
+
+
+def test_job_tracker_preview_omits_unset_salaries() -> None:
+    expected_only = _job("expected", user=UserStatus.SAVED).model_copy(
+        update={
+            "expected_salary": SalaryValue(
+                amount="5,500 EUR",
+                period=SalaryPeriod.MONTH,
+            )
+        }
+    )
+    tracked = _snapshot(expected_only, _job("empty", user=UserStatus.SAVED))
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+    expected_preview = page.select_one(
+        '[data-job-key="expected"] [data-job-preview-salaries]'
+    )
+    assert expected_preview is not None
+    assert expected_preview.get_text(" ", strip=True) == (
+        "Expected salary: 5,500 EUR /month"
+    )
+    assert page.select_one('[data-job-key="empty"] [data-job-preview-salaries]') is None
 
 
 def test_standalone_review_has_manual_job_url_dialog() -> None:

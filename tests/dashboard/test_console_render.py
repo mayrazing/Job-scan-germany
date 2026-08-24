@@ -26,7 +26,6 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
-from job_scan.resume_catalog import ResumeCatalogEntry
 from job_scan.search_history import SearchHistoryEntry
 from job_scan.setup_service import SetupAnswers
 
@@ -59,6 +58,7 @@ def ats_history_entry(run_id: str) -> AtsHistoryEntry:
     return AtsHistoryEntry(
         run_id=run_id,
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada Lovelace",
         resume_filename="Ada CV.pdf",
         finished_at=datetime(2026, 8, 8, 12, 30, tzinfo=UTC),
@@ -72,6 +72,7 @@ def ats_bundle(run_id: str) -> AtsCheckBundle:
     return AtsCheckBundle(
         run_id=run_id,
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada Lovelace",
         resume_filename="Ada CV.pdf",
         started_at=datetime(2026, 8, 8, 12, 25, tzinfo=UTC),
@@ -251,7 +252,6 @@ def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None
         render_console(
             snapshot,
             global_snapshot=tracked,
-            ats_source_run_id="search-1",
         ),
         "html.parser",
     )
@@ -286,8 +286,9 @@ def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None
     assert "No ATS check is running" in page.select_one("#ats-running").get_text(
         " ", strip=True
     )
-    start = page.select_one('[data-open-ats][data-search-run-id="search-1"]')
+    start = page.select_one("[data-open-ats]")
     assert start is not None and start.has_attr("disabled")
+    assert not start.has_attr("data-search-run-id")
     assert start.get_text(" ", strip=True) == "Check 0 selected jobs"
     assert review_view.select("[data-ats-select-job]") == []
     assert job_tracker_view.select_one(
@@ -322,7 +323,6 @@ def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
         render_console(
             snapshot,
             global_snapshot=tracked,
-            ats_source_run_id="search-1",
         ),
         "html.parser",
     )
@@ -337,46 +337,47 @@ def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
     assert page.select(".review-groups > .job-group > summary") == []
     assert current_block.select("[data-ats-select-job]") == []
     assert global_block.select_one(
-        '#saved .card-header [data-ats-select-job][value="saved"]'
+        '#saved [data-job-key="saved"] [data-ats-select-job][value="saved"]'
     )
     assert global_block.select_one(
-        '#applied .card-header [data-ats-select-job][value="applied"]'
+        '#applied [data-job-key="applied"] [data-ats-select-job][value="applied"]'
     )
     assert global_block.select_one("#saved .card-body > .ats-job-selector") is None
 
 
-def test_job_tracker_shows_and_can_correct_the_application_resume() -> None:
+def test_job_without_a_saved_resume_cannot_be_selected_for_ats() -> None:
+    tracked = review_job("saved").model_copy(
+        update={"user_status": UserStatus.SAVED}
+    )
+    page = BeautifulSoup(
+        render_console(global_snapshot=review_snapshot(tracked)),
+        "html.parser",
+    )
+
+    selector = page.select_one(
+        '[data-job-key="saved"] [data-ats-select-job][value="saved"]'
+    )
+    assert selector is not None
+    assert selector.has_attr("disabled")
+    assert selector.parent.get_text(" ", strip=True) == "No resume"
+
+
+def test_job_tracker_shows_each_resume_with_download_and_replace() -> None:
     resume_a = "sha256:" + "a" * 64
-    resume_b = "sha256:" + "b" * 64
     tracked = review_snapshot(
         review_job("known").model_copy(
             update={
                 "user_status": UserStatus.APPLIED,
                 "application_resume_id": resume_a,
+                "application_resume_filename": "backend.pdf",
             }
         ),
         review_job("unknown").model_copy(
             update={"user_status": UserStatus.REJECTED}
         ),
     )
-    resumes = [
-        ResumeCatalogEntry(
-            resume_id=resume_a,
-            profile_hash="sha256:" + "c" * 64,
-            candidate_name="Backend CV",
-            filename="backend.pdf",
-            created_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
-        ),
-        ResumeCatalogEntry(
-            resume_id=resume_b,
-            profile_hash="sha256:" + "d" * 64,
-            candidate_name="Platform CV",
-            filename="platform.pdf",
-            created_at=datetime(2026, 8, 20, 10, 0, tzinfo=UTC),
-        ),
-    ]
     page = BeautifulSoup(
-        render_console(global_snapshot=tracked, resume_catalog=resumes),
+        render_console(global_snapshot=tracked),
         "html.parser",
     )
 
@@ -386,23 +387,18 @@ def test_job_tracker_shows_and_can_correct_the_application_resume() -> None:
     )
     assert known is not None
     assert unknown is not None
-    known_resume = known.select_one("[data-application-resume]")
-    unknown_resume = unknown.select_one("[data-application-resume]")
+    known_resume = known.select_one("[data-job-resume-name]")
+    unknown_resume = unknown.select_one("[data-job-resume-name]")
     assert known_resume is not None
     assert unknown_resume is not None
-    assert known_resume.get_text(" ", strip=True) == (
-        "Applied with: Backend CV - backend.pdf"
-    )
-    correction = known.select_one(
-        'form[data-job-action="application-resume"] select[name="resume_id"]'
-    )
-    assert correction is not None
-    assert [option.get("value") for option in correction.select("option")] == [
-        resume_a,
-        resume_b,
-    ]
-    assert correction.select_one("option[selected]").get("value") == resume_a
-    assert unknown_resume.get_text(" ", strip=True) == "Applied with: Unknown"
+    assert known_resume.get_text(" ", strip=True) == "backend.pdf"
+    assert unknown_resume.get_text(" ", strip=True) == "Unknown"
+    assert known.select_one("[data-job-resume-download]") is not None
+    assert unknown.select_one("[data-job-resume-download]") is None
+    assert known.select_one("[data-job-resume-replace]") is not None
+    assert unknown.select_one("[data-job-resume-replace]") is not None
+    assert known.select_one('[data-job-action="application-resume"]') is None
+    assert "Use saved resume" not in known.get_text(" ", strip=True)
 
 
 def test_console_omits_obsolete_review_group_collapse_control() -> None:
@@ -478,31 +474,6 @@ def test_ats_history_is_collapsed_and_selected_bundle_is_rendered() -> None:
     assert "AI check timed out." in failed_report.get_text(" ", strip=True)
     assert failed_report.select("progress") == []
     assert "%" not in failed_report.get_text(" ", strip=True)
-
-
-def test_ats_history_time_prefers_latest_history_search_when_available() -> None:
-    entry = ats_history_entry("ats-1")
-    bundle = ats_bundle("ats-1")
-    page = BeautifulSoup(
-        render_console(
-            ats_history=[entry],
-            selected_ats=bundle,
-            ats_history_latest_searches={
-                "ats-1": datetime(2026, 8, 20, 15, 30, tzinfo=UTC)
-            },
-        ),
-        "html.parser",
-    )
-
-    history = page.select_one("details#ats-history")
-    assert history is not None
-    time = history.select_one('[data-ats-history-id="ats-1"] time[data-local-datetime]')
-    assert time is not None
-    assert time["datetime"] == "2026-08-20T15:30:00+00:00"
-    assert "2026-08-20 15:30" in time.get_text()
-    context = page.select_one("#ats-history-context")
-    assert context is not None
-    assert "2026-08-20 15:30" in context.get_text()
 
 
 def test_ats_history_time_falls_back_to_check_finish_time() -> None:
@@ -886,6 +857,14 @@ def test_console_lists_all_saved_api_providers_as_runtimes_without_activation() 
         "api:open-router": "Open Router API · claude-sonnet-4",
     }
     assert page.select_one("[data-edit-selected-api]") is None
+
+
+def test_job_tracker_does_not_render_a_shared_ats_resume_picker() -> None:
+    page = BeautifulSoup(render_console(), "html.parser")
+
+    assert page.select_one("#ats-resume") is None
+    assert page.select_one("[data-ats-default-resume]") is None
+    assert page.select_one("[data-open-ats]") is not None
 
 
 def test_review_card_shows_company_size_source_and_checked_date() -> None:

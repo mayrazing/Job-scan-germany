@@ -121,10 +121,10 @@ def _source_snapshot_script(
 
             return thyssenkrupp_snapshot_script(external_id), "thyssenkrupp"
         case SourceKind.MANUAL:
-            return _manual_snapshot_script(occurrence.source_job_key), "manual"
+            return manual_snapshot_script(occurrence.source_job_key), "manual"
 
 
-def _manual_snapshot_script(source_job_key: str) -> str:
+def manual_snapshot_script(source_job_key: str) -> str:
     """Return one generic DOM whitelist for any manually imported job page."""
     return browser_snapshot_script(
         r"""
@@ -153,11 +153,9 @@ def _manual_snapshot_script(source_job_key: str) -> str:
 """.strip().replace("__EXPECTED_SOURCE_JOB_KEY__", json.dumps(source_job_key))
     )
 
+
 _BROWSER_SNAPSHOT_HELPERS_JS = r"""
-  const removeResourceUrls = (value) => value.replace(
-    /url\(\s*([^)]*?)\s*\)/gi,
-    (match, target) => /^['"]?data:/i.test(target.trim()) ? match : "none"
-  );
+  const removeResourceUrls = (value) => value.replace(/url\(\s*[^)]*?\s*\)/gi, "none");
   const sanitizeCss = (value) => removeResourceUrls(value
     .replace(/behavior\s*:[^;}]*;?/gi, "")
     .replace(/[-\w]+\s*:[^;}]*expression\s*\([^;}]*;?/gi, ""))

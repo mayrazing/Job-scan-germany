@@ -40,6 +40,7 @@ def test_completed_bundle_keeps_resume_check_and_ordered_job_snapshots() -> None
     bundle = AtsCheckBundle(
         run_id="ats-1",
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada",
         resume_filename="Ada CV.pdf",
         started_at=datetime(2026, 8, 9, 10, tzinfo=UTC),
@@ -62,6 +63,38 @@ def test_completed_bundle_keeps_resume_check_and_ordered_job_snapshots() -> None
 
     assert bundle.jobs[0].assessment == assessment
     assert bundle.failed_job_count == 0
+
+
+def test_completed_bundle_identifies_the_resume_by_content_hash() -> None:
+    bundle = AtsCheckBundle.model_validate(
+        {
+            "run_id": "ats-1",
+            "search_run_id": "search-1",
+            "resume_id": "sha256:" + "a" * 64,
+            "candidate_name": "Ada",
+            "resume_filename": "Ada CV.pdf",
+            "started_at": "2026-08-09T10:00:00Z",
+            "finished_at": "2026-08-09T10:01:00Z",
+            "ai_runtime": "claude-code",
+            "ai_model": "sonnet",
+            "resume": {
+                "readiness_score": 88,
+                "verdict": "ready",
+                "title": "Resume content is ATS ready",
+                "summary": "Core resume content is clear.",
+                "findings": [
+                    {
+                        "label": "Text extraction",
+                        "status": "pass",
+                        "detail": "Selectable resume text was extracted.",
+                    }
+                ],
+            },
+            "jobs": [],
+        }
+    )
+
+    assert bundle.resume_id == "sha256:" + "a" * 64
 
 
 def test_ats_scores_reject_values_outside_zero_to_one_hundred() -> None:

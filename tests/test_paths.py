@@ -8,6 +8,7 @@ def test_job_scan_home_overrides_default(tmp_path: Path) -> None:
 
     assert paths.root == tmp_path
     assert paths.config_toml == tmp_path / "config.toml"
+    assert paths.job_tracker_config_toml == tmp_path / "job-tracker-config.toml"
     assert paths.profile_md == tmp_path / "profile.md"
     assert paths.jobs_jsonl == tmp_path / "output" / "jobs.jsonl"
     assert paths.dashboard_html == tmp_path / "output" / "index.html"
@@ -47,5 +48,4 @@ def test_ensure_directories_creates_only_data_directories(tmp_path: Path) -> Non
         Path("logs"),
         Path("history"),
         Path("ats-history"),
-        Path("global-resumes"),
     }

@@ -38,7 +38,7 @@ def test_browser_snapshot_script_waits_for_dynamic_job_content() -> None:
 
 def test_manual_snapshot_waits_for_visible_job_content_to_stabilize() -> None:
     sync_api = pytest.importorskip("playwright.sync_api")
-    script = capture_module._manual_snapshot_script("manual:careers.example:1")
+    script = capture_module.manual_snapshot_script("manual:careers.example:1")
 
     with sync_api.sync_playwright() as engine:
         browser = engine.chromium.launch(headless=True)
@@ -89,6 +89,36 @@ def test_browser_snapshot_script_removes_active_legacy_css() -> None:
         assert "behavior:" not in html
         assert "expression(" not in html
         assert "color: red" in html
+        browser.close()
+
+
+def test_browser_snapshot_script_removes_css_embedded_images() -> None:
+    sync_api = pytest.importorskip("playwright.sync_api")
+    script = browser_snapshot_script(
+        """
+        return buildJobSnapshot({
+          snapshotKey: "test:default:1",
+          title: "Test job",
+          sourceLabel: "Test",
+          accent: "#000",
+          roots: [document.querySelector("main")],
+        });
+        """
+    )
+
+    with sync_api.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            "<style>.hero { background-image: "
+            "url(data:image/png;base64,AAAA); }</style>"
+            "<main class='hero'>Job information</main>"
+        )
+
+        html = page.evaluate(script)["html"]
+
+        assert "data:image" not in html
+        assert "background-image: none" in html
         browser.close()
 
 

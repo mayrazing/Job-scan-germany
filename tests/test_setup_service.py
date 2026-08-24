@@ -242,6 +242,22 @@ def test_setup_reuses_profile_for_same_resume_while_updating_config(
     assert load_config(paths.config_toml).posted_within_days == 14
 
 
+def test_prepare_can_skip_the_current_review_profile(tmp_path: Path) -> None:
+    paths = paths_at(tmp_path)
+    fake = FakeClaude()
+    service = SetupService(paths, fake)
+    service.run(RESUME, valid_answers())
+
+    prepared = service.prepare(
+        RESUME,
+        valid_answers(),
+        reuse_current_profile=False,
+    )
+
+    assert len(fake.requests) == 2
+    assert prepared.profile_bytes == PROFILE.encode("utf-8")
+
+
 def test_setup_publishes_a_round_trippable_config_without_a_schedule_time(
     tmp_path: Path,
 ) -> None:

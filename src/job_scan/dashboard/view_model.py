@@ -8,9 +8,11 @@ from types import MappingProxyType
 from job_scan.domain import (
     AvailabilityStatus,
     CompanySizeEvidence,
+    JobNote,
     JobRecord,
     MachineStatus,
     PrimaryView,
+    SalaryValue,
     Snapshot,
     UserStatus,
 )
@@ -94,6 +96,7 @@ class JobCard:
     reason: str
     source_error: str | None
     review_error: str | None
+    manual_import_errors: tuple[str, ...]
     german_requirement: str | None
     labels: tuple[str, ...]
     exclusion_reasons: tuple[str, ...]
@@ -104,6 +107,10 @@ class JobCard:
     user_status: UserStatus
     user_status_history: tuple[JobStatusEvent, ...]
     application_resume_id: str | None
+    application_resume_filename: str | None
+    expected_salary: SalaryValue | None
+    offer_salary: SalaryValue | None
+    notes: tuple[JobNote, ...]
     machine_status: MachineStatus
     effective_status: MachineStatus
     availability_status: AvailabilityStatus
@@ -115,6 +122,7 @@ class JobCard:
     company_size_checked_at: datetime | None
     company_size_minimum: int | None
     company_size_maximum: int | None
+    company_size_manually_added: bool
     company_industry_label: str | None
     company_industry_lookup_method: str | None
     company_industry_source_url: str | None
@@ -213,15 +221,31 @@ def _card(job: JobRecord) -> JobCard:
     )
     company_size = job.company_size
     company_industry = job.company_industry
+    manual_company_size = job.manual_company_size
+    manual_company_industry = job.manual_company_industry
     job_snapshot_id, job_snapshot_error_code = _job_snapshot_state(job)
-    company_size_minimum, company_size_maximum = _company_size_bounds(company_size)
+    company_size_minimum, company_size_maximum = (
+        (manual_company_size, manual_company_size)
+        if manual_company_size is not None
+        else _company_size_bounds(company_size)
+    )
+    sourced_company_size_label = (
+        company_size.reported_size
+        or (
+            _company_size_label(company_size.band.value)
+            if company_size.band.value != "unknown"
+            else None
+        )
+        if company_size is not None
+        else None
+    )
     return JobCard(
         canonical_key=job.canonical_job_key,
         company=job.company,
         title=job.title,
         location=job.location,
         description=job.description,
-        posted_at=job.posted_at,
+        posted_at=job.manual_posted_at or job.posted_at,
         url=str(job.url),
         job_snapshot_id=job_snapshot_id,
         job_snapshot_error_code=job_snapshot_error_code,
@@ -237,8 +261,11 @@ def _card(job: JobRecord) -> JobCard:
             else None
         ),
         review_error=(
-            job.last_error if job.machine_status is MachineStatus.PENDING else None
+            _display_ai_review_error(job.last_error)
+            if job.machine_status is MachineStatus.PENDING
+            else None
         ),
+        manual_import_errors=tuple(job.manual_import_errors),
         german_requirement=(
             job.ai_review.german_requirement if job.ai_review is not None else None
         ),
@@ -254,57 +281,100 @@ def _card(job: JobRecord) -> JobCard:
             for entry in job.user_status_history
         ),
         application_resume_id=job.application_resume_id,
+        application_resume_filename=job.application_resume_filename,
+        expected_salary=(
+            job.expected_salary.model_copy(deep=True)
+            if job.expected_salary is not None
+            else None
+        ),
+        offer_salary=(
+            job.offer_salary.model_copy(deep=True)
+            if job.offer_salary is not None
+            else None
+        ),
+        notes=tuple(note.model_copy(deep=True) for note in job.notes),
         machine_status=job.machine_status,
         effective_status=status,
         availability_status=job.availability_status,
         restored=status is not job.machine_status,
         restorable=job.last_successful_review_profile_hash is not None,
         company_size_label=(
-            company_size.reported_size
-            or _company_size_label(company_size.band.value)
-            if company_size is not None
-            else None
+            f"{manual_company_size:,} employees"
+            if manual_company_size is not None
+            else sourced_company_size_label
         ),
         company_size_source_url=(
             str(company_size.source_url)
-            if company_size is not None and company_size.source_url is not None
+            if manual_company_size is None
+            and company_size is not None
+            and company_size.source_url is not None
             else None
         ),
         company_size_source_title=(
-            company_size.source_title if company_size is not None else None
+            company_size.source_title
+            if manual_company_size is None and company_size is not None
+            else None
         ),
         company_size_checked_at=(
-            company_size.checked_at if company_size is not None else None
+            company_size.checked_at
+            if manual_company_size is None and company_size is not None
+            else None
         ),
         company_size_minimum=company_size_minimum,
         company_size_maximum=company_size_maximum,
+        company_size_manually_added=manual_company_size is not None,
         company_industry_label=(
-            company_industry.industry if company_industry is not None else None
-        ),
-        company_industry_lookup_method=(
-            company_industry.lookup_method if company_industry is not None else None
-        ),
-        company_industry_source_url=(
-            str(company_industry.source_url)
+            manual_company_industry
+            if manual_company_industry is not None
+            else company_industry.industry
             if company_industry is not None
             else None
         ),
+        company_industry_lookup_method=(
+            "manual"
+            if manual_company_industry is not None
+            else company_industry.lookup_method
+            if company_industry is not None
+            else None
+        ),
+        company_industry_source_url=(
+            str(company_industry.source_url)
+            if manual_company_industry is None and company_industry is not None
+            else None
+        ),
         company_industry_source_title=(
-            company_industry.source_title if company_industry is not None else None
+            company_industry.source_title
+            if manual_company_industry is None and company_industry is not None
+            else None
         ),
         company_industry_source_name=(
-            company_industry.source_name if company_industry is not None else None
+            company_industry.source_name
+            if manual_company_industry is None and company_industry is not None
+            else None
         ),
         company_industry_checked_at=(
-            company_industry.checked_at if company_industry is not None else None
+            company_industry.checked_at
+            if manual_company_industry is None and company_industry is not None
+            else None
         ),
         company_industry_confidence=(
-            company_industry.confidence if company_industry is not None else None
+            company_industry.confidence
+            if manual_company_industry is None and company_industry is not None
+            else None
         ),
         company_industry_evidence=(
-            tuple(company_industry.evidence) if company_industry is not None else ()
+            tuple(company_industry.evidence)
+            if manual_company_industry is None and company_industry is not None
+            else ()
         ),
     )
+
+
+def _display_ai_review_error(error: str | None) -> str | None:
+    """Return provider-neutral text for one persisted AI review error."""
+    if error is not None and error.startswith("Claude "):
+        return f"AI {error.removeprefix('Claude ')}"
+    return error
 
 
 def _job_snapshot_state(job: JobRecord) -> tuple[str | None, str | None]:

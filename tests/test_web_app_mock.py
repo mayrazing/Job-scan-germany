@@ -8,6 +8,70 @@ from bs4 import BeautifulSoup
 MOCK_PAGE = Path(__file__).parents[1] / "prototypes" / "web-app" / "index.html"
 
 
+def test_mock_uses_ui5_for_standard_interface_controls() -> None:
+    page = BeautifulSoup(MOCK_PAGE.read_text(encoding="utf-8"), "html.parser")
+
+    stylesheet_sources = [link.get("href", "") for link in page.select("link[href]")]
+    script_sources = [script.get("src", "") for script in page.select("script[src]")]
+    assert not any("bootstrap" in source for source in stylesheet_sources + script_sources)
+    assert not any("tom-select" in source for source in stylesheet_sources + script_sources)
+    assert "ui5-bundle.js" in script_sources
+
+    playwright = pytest.importorskip("playwright.sync_api")
+    with playwright.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        rendered = browser.new_page()
+        external_requests: list[str] = []
+        rendered.on(
+            "request",
+            lambda request: external_requests.append(request.url)
+            if request.url.startswith(("http://", "https://"))
+            else None,
+        )
+        rendered.goto(MOCK_PAGE.as_uri())
+        rendered.wait_for_function("customElements.get('ui5-button') !== undefined")
+
+        expected_controls = {
+            "ui5-button",
+            "ui5-card",
+            "ui5-checkbox",
+            "ui5-combobox",
+            "ui5-dialog",
+            "ui5-file-uploader",
+            "ui5-input",
+            "ui5-multi-combobox",
+            "ui5-panel",
+            "ui5-progress-indicator",
+            "ui5-select",
+            "ui5-step-input",
+            "ui5-time-picker",
+        }
+        assert expected_controls <= set(
+            rendered.locator("[data-ui5-adapted]").evaluate_all(
+                "elements => elements.map(element => element.localName)"
+            )
+        )
+        assert rendered.evaluate(
+            "document.querySelectorAll("
+            "\"button, input:not([type='hidden']), select, textarea, dialog, details\""
+            ").length"
+        ) == 0
+        assert external_requests == []
+        assert rendered.locator("#ai-provider-base-url").evaluate(
+            "control => control.type"
+        ) == "URL"
+        rendered.locator("[data-edit-ai-provider]").click()
+        rendered.locator("#ai-provider-base-url").evaluate(
+            "control => { control.value = 'not a url'; }"
+        )
+        rendered.locator("[data-save-ai-provider]").click()
+        assert rendered.locator("#ai-editor-feedback").inner_text() == (
+            "Enter a valid Base URL."
+        )
+        assert rendered.locator("#ai-provider-editor").get_attribute("hidden") is None
+        browser.close()
+
+
 def test_mock_covers_setup_run_and_review_flow() -> None:
     page = BeautifulSoup(MOCK_PAGE.read_text(encoding="utf-8"), "html.parser")
 
@@ -128,7 +192,7 @@ def test_mock_review_matches_the_current_review_workspace() -> None:
         for group_id in sorted(expected_groups - {"recommended"})
     )
 
-    card = review.select_one(".review-groups .job-card")
+    card = review.select_one(".review-groups .job-card:not([data-job-preview-card])")
     assert card is not None
     assert card.has_attr("data-sources")
     assert card.has_attr("data-posted-at")
@@ -159,6 +223,51 @@ def test_mock_review_matches_the_current_review_workspace() -> None:
         == tracker_statuses
         for select in review.select('[data-job-action="status"] select[name="status"]')
     )
+
+
+def test_mock_job_preview_uses_full_width_list_row() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+
+    with playwright.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(MOCK_PAGE.as_uri())
+        page.evaluate("document.querySelector('#review-preview').hidden = false")
+
+        preview = page.locator("#recommended [data-job-preview-card]")
+        grid = page.locator("#recommended .card-grid")
+        assert preview.count() == 1
+        box = preview.bounding_box()
+        grid_box = grid.bounding_box()
+        assert box is not None
+        assert grid_box is not None
+        assert abs(box["width"] - grid_box["width"]) <= 1
+        assert box["width"] > box["height"] * 3
+        assert box["height"] <= 180
+
+        browser.close()
+
+
+def test_mock_job_preview_card_opens_details_without_hijacking_status_control() -> None:
+    playwright = pytest.importorskip("playwright.sync_api")
+
+    with playwright.sync_playwright() as engine:
+        browser = engine.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(MOCK_PAGE.as_uri())
+        page.evaluate("document.querySelector('#review-preview').hidden = false")
+
+        preview = page.locator("#recommended [data-job-preview-card]")
+        dialog = page.locator("#job-detail-dialog")
+        preview.locator("[data-job-preview-open-area]").click()
+        assert dialog.evaluate("element => element.open") is True
+        assert dialog.locator("h3").inner_text() == "Senior Backend Engineer"
+        dialog.locator("[data-close-job-detail]").click()
+
+        preview.locator('ui5-select[name="status"]').click()
+        assert dialog.evaluate("element => element.open") is False
+
+        browser.close()
 
 
 def test_mock_applied_job_card_shows_lifecycle_summary_and_history() -> None:
@@ -216,27 +325,36 @@ def test_mock_review_and_ats_controls_update_the_visible_workspace() -> None:
             "tabs => tabs.map(tab => tab.dataset.reviewGroupTab)"
         )[:3] == ["pending", "recommended", "saved"]
 
-        page.select_option("#review-company-size", "1000")
+        page.locator("#review-company-size").evaluate(
+            "(control, value) => { control.value = value; control.dispatchEvent(new Event('change', { bubbles: true })); }",
+            "1000",
+        )
         assert page.locator("#recommended .job-card:not([hidden])").count() == 2
 
         status_form = page.locator('#recommended [data-job-action="status"]').first
-        status_form.locator('select[name="status"]').select_option("saved")
-        status_form.locator('button[type="submit"]').click()
-        status_card = status_form.locator("xpath=ancestor::article[1]")
+        status_form.locator('[name="status"]').evaluate(
+            "(control, value) => { control.value = value; control.dispatchEvent(new Event('change', { bubbles: true })); }",
+            "saved",
+        )
+        status_form.locator("ui5-button").click()
+        status_card = status_form.locator("xpath=ancestor::ui5-card[1]")
         assert "saved" in status_card.locator("[data-user-status]").inner_text()
 
-        page.select_option("#review-company-size", "0")
+        page.locator("#review-company-size").evaluate(
+            "(control, value) => { control.value = value; control.dispatchEvent(new Event('change', { bubbles: true })); }",
+            "0",
+        )
         page.locator('[data-review-group-tab="excluded"]').click()
         restore_form = page.locator('#excluded [data-job-action="restore"]')
-        restore_form.locator('button[type="submit"]').click()
+        restore_form.locator("ui5-button").click()
         excluded_card = page.locator("#excluded .job-card")
         assert "eligible" in excluded_card.locator("[data-machine-status]").inner_text()
         assert restore_form.count() == 0
 
         page.locator('[data-review-group-tab="recommended"]').click()
         selectors = page.locator("#recommended [data-ats-select-job]")
-        selectors.nth(0).check()
-        selectors.nth(2).check()
+        selectors.nth(0).click()
+        selectors.nth(2).click()
         start_ats = page.locator("[data-open-ats]")
         assert start_ats.inner_text() == "Check 2 selected jobs"
         assert start_ats.is_enabled()
@@ -264,9 +382,9 @@ def test_mock_job_lifecycle_details_expand_on_click() -> None:
         page.locator('[data-review-group-tab="applied"]').click()
 
         history = page.locator("#applied [data-lifecycle-history]")
-        assert history.get_attribute("open") is None
-        history.locator("summary").click()
-        assert history.get_attribute("open") == ""
+        assert history.evaluate("element => element.collapsed") is True
+        history.click(position={"x": 20, "y": 20})
+        assert history.evaluate("element => element.collapsed") is False
         assert history.locator("[data-lifecycle-event]").count() == 2
 
         browser.close()
@@ -361,7 +479,20 @@ def test_daily_schedule_is_optional_and_removable() -> None:
     page = BeautifulSoup(MOCK_PAGE.read_text(encoding="utf-8"), "html.parser")
 
     scan_time = page.select_one("#scan-time")
+    schedule_card = page.select_one(".schedule-status-card")
     assert scan_time is not None
+    assert schedule_card is not None
+    assert not {
+        "d-flex",
+        "flex-column",
+        "flex-sm-row",
+        "align-items-start",
+        "justify-content-between",
+        "gap-3",
+        "border",
+        "rounded",
+        "p-3",
+    } & set(schedule_card.get("class", []))
     assert not scan_time.has_attr("value")
     assert not scan_time.has_attr("required")
     assert page.select_one("#schedule-status").get_text(strip=True) == "Not scheduled"

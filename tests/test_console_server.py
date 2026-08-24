@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
@@ -33,7 +34,8 @@ from job_scan.ats_workflow import (
 )
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings, save_config
 from job_scan.dashboard.render import render_dashboard
-from job_scan.domain import AvailabilityStatus, JobRecord, MachineStatus
+from job_scan.domain import AvailabilityStatus, JobRecord, MachineStatus, UserStatus
+from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
@@ -159,9 +161,11 @@ class RecordingWorkflow:
 
 
 class RecordingAtsWorkflow:
-    def __init__(self) -> None:
+    def __init__(self, history: AtsHistoryStore) -> None:
+        self.history = history
         self.started: list[AtsWorkflowInput] = []
         self.error: Exception | None = None
+        self.busy = False
         self.state = AtsRunState(
             run_id="ats-1",
             search_run_id="search-1",
@@ -183,6 +187,14 @@ class RecordingAtsWorkflow:
 
     def read_current_run(self) -> AtsRunState | None:
         return self.state if self.state.status == "running" else None
+
+    def is_busy(self) -> bool:
+        return self.busy
+
+    def delete_history(self, run_id: str) -> None:
+        if self.busy:
+            raise AtsWorkflowBusy("An ATS check is already running.")
+        self.history.delete(run_id)
 
 
 @pytest.fixture
@@ -234,12 +246,15 @@ def ats_console_client(
     repository.mutate(
         lambda snapshot: snapshot.model_copy(update={"jobs": jobs}, deep=True)
     )
+    resume_bytes = b"DEFAULT RESUME"
+    resume_digest = hashlib.sha256(resume_bytes).hexdigest()
+    resume_id = f"sha256:{resume_digest}"
     save_config(
         paths.config_toml,
         AppConfig(
             candidate_name="Ada",
             resume_path=paths.root / "default.pdf",
-            resume_sha256="sha256:" + "a" * 64,
+            resume_sha256=resume_id,
             profile_sha256="sha256:" + "b" * 64,
             search_terms=["backend"],
             locations=["Berlin"],
@@ -248,15 +263,32 @@ def ats_console_client(
             scheduler=SchedulerSettings(),
         ),
     )
+    paths.profile_md.write_text("# Ada", encoding="utf-8")
+    (paths.root / "default.pdf").write_bytes(resume_bytes)
+    resume_dir = paths.root / "resumes"
+    resume_dir.mkdir()
+    (resume_dir / f"{resume_digest}.pdf").write_bytes(resume_bytes)
+    global_jobs = GlobalJobStore(paths)
+    for job in jobs:
+        global_jobs.set_status(
+            job,
+            UserStatus.SAVED,
+            now,
+        )
+        tracked = global_jobs.find(job.canonical_job_key)
+        assert tracked is not None
+        global_jobs.set_application_resume(tracked, resume_id, "default.pdf")
     workflow = RecordingWorkflow(paths)
-    ats_workflow = RecordingAtsWorkflow()
+    ats_history = AtsHistoryStore(paths)
+    ats_workflow = RecordingAtsWorkflow(ats_history)
     app = create_review_app(
         repository,
         TOKEN,
         frozenset({ORIGIN}),
         workflow=workflow,  # type: ignore[arg-type]
+        global_job_store=global_jobs,
         ats_workflow=ats_workflow,  # type: ignore[arg-type]
-        ats_history_store=AtsHistoryStore(paths),
+        ats_history_store=ats_history,
     )
     with TestClient(app, base_url=ORIGIN) as client:
         yield client, workflow, ats_workflow
@@ -299,8 +331,7 @@ def test_ats_start_requires_session_and_returns_pollable_state(
 
     response = client.post(
         "/api/ats-runs",
-        data={"search_run_id": "search-1", "job_keys": '["job-2", "job-1"]'},
-        files={"resume": ("custom.pdf", b"CUSTOM RESUME", "application/pdf")},
+        data={"job_keys": '["job-2", "job-1"]'},
         headers=HEADERS,
     )
 
@@ -308,12 +339,15 @@ def test_ats_start_requires_session_and_returns_pollable_state(
     assert response.json()["run_id"] == "ats-1"
     assert client.get("/api/ats-runs/ats-1").json()["stage"] == "resume"
     assert len(ats_workflow.started) == 1
-    assert ats_workflow.started[0].search_run_id == "search-1"
-    assert [job.canonical_job_key for job in ats_workflow.started[0].jobs] == [
+    assert ats_workflow.started[0].search_run_id == "global"
+    assert [
+        job.canonical_job_key
+        for job in ats_workflow.started[0].resumes[0].jobs
+    ] == [
         "job-2",
         "job-1",
     ]
-    assert ats_workflow.started[0].resume_bytes == b"CUSTOM RESUME"
+    assert ats_workflow.started[0].resumes[0].resume_bytes == b"DEFAULT RESUME"
 
 
 def test_ats_current_returns_active_run_then_no_content_when_finished(
@@ -338,8 +372,7 @@ def test_ats_start_rejects_missing_mutation_session(
 
     response = client.post(
         "/api/ats-runs",
-        data={"search_run_id": "search-1", "job_keys": '["job-1"]'},
-        files={"resume": ("custom.pdf", b"CUSTOM RESUME", "application/pdf")},
+        data={"job_keys": '["job-1"]'},
         headers=HEADERS,
     )
 
@@ -357,8 +390,7 @@ def test_ats_start_rejects_empty_duplicate_or_blank_job_keys_before_workflow(
 
     response = client.post(
         "/api/ats-runs",
-        data={"search_run_id": "search-1", "job_keys": json.dumps(job_keys)},
-        files={"resume": ("custom.pdf", b"CUSTOM RESUME", "application/pdf")},
+        data={"job_keys": json.dumps(job_keys)},
         headers=HEADERS,
     )
 
@@ -391,8 +423,7 @@ def test_ats_start_maps_workflow_errors_without_exposing_source_details(
 
     response = client.post(
         "/api/ats-runs",
-        data={"search_run_id": "search-1", "job_keys": '["missing-or-pending"]'},
-        files={"resume": ("custom.pdf", b"CUSTOM RESUME", "application/pdf")},
+        data={"job_keys": '["missing-or-pending"]'},
         headers=HEADERS,
     )
 
@@ -446,6 +477,7 @@ def _archive_search_and_ats(paths: AppPaths) -> None:
         AtsCheckBundle(
             run_id="ats-1",
             search_run_id="search-1",
+            resume_id="sha256:" + "a" * 64,
             candidate_name="Ada",
             resume_filename="Ada.pdf",
             started_at=now,
@@ -501,6 +533,21 @@ def test_ats_history_can_be_loaded_and_deleted_without_touching_search_history(
     assert {path: path.read_bytes() for path in untouched} == untouched
     with pytest.raises(KeyError):
         AtsHistoryStore(paths).load("ats-1")
+
+
+def test_ats_history_delete_returns_conflict_while_an_ats_run_is_busy(
+    ats_console_client: tuple[TestClient, RecordingWorkflow, RecordingAtsWorkflow],
+) -> None:
+    client, workflow, ats_workflow = ats_console_client
+    _archive_search_and_ats(workflow.paths)
+    open_console(client)
+    ats_workflow.busy = True
+
+    response = client.delete("/api/ats-history/ats-1", headers=HEADERS)
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "An ATS check is already running."}
+    assert AtsHistoryStore(workflow.paths).load("ats-1").run_id == "ats-1"
 
 
 @pytest.mark.parametrize("run_id", ["missing", "bad!"])
@@ -589,6 +636,7 @@ def test_setup_loads_newest_ats_result_by_default(
         older.model_copy(
             update={
                 "run_id": "ats-2",
+                "resume_id": "sha256:" + "b" * 64,
                 "finished_at": datetime(2026, 8, 9, 13, tzinfo=UTC),
             }
         ),
@@ -858,7 +906,7 @@ def test_ai_configuration_api_rejects_changes_while_a_scan_is_running(
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
-        assert client.get("/").status_code == 200
+        client.cookies.set("job_scan_session", TOKEN)
         response = client.put(
             "/api/ai/config",
             json={
@@ -892,7 +940,7 @@ def test_ai_configuration_api_rejects_changes_while_an_ai_call_holds_the_lock(
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
-        assert client.get("/").status_code == 200
+        client.cookies.set("job_scan_session", TOKEN)
         with FileRWLock(paths.ai_usage_lock_file).shared():
             assert client.get("/api/ai/config").json()["locked"] is True
             response = client.put(

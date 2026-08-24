@@ -29,32 +29,46 @@ class AtsInputError(ValueError):
 
 
 @dataclass(frozen=True)
-class AtsWorkflowInput:
-    """Hold one caller-owned ATS check input snapshot."""
+class AtsResumeInput:
+    """Pair one resume content hash with the jobs that use that resume."""
 
-    search_run_id: str
+    resume_id: str
     candidate_name: str
     resume_filename: str
     resume_bytes: bytes
     jobs: tuple[JobRecord, ...]
+
+
+@dataclass(frozen=True)
+class AtsWorkflowInput:
+    """Hold one caller-owned ATS check input snapshot."""
+
+    search_run_id: str
+    resumes: tuple[AtsResumeInput, ...]
     config: AppConfig
 
 
 def _validate_input(inputs: AtsWorkflowInput) -> None:
     """Reject incomplete caller input before creating an ATS run."""
-    if not all(
-        value.strip()
-        for value in (
-            inputs.search_run_id,
-            inputs.candidate_name,
-            inputs.resume_filename,
-        )
-    ):
-        raise AtsInputError("ATS check requires search ID, candidate name, and resume filename.")
-    if not inputs.resume_bytes:
-        raise AtsInputError("ATS check requires resume content.")
-    keys = tuple(job.canonical_job_key for job in inputs.jobs)
-    if not keys or len(keys) != len(set(keys)):
+    if not inputs.search_run_id.strip() or not inputs.resumes:
+        raise AtsInputError("ATS check requires a search ID and one or more resumes.")
+    resume_ids = tuple(item.resume_id for item in inputs.resumes)
+    if len(resume_ids) != len(set(resume_ids)):
+        raise AtsInputError("ATS check requires unique resume groups.")
+    for item in inputs.resumes:
+        if not all(
+            value.strip()
+            for value in (item.resume_id, item.candidate_name, item.resume_filename)
+        ):
+            raise AtsInputError("ATS check requires resume identity, name, and filename.")
+        if not item.resume_bytes:
+            raise AtsInputError("ATS check requires resume content.")
+    keys = tuple(
+        job.canonical_job_key
+        for resume in inputs.resumes
+        for job in resume.jobs
+    )
+    if not keys or len(keys) != len(set(keys)) or any(not resume.jobs for resume in inputs.resumes):
         raise AtsInvalidJobSelection("Select one or more unique active jobs.")
 
 
@@ -87,23 +101,27 @@ class AtsWorkflow:
                 message="Preparing the resume content check...",
                 progress_percent=0,
                 tasks=[
-                    AtsTaskState(
-                        task_id="resume",
-                        kind="resume",
-                        label="Resume content readiness",
-                        status="waiting",
-                        message="Waiting",
-                    ),
-                    *[
+                    task
+                    for resume in inputs.resumes
+                    for task in (
                         AtsTaskState(
-                            task_id=job.canonical_job_key,
-                            kind="job",
-                            label=job.title,
+                            task_id=_resume_task_id(resume.resume_id),
+                            kind="resume",
+                            label=resume.resume_filename,
                             status="waiting",
                             message="Waiting",
-                        )
-                        for job in inputs.jobs
-                    ],
+                        ),
+                        *(
+                            AtsTaskState(
+                                task_id=job.canonical_job_key,
+                                kind="job",
+                                label=job.title,
+                                status="waiting",
+                                message="Waiting",
+                            )
+                            for job in resume.jobs
+                        ),
+                    )
                 ],
             )
             self._set_state(initial)
@@ -132,6 +150,15 @@ class AtsWorkflow:
         """Return whether one ATS run currently owns the workflow."""
         return self._run_lock.locked()
 
+    def delete_history(self, run_id: str) -> None:
+        """Delete one result while excluding ATS run start and completion."""
+        if not self._run_lock.acquire(blocking=False):
+            raise AtsWorkflowBusy("An ATS check is already running.")
+        try:
+            self._history.delete(run_id)
+        finally:
+            self._run_lock.release()
+
     def _set_state(self, state: AtsRunState) -> None:
         """Publish one detached state under the state lock."""
         with self._state_lock:
@@ -157,20 +184,38 @@ class AtsWorkflow:
     ) -> None:
         """Check and archive one caller-provided ATS input."""
         try:
-            bundle = self._service.check(
-                AtsCheckInput(
-                    run_id=run_id,
-                    search_run_id=inputs.search_run_id,
-                    candidate_name=inputs.candidate_name,
-                    resume_filename=inputs.resume_filename,
-                    resume_bytes=inputs.resume_bytes,
-                    jobs=inputs.jobs,
-                ),
-                inputs.config,
-                progress=lambda update: self._record_progress(run_id, update),
-            )
-            self._history.archive(bundle, inputs.resume_bytes)
-            self._complete_run(run_id, bundle.failed_job_count)
+            failed_job_count = 0
+            result_ids: list[str] = []
+            for resume in inputs.resumes:
+                previous = self._history.load_for_resume(resume.resume_id)
+                record_id = previous.run_id if previous is not None else str(uuid.uuid4())
+                def record_group_progress(
+                    update: AtsProgressUpdate,
+                    resume_id: str = resume.resume_id,
+                ) -> None:
+                    self._record_progress(
+                        run_id,
+                        _group_progress(update, resume_id),
+                    )
+
+                bundle = self._service.check(
+                    AtsCheckInput(
+                        run_id=record_id,
+                        search_run_id=inputs.search_run_id,
+                        resume_id=resume.resume_id,
+                        candidate_name=resume.candidate_name,
+                        resume_filename=resume.resume_filename,
+                        resume_bytes=resume.resume_bytes,
+                        jobs=resume.jobs,
+                    ),
+                    inputs.config,
+                    progress=record_group_progress,
+                    previous=previous,
+                )
+                entry = self._history.archive(bundle, resume.resume_bytes)
+                result_ids.append(entry.run_id)
+                failed_job_count += bundle.failed_job_count
+            self._complete_run(run_id, failed_job_count, result_ids)
         except Exception as error:  # noqa: BLE001 - worker errors must settle observable state
             safe_message = str(error) if isinstance(error, AtsCheckError) else "ATS check failed."
             self._fail_run(run_id, safe_message)
@@ -197,7 +242,7 @@ class AtsWorkflow:
             )
             settled = sum(item.status in {"complete", "failed", "skipped"} for item in tasks)
             stage = current.stage
-            if task.kind == "job" or (task.task_id == "resume" and update.status == "complete"):
+            if task.kind == "job" or (task.kind == "resume" and update.status == "complete"):
                 stage = "jobs"
             self._runs[run_id] = current.model_copy(
                 update={
@@ -209,7 +254,12 @@ class AtsWorkflow:
                 deep=True,
             )
 
-    def _complete_run(self, run_id: str, failed_job_count: int) -> None:
+    def _complete_run(
+        self,
+        run_id: str,
+        failed_job_count: int,
+        result_ids: list[str],
+    ) -> None:
         """Publish one archived terminal state."""
         message = (
             f"ATS check complete with {failed_job_count} failed jobs."
@@ -226,6 +276,7 @@ class AtsWorkflow:
                     "stage": "archive",
                     "message": message,
                     "progress_percent": 100,
+                    "result_ids": result_ids,
                     "error": None,
                 },
                 deep=True,
@@ -268,3 +319,19 @@ class AtsWorkflow:
                 },
                 deep=True,
             )
+
+
+def _resume_task_id(resume_id: str) -> str:
+    """Return one progress-task ID scoped to a resume content hash."""
+    return f"resume:{resume_id}"
+
+
+def _group_progress(update: AtsProgressUpdate, resume_id: str) -> AtsProgressUpdate:
+    """Scope the service's resume progress event to its resume group."""
+    if update.task_id != "resume":
+        return update
+    return AtsProgressUpdate(
+        task_id=_resume_task_id(resume_id),
+        status=update.status,
+        message=update.message,
+    )

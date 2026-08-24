@@ -3,13 +3,16 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Callable, Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from uuid import UUID, uuid4
 
 from job_scan.domain import (
     GlobalJobDeletion,
+    JobNote,
     JobRecord,
     ResumeMatch,
+    SalaryValue,
     Snapshot,
     SourceOccurrence,
     StoreMeta,
@@ -31,17 +34,6 @@ GLOBAL_USER_STATUSES = frozenset(
         UserStatus.IGNORED,
     }
 )
-APPLICATION_USER_STATUSES = frozenset(
-    {
-        UserStatus.APPLIED,
-        UserStatus.INTERVIEWING,
-        UserStatus.OFFER,
-        UserStatus.WITHDRAWN,
-        UserStatus.REJECTED,
-    }
-)
-
-
 class GlobalJobStore:
     """Persist user-selected job states across independent search snapshots."""
 
@@ -75,6 +67,26 @@ class GlobalJobStore:
             jobs.append(shown)
         return Snapshot(meta=current.meta.model_copy(deep=True), jobs=jobs)
 
+    def load_for_tracker(self) -> Snapshot:
+        """Load every global job with the review for its associated resume."""
+        current = self.load()
+        jobs: list[JobRecord] = []
+        for job in current.jobs:
+            shown = job.model_copy(deep=True)
+            if job.application_resume_id is not None:
+                match = next(
+                    (
+                        item
+                        for item in job.resume_matches
+                        if item.resume_id == job.application_resume_id
+                    ),
+                    None,
+                )
+                if match is not None:
+                    _apply_resume_match(shown, match)
+            jobs.append(shown)
+        return Snapshot(meta=current.meta.model_copy(deep=True), jobs=jobs)
+
     def mutate_details(self, mutator: Callable[[Snapshot], Snapshot]) -> Snapshot:
         """Update global job details without changing membership or user decisions."""
         with self._lock.exclusive():
@@ -94,6 +106,8 @@ class GlobalJobStore:
                     or job.user_status_updated_at != current_job.user_status_updated_at
                     or job.user_status_history != current_job.user_status_history
                     or job.application_resume_id != current_job.application_resume_id
+                    or job.application_resume_filename
+                    != current_job.application_resume_filename
                     or job.global_status_deleted_at
                     != current_job.global_status_deleted_at
                 ):
@@ -143,6 +157,9 @@ class GlobalJobStore:
                 for entry in status_job.user_status_history
             ]
             job.application_resume_id = status_job.application_resume_id
+            job.application_resume_filename = (
+                status_job.application_resume_filename
+            )
         return result
 
     def set_status(
@@ -153,6 +170,7 @@ class GlobalJobStore:
         *,
         resume_id: str | None = None,
         profile_hash: str | None = None,
+        application_resume_filename: str | None = None,
     ) -> Snapshot:
         """Persist one selected status for a job, regardless of its source snapshot."""
         try:
@@ -161,6 +179,8 @@ class GlobalJobStore:
             raise ValueError("status is not a global user status") from exc
         if selected_status not in GLOBAL_USER_STATUSES:
             raise ValueError("global job status cannot be new")
+        if application_resume_filename is not None and resume_id is None:
+            raise ValueError("application resume filename requires a resume id")
         updated_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
 
         with self._lock.exclusive():
@@ -183,6 +203,9 @@ class GlobalJobStore:
                     for entry in previous.user_status_history
                 ]
                 candidate.application_resume_id = previous.application_resume_id
+                candidate.application_resume_filename = (
+                    previous.application_resume_filename
+                )
             candidate.user_status = selected_status
             candidate.user_status_updated_at = (
                 previous.user_status_updated_at
@@ -192,13 +215,10 @@ class GlobalJobStore:
             candidate.global_status_deleted_at = None
             if resume_id is not None and profile_hash is not None:
                 _save_resume_match(candidate, resume_id, profile_hash)
-            if (
-                candidate.application_resume_id is None
-                and resume_id is not None
-                and selected_status in APPLICATION_USER_STATUSES
-            ):
-                candidate.application_resume_id = resume_id
             merged, _changed = _merge_into(jobs, candidate)
+            if application_resume_filename is not None:
+                merged.application_resume_id = resume_id
+                merged.application_resume_filename = application_resume_filename
             if previous is None:
                 merged.user_status_history = []
                 _record_status(merged, UserStatus.SAVED, updated_at)
@@ -208,8 +228,13 @@ class GlobalJobStore:
                 self._persist_unlocked(current, jobs, deletions=deletions)
             )
 
-    def set_application_resume(self, job: JobRecord, resume_id: str) -> JobRecord:
-        """Correct the resume recorded for an existing job application."""
+    def set_application_resume(
+        self,
+        job: JobRecord,
+        resume_id: str | None,
+        filename: str | None = None,
+    ) -> JobRecord:
+        """Replace or clear the resume attached to one tracked job."""
         with self._lock.exclusive():
             current = self._load_and_migrate_unlocked()
             jobs = [item.model_copy(deep=True) for item in current.jobs]
@@ -217,9 +242,245 @@ class GlobalJobStore:
             if not matches:
                 raise KeyError(job.canonical_job_key)
             merged = _merge_jobs([jobs[index] for index in matches])
-            if not _has_application_progress(merged):
-                raise ValueError("job has not entered the application lifecycle")
             merged.application_resume_id = resume_id
+            merged.application_resume_filename = filename
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
+            )
+
+    def set_status_date(
+        self,
+        job: JobRecord,
+        event_index: int,
+        changed_on: date,
+    ) -> JobRecord:
+        """Replace the calendar date of one persisted status event."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            if event_index < 0 or event_index >= len(merged.user_status_history):
+                raise IndexError(event_index)
+            if (
+                event_index > 0
+                and changed_on
+                < merged.user_status_history[event_index - 1].changed_at.date()
+            ) or (
+                event_index < len(merged.user_status_history) - 1
+                and changed_on
+                > merged.user_status_history[event_index + 1].changed_at.date()
+            ):
+                raise ValueError(
+                    "Lifecycle dates must stay between adjacent lifecycle events."
+                )
+            previous = merged.user_status_history[event_index]
+            changed_at = previous.changed_at.replace(
+                year=changed_on.year,
+                month=changed_on.month,
+                day=changed_on.day,
+            )
+            merged.user_status_history[event_index] = UserStatusHistoryEntry(
+                status=previous.status,
+                changed_at=changed_at,
+            )
+            if event_index == len(merged.user_status_history) - 1:
+                merged.user_status_updated_at = changed_at
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
+            )
+
+    def delete_status_event(self, job: JobRecord, event_index: int) -> JobRecord:
+        """Delete one persisted status event while preserving the Saved start."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            if event_index < 0 or event_index >= len(merged.user_status_history):
+                raise IndexError(event_index)
+            if merged.user_status_history[event_index].status is UserStatus.SAVED:
+                raise ValueError("The Saved lifecycle event cannot be deleted.")
+            del merged.user_status_history[event_index]
+            current_event = merged.user_status_history[-1]
+            merged.user_status = current_event.status
+            merged.user_status_updated_at = current_event.changed_at
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
+            )
+
+    def set_salaries(
+        self,
+        job: JobRecord,
+        *,
+        expected_salary: SalaryValue | None,
+        offer_salary: SalaryValue | None,
+    ) -> JobRecord:
+        """Replace the user-entered salary values for one tracked job."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            merged.expected_salary = (
+                expected_salary.model_copy(deep=True)
+                if expected_salary is not None
+                else None
+            )
+            merged.offer_salary = (
+                offer_salary.model_copy(deep=True)
+                if offer_salary is not None
+                else None
+            )
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
+            )
+
+    def add_note(
+        self,
+        job: JobRecord,
+        content: str,
+        now: datetime | None = None,
+        *,
+        note_id: UUID | None = None,
+    ) -> JobNote:
+        """Append one dated note to a tracked job."""
+        note = JobNote(
+            id=note_id or uuid4(),
+            content=content,
+            created_at=_utc_timestamp(now if now is not None else datetime.now(UTC)),
+        )
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            merged.notes = [*merged.notes, note]
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            self._persist_unlocked(current, jobs)
+        return note.model_copy(deep=True)
+
+    def edit_note(self, job: JobRecord, note_id: UUID, content: str) -> JobNote:
+        """Replace one tracked job note while preserving its date and identity."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            note_index = next(
+                (index for index, note in enumerate(merged.notes) if note.id == note_id),
+                None,
+            )
+            if note_index is None:
+                raise KeyError(note_id)
+            previous = merged.notes[note_index]
+            updated = JobNote(
+                id=previous.id,
+                content=content,
+                created_at=previous.created_at,
+            )
+            merged.notes[note_index] = updated
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            self._persist_unlocked(current, jobs)
+        return updated.model_copy(deep=True)
+
+    def delete_note(self, job: JobRecord, note_id: UUID) -> None:
+        """Delete one note from a tracked job."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            note_index = next(
+                (index for index, note in enumerate(merged.notes) if note.id == note_id),
+                None,
+            )
+            if note_index is None:
+                raise KeyError(note_id)
+            del merged.notes[note_index]
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            self._persist_unlocked(current, jobs)
+
+    def set_manual_fact(
+        self,
+        job: JobRecord,
+        field_name: str,
+        value: date | int | str,
+    ) -> JobRecord:
+        """Fill one missing Job Tracker fact with a user-entered value."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            if field_name == "posted_at":
+                if merged.manual_posted_at is not None or merged.posted_at is not None:
+                    raise ValueError("Posted is already known.")
+                if not isinstance(value, date) or isinstance(value, datetime):
+                    raise ValueError("Posted must be a date.")
+                merged.manual_posted_at = value
+            elif field_name == "company_size":
+                known_size = merged.company_size is not None and (
+                    merged.company_size.band.value != "unknown"
+                    or merged.company_size.employee_count is not None
+                    or merged.company_size.reported_size is not None
+                    or merged.company_size.minimum_employees is not None
+                )
+                if merged.manual_company_size is not None or known_size:
+                    raise ValueError("Company size is already known.")
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                    raise ValueError("Company size must be a positive whole number.")
+                merged.manual_company_size = value
+            elif field_name == "company_industry":
+                if (
+                    merged.manual_company_industry is not None
+                    or merged.company_industry is not None
+                ):
+                    raise ValueError("Company industry is already known.")
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("Company industry cannot be empty.")
+                merged.manual_company_industry = value.strip()
+            else:
+                raise ValueError("Unsupported manual fact.")
             first = matches[0]
             jobs[first] = merged
             for index in reversed(matches[1:]):
@@ -272,6 +533,10 @@ class GlobalJobStore:
                 ]
                 candidate.user_status = existing_status.user_status
                 candidate.user_status_updated_at = existing_status.user_status_updated_at
+                candidate.application_resume_id = existing_status.application_resume_id
+                candidate.application_resume_filename = (
+                    existing_status.application_resume_filename
+                )
             merged, _changed = _merge_into(jobs, candidate)
             _record_status(
                 merged,
@@ -282,21 +547,6 @@ class GlobalJobStore:
             if jobs != current.jobs or restored:
                 self._persist_unlocked(current, jobs, deletions=deletions)
             return merged.model_copy(deep=True)
-
-    def associate_profile(self, *, resume_id: str, profile_hash: str) -> None:
-        """Associate migrated global jobs whose active review used one profile."""
-        with self._lock.exclusive():
-            current = self._load_and_migrate_unlocked()
-            jobs = [item.model_copy(deep=True) for item in current.jobs]
-            changed = False
-            for job in jobs:
-                if profile_hash not in _active_profile_hashes(job):
-                    continue
-                before = job.resume_matches
-                _save_resume_match(job, resume_id, profile_hash)
-                changed = changed or job.resume_matches != before
-            if changed:
-                self._persist_unlocked(current, jobs)
 
     def delete(self, key: str, now: datetime | None = None) -> None:
         """Delete one tracked job while retaining only re-import identifiers."""
@@ -528,11 +778,10 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         profile.user_status = status_job.user_status
         profile.user_status_updated_at = status_job.user_status_updated_at
     if status_job is not None:
-        profile.user_status_history = (
-            _merged_status_history(candidates)
-            if status_job.user_status_history
-            else []
-        )
+        profile.user_status_history = [
+            entry.model_copy(deep=True)
+            for entry in status_job.user_status_history
+        ]
         _record_status(
             profile,
             status_job.user_status,
@@ -554,6 +803,61 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         if application_job is not None
         else None
     )
+    profile.application_resume_filename = (
+        application_job.application_resume_filename
+        if application_job is not None
+        else None
+    )
+    salary_job = max(
+        (
+            job
+            for job in candidates
+            if job.expected_salary is not None or job.offer_salary is not None
+        ),
+        key=lambda job: (
+            job.user_status_updated_at,
+            job.last_seen,
+            job.canonical_job_key,
+        ),
+        default=None,
+    )
+    profile.expected_salary = (
+        salary_job.expected_salary.model_copy(deep=True)
+        if salary_job is not None and salary_job.expected_salary is not None
+        else None
+    )
+    profile.offer_salary = (
+        salary_job.offer_salary.model_copy(deep=True)
+        if salary_job is not None and salary_job.offer_salary is not None
+        else None
+    )
+    notes: dict[UUID, JobNote] = {}
+    for candidate in candidates:
+        for note in candidate.notes:
+            notes.setdefault(note.id, note.model_copy(deep=True))
+    profile.notes = sorted(
+        notes.values(),
+        key=lambda note: (note.created_at, str(note.id)),
+    )
+    for field_name in (
+        "manual_posted_at",
+        "manual_company_size",
+        "manual_company_industry",
+    ):
+        fact_job = max(
+            (job for job in candidates if getattr(job, field_name) is not None),
+            key=lambda job: (
+                job.user_status_updated_at,
+                job.last_seen,
+                job.canonical_job_key,
+            ),
+            default=None,
+        )
+        setattr(
+            profile,
+            field_name,
+            getattr(fact_job, field_name) if fact_job is not None else None,
+        )
     profile.source_occurrences = _merged_occurrences(candidates)
     profile.resume_matches = _merged_resume_matches(candidates)
     return profile
@@ -570,13 +874,6 @@ def _newest_status_job(candidates: Sequence[JobRecord]) -> JobRecord | None:
             bool(job.user_status_history),
             job.canonical_job_key,
         ),
-    )
-
-
-def _has_application_progress(job: JobRecord) -> bool:
-    return job.user_status in APPLICATION_USER_STATUSES or any(
-        entry.status in APPLICATION_USER_STATUSES
-        for entry in job.user_status_history
     )
 
 
@@ -608,19 +905,6 @@ def _utc_timestamp(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("tracker timestamps must be timezone-aware")
     return value.astimezone(UTC)
-
-
-def _merged_status_history(
-    candidates: Sequence[JobRecord],
-) -> list[UserStatusHistoryEntry]:
-    entries: dict[tuple[datetime, UserStatus], UserStatusHistoryEntry] = {}
-    for candidate in candidates:
-        for entry in candidate.user_status_history:
-            entries.setdefault(
-                (entry.changed_at, entry.status),
-                entry.model_copy(deep=True),
-            )
-    return sorted(entries.values(), key=lambda entry: entry.changed_at)
 
 
 def _merged_occurrences(candidates: Sequence[JobRecord]) -> list[SourceOccurrence]:
@@ -688,18 +972,6 @@ def _merged_resume_matches(candidates: Sequence[JobRecord]) -> list[ResumeMatch]
         for match in candidate.resume_matches:
             matches[match.resume_id] = match.model_copy(deep=True)
     return list(matches.values())
-
-
-def _active_profile_hashes(job: JobRecord) -> set[str]:
-    return {
-        value
-        for value in (
-            job.last_successful_review_profile_hash,
-            job.last_review_attempt_profile_hash,
-            job.manual_override_profile_hash,
-        )
-        if value is not None
-    }
 
 
 def _visible_snapshot(snapshot: Snapshot) -> Snapshot:

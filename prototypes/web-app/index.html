@@ -4,10 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Job scan local console mock</title>
-    <link rel="stylesheet" href="../../node_modules/bootstrap/dist/css/bootstrap.min.css">
-    <link rel="stylesheet" href="../../node_modules/tom-select/dist/css/tom-select.bootstrap5.min.css">
     <link rel="stylesheet" href="../../src/job_scan/dashboard/static/dashboard.css">
     <link rel="stylesheet" href="mock.css">
+    <script type="application/json" data-ui5-config>{"defaultFontLoading":false}</script>
   </head>
   <body>
     <header class="page-header">
@@ -245,9 +244,9 @@
                         <div class="field-wide api-model-summary" id="api-model-settings" hidden>
                           <span class="ai-provider-mark" aria-hidden="true">DS</span>
                           <div>
-                            <span class="field-label d-block">Selected API model</span>
+                            <span class="field-label">Selected API model</span>
                             <strong id="api-model-summary">DeepSeek · deepseek-v4-flash</strong>
-                            <span class="form-text d-block">Effort: low · Anthropic-compatible API</span>
+                            <span class="form-text">Effort: low · Anthropic-compatible API</span>
                           </div>
                         </div>
                         <label>
@@ -259,13 +258,13 @@
                           <input class="form-control" id="scan-time" name="scan-time" type="time">
                           <span class="form-text">Optional. Leave blank for manual scans only.</span>
                         </label>
-                        <div class="field-wide d-flex flex-column flex-sm-row align-items-start align-items-sm-center justify-content-between gap-3 border rounded p-3">
-                          <div>
-                            <span class="field-label d-block">Schedule status</span>
+                        <div class="field-wide schedule-status-card">
+                          <div class="schedule-status-copy">
+                            <span class="field-label">Schedule status</span>
                             <strong id="schedule-status" aria-live="polite">Not scheduled</strong>
-                            <span class="form-text d-block" id="schedule-note">No automatic scans. Run manually anytime.</span>
+                            <span class="form-text" id="schedule-note">No automatic scans. Run manually anytime.</span>
                           </div>
-                          <button class="btn btn-outline-secondary flex-shrink-0" id="remove-schedule" type="button" disabled>Delete schedule</button>
+                          <button class="btn btn-outline-secondary" id="remove-schedule" type="button" disabled>Delete schedule</button>
                         </div>
                       </div>
                     </div>
@@ -412,44 +411,79 @@
                     <span class="count">3</span>
                   </header>
                   <div class="card-grid">
-                    <article class="job-card" data-availability="active" data-company-size-maximum="1000" data-company-size-minimum="501" data-job-key="linkedin:example-backend" data-posted-at="2026-08-09" data-posted-days-ago="0" data-sources="linkedin,simplify">
-                      <div class="status-rail" aria-label="Job status">
+                    <article class="job-card job-preview-card" data-availability="active" data-company-size-maximum="1000" data-company-size-minimum="501" data-job-key="linkedin:example-backend" data-job-preview-card data-posted-at="2026-08-09" data-posted-days-ago="0" data-sources="linkedin,simplify" tabindex="0" aria-controls="job-detail-dialog" aria-haspopup="dialog">
+                      <div class="job-preview-status" aria-label="Job status">
                         <span data-user-status><strong>User status:</strong> new</span>
                         <span data-machine-status><strong>Machine:</strong> eligible</span>
-                        <span data-effective-status><strong>Effective:</strong> eligible</span>
                         <span><strong>Availability:</strong> active</span>
                       </div>
-                      <div class="card-body">
-                        <header class="card-header">
-                          <div>
-                            <p class="company">Example GmbH</p>
-                            <h3><a href="https://example.com/jobs/backend" target="_blank" rel="noopener noreferrer">Senior Backend Engineer</a></h3>
-                            <p class="location">Berlin · Hybrid</p>
-                          </div>
-                          <p class="score"><strong>86</strong><span>score</span></p>
-                        </header>
-                        <p class="reason">Strong backend match. English working environment. Sponsorship not ruled out.</p>
-                        <ul class="labels" aria-label="Labels"><li>backend</li><li>Python</li><li>visa uncertain</li></ul>
-                        <dl class="facts">
-                          <div><dt>Sources</dt><dd>LinkedIn, Simplify</dd></div>
-                          <div class="company-size"><dt>Company size</dt><dd>501–1,000 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div>
-                          <div><dt>Posted</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
-                          <div><dt>First seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
-                          <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
-                        </dl>
-                        <details class="evidence"><summary>Evidence</summary><ul><li>Backend ownership with Python and PostgreSQL.</li><li>English is the team language.</li></ul></details>
-                        <div class="job-actions">
-                          <form class="job-action" data-job-action="status" data-job-key="linkedin:example-backend">
-                            <label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
-                            <button type="submit">Save status</button>
-                          </form>
+                      <div class="job-preview-body">
+                        <div class="job-preview-summary" data-job-preview-open-area>
+                          <header class="card-header">
+                            <div>
+                              <p class="company">Example GmbH</p>
+                              <h3>Senior Backend Engineer</h3>
+                              <p class="location">Berlin · Hybrid</p>
+                            </div>
+                            <p class="score"><strong>86</strong><span>score</span></p>
+                          </header>
+                          <p class="reason">Strong backend match. English working environment.</p>
+                          <ul class="labels" aria-label="Labels"><li>Python</li><li>Backend</li><li>Visa uncertain</li></ul>
                         </div>
-                        <label class="form-check ats-job-selector">
-                          <input class="form-check-input" type="checkbox" value="linkedin:example-backend" data-ats-select-job aria-label="Select Senior Backend Engineer at Example GmbH for ATS Check">
-                          <span class="form-check-label">Select for ATS Check</span>
-                        </label>
+                        <form class="job-action job-preview-status-form" data-job-action="status" data-job-key="linkedin:example-backend">
+                          <label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
+                          <button type="submit">Save</button>
+                        </form>
+                        <footer class="job-preview-footer">
+                          <label class="form-check ats-job-selector">
+                            <input class="form-check-input" type="checkbox" value="linkedin:example-backend" data-ats-select-job aria-label="Select Senior Backend Engineer at Example GmbH for ATS Check">
+                            <span class="form-check-label">ATS Check</span>
+                          </label>
+                          <span aria-hidden="true">View details →</span>
+                        </footer>
                       </div>
                     </article>
+
+                    <dialog class="job-detail-dialog" id="job-detail-dialog" aria-labelledby="job-detail-title">
+                      <article class="job-detail-panel" data-job-key="linkedin:example-backend">
+                        <header class="job-detail-header">
+                          <div>
+                            <p class="company">Example GmbH</p>
+                            <h3 id="job-detail-title">Senior Backend Engineer</h3>
+                            <p class="location">Berlin · Hybrid</p>
+                          </div>
+                          <div class="job-detail-header-actions">
+                            <p class="score"><strong>86</strong><span>score</span></p>
+                            <button class="btn btn-outline-secondary" type="button" data-close-job-detail aria-label="Close job details">Close</button>
+                          </div>
+                        </header>
+                        <div class="status-rail job-detail-status" aria-label="Job status">
+                          <span data-user-status><strong>User status:</strong> new</span>
+                          <span data-machine-status><strong>Machine:</strong> eligible</span>
+                          <span data-effective-status><strong>Effective:</strong> eligible</span>
+                          <span><strong>Availability:</strong> active</span>
+                        </div>
+                        <div class="job-detail-body">
+                          <p class="reason">Strong backend match. English working environment. Sponsorship not ruled out.</p>
+                          <ul class="labels" aria-label="Labels"><li>backend</li><li>Python</li><li>visa uncertain</li></ul>
+                          <dl class="facts">
+                            <div><dt>Sources</dt><dd>LinkedIn, Simplify</dd></div>
+                            <div class="company-size"><dt>Company size</dt><dd>501–1,000 employees · <a href="https://example.com" target="_blank" rel="noopener noreferrer">Company site</a> · Checked 2026-08-09</dd></div>
+                            <div><dt>Posted</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                            <div><dt>First seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                            <div><dt>Last seen</dt><dd><time datetime="2026-08-09">2026-08-09</time></dd></div>
+                          </dl>
+                          <details class="evidence"><summary>Evidence</summary><ul><li>Backend ownership with Python and PostgreSQL.</li><li>English is the team language.</li></ul></details>
+                          <div class="job-actions">
+                            <form class="job-action" data-job-action="status" data-job-key="linkedin:example-backend">
+                              <label><span>Set user status</span><select name="status"><option value="" disabled selected>Choose status</option><option value="saved">Saved</option><option value="applied">Applied</option><option value="interviewing">Interviewing</option><option value="offer">Offer</option><option value="withdrawn">Withdrawn</option><option value="rejected">Rejected</option><option value="ignored">Ignored</option></select></label>
+                              <button type="submit">Save status</button>
+                            </form>
+                            <a class="btn btn-outline-secondary job-detail-source" href="https://example.com/jobs/backend" target="_blank" rel="noopener noreferrer">Open original job</a>
+                          </div>
+                        </div>
+                      </article>
+                    </dialog>
 
                     <article class="job-card" data-availability="active" data-company-size-maximum="5000" data-company-size-minimum="1001" data-job-key="indeed:northstar-platform" data-posted-at="2026-08-08" data-posted-days-ago="1" data-sources="indeed">
                       <div class="status-rail" aria-label="Job status">
@@ -830,8 +864,8 @@
       </article>
     </main>
 
-    <script src="../../node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="../../node_modules/tom-select/dist/js/tom-select.complete.min.js"></script>
+    <script src="ui5-bundle.js"></script>
+    <script src="ui5-adapter.js"></script>
     <script src="mock.js"></script>
   </body>
 </html>

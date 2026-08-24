@@ -152,10 +152,20 @@ class SetupService:
             profile_hash=prepared.profile_hash,
         )
 
-    def prepare(self, resume_path: Path, answers: SetupAnswers) -> SetupPreparation:
+    def prepare(
+        self,
+        resume_path: Path,
+        answers: SetupAnswers,
+        *,
+        reuse_current_profile: bool = True,
+    ) -> SetupPreparation:
         """Build a profile/config pair without replacing the current setup."""
         extracted = self._extract_resume(resume_path)
-        reusable = self._read_reusable_profile(extracted.sha256, answers.ai_runtime)
+        reusable = (
+            self._read_reusable_profile(extracted.sha256, answers.ai_runtime)
+            if reuse_current_profile
+            else None
+        )
         if reusable is None:
             prompt = build_profile_prompt(extracted.text, answers)
             request = ClaudeRequest(

@@ -288,7 +288,7 @@ def review(
         typer.Option("--port", min=1, max=65535, help="Review HTTP port."),
     ] = 8765,
 ) -> None:
-    """Serve the local dashboard and its review mutations."""
+    """Serve the local Setup workflow and its review mutations."""
     paths = AppPaths.from_environment(os.environ)
     repository = JsonlRepository(
         paths,
@@ -348,11 +348,9 @@ def review(
         )
         if mdns_publisher is not None:
             typer.echo(f"Setup: http://{MDNS_HOSTNAME}:{port}/setup")
-            typer.echo(f"Review: http://{MDNS_HOSTNAME}:{port}")
             typer.echo(f"LAN fallback: http://{lan_ip}:{port}")
         else:
             typer.echo(f"Setup: http://127.0.0.1:{port}/setup")
-            typer.echo(f"Review: http://127.0.0.1:{port}")
         try:
             uvicorn.run(
                 review_app,

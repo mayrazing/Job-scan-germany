@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from collections.abc import Callable, Iterator
@@ -103,11 +104,15 @@ class FailingCompanySizeLookup:
 
 
 def _save_review_config(paths: AppPaths) -> None:
+    resume_bytes = b"CURRENT REVIEW RESUME"
+    resume_path = paths.root / "resume.pdf"
+    resume_path.parent.mkdir(parents=True, exist_ok=True)
+    resume_path.write_bytes(resume_bytes)
     save_config(
         paths.config_toml,
         AppConfig(
-            resume_path=paths.root / "resume.pdf",
-            resume_sha256="sha256:" + "a" * 64,
+            resume_path=resume_path,
+            resume_sha256="sha256:" + hashlib.sha256(resume_bytes).hexdigest(),
             profile_sha256="sha256:" + "b" * 64,
             search_terms=["backend"],
             locations=["Berlin"],
@@ -197,6 +202,7 @@ def _job(
 @pytest.fixture
 def repository(tmp_path: Path) -> JsonlRepository:
     paths = AppPaths.from_root(tmp_path / "home")
+    _save_review_config(paths)
     value = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
     value.mutate(lambda snapshot: snapshot.with_job(_job()))
     return value
@@ -216,11 +222,9 @@ def review_client(
 
 
 def _open_session(client: TestClient) -> str:
-    response = client.get("/")
-    assert response.status_code == 200
-    cookie_names = list(response.cookies.keys())
-    assert len(cookie_names) == 1
-    return cookie_names[0]
+    cookie_name = "job_scan_session"
+    client.cookies.set(cookie_name, TOKEN)
+    return cookie_name
 
 
 def _mutation_headers(*, origin: str | None = ORIGIN, host: str = "127.0.0.1:8765") -> dict[str, str]:
@@ -254,22 +258,14 @@ def _assert_only_job_fields_changed(
     assert changed <= MUTABLE_FIELDS
 
 
-def test_get_returns_current_dashboard_bytes_and_sets_protected_cookie(
+def test_root_review_page_is_not_available(
     review_client: tuple[TestClient, JsonlRepository],
 ) -> None:
-    client, repository = review_client
+    client, _repository = review_client
 
     response = client.get("/")
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    assert response.content == repository.paths.dashboard_html.read_bytes()
-    assert b'<meta name="job-scan-revision" content="1">' in response.content
-    assert TOKEN.encode() not in response.content
-    set_cookie = response.headers["set-cookie"].lower()
-    assert "httponly" in set_cookie
-    assert "samesite=strict" in set_cookie
-    assert "path=/" in set_cookie
+    assert response.status_code == 404
 
 
 def test_job_snapshot_route_serves_saved_html_without_source_access(
@@ -1158,7 +1154,6 @@ def test_review_cli_rebuilds_dashboard_then_binds_lan_and_stops_mdns_cleanly(
     assert captured["mdns_stopped"] is True
     assert result.stdout.splitlines() == [
         "Setup: http://job-scan-germany.local:9123/setup",
-        "Review: http://job-scan-germany.local:9123",
         "LAN fallback: http://192.168.3.28:9123",
     ]
 
@@ -1213,5 +1208,4 @@ def test_review_cli_keeps_loopback_service_when_mdns_is_not_supported(
     assert captured["host"] == "127.0.0.1"
     assert result.stdout.splitlines() == [
         "Setup: http://127.0.0.1:9123/setup",
-        "Review: http://127.0.0.1:9123",
     ]

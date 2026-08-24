@@ -1,124 +1,96 @@
-.btn {
+html:root {
+  --sapBrandColor: var(--action);
+  --sapHighlightColor: var(--action);
+  --sapSelectedColor: var(--action);
+  --sapLinkColor: var(--action);
+  --sapButton_TextColor: var(--ink);
+  --sapButton_IconColor: var(--ink);
+  --sapButton_BorderColor: var(--border);
+  --sapButton_Hover_TextColor: var(--action);
+  --sapButton_Hover_Background: #E7EFEB;
+  --sapButton_Hover_BorderColor: var(--action);
+  --sapButton_Active_TextColor: var(--surface);
+  --sapButton_Active_Background: var(--action);
+  --sapButton_Active_BorderColor: var(--action);
+  --sapButton_Emphasized_Background: var(--action);
+  --sapButton_Emphasized_BorderColor: var(--action);
+  --sapButton_Emphasized_Hover_Background: #12594C;
+  --sapButton_Emphasized_Hover_BorderColor: #12594C;
+  --sapButton_Emphasized_Active_Background: #0E4A3F;
+  --sapButton_Emphasized_Active_BorderColor: #0E4A3F;
+  --sapField_BorderColor: var(--border);
+  --sapField_Hover_BorderColor: var(--action);
+  --sapField_Focus_BorderColor: var(--warning);
+  --sapFocusColor: var(--warning);
+  --sapFontFamily: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+ui5-button.btn {
   min-height: 44px;
-  border-radius: 0.35rem;
   font-weight: 750;
 }
 
-.btn-primary {
-  --bs-btn-bg: var(--action);
-  --bs-btn-border-color: var(--action);
-  --bs-btn-hover-bg: #12594C;
-  --bs-btn-hover-border-color: #12594C;
-  --bs-btn-active-bg: #0E4A3F;
-  --bs-btn-active-border-color: #0E4A3F;
-  --bs-btn-disabled-bg: var(--action);
-  --bs-btn-disabled-border-color: var(--action);
-}
-
-.btn-outline-secondary {
-  --bs-btn-color: var(--ink);
-  --bs-btn-border-color: var(--border);
-  --bs-btn-hover-color: var(--ink);
-  --bs-btn-hover-bg: #E7EFEB;
-  --bs-btn-hover-border-color: var(--action);
-  --bs-btn-active-color: var(--surface);
-  --bs-btn-active-bg: var(--action);
-  --bs-btn-active-border-color: var(--action);
-}
-
-.form-control,
-.form-select,
-.input-group-text {
-  min-height: 44px;
-  border-color: var(--border);
-  border-radius: 0.35rem;
-  color: var(--ink);
-  font: inherit;
-}
-
-.form-control:focus,
-.form-select:focus {
-  border-color: var(--warning);
-  box-shadow: 0 0 0 3px rgb(164 91 22 / 24%);
-}
-
-.input-group-text {
-  background: var(--paper);
-  color: var(--muted);
-  font-size: 0.8rem;
-  font-weight: 700;
-}
-
-.ts-wrapper {
+ui5-input,
+ui5-step-input,
+ui5-time-picker,
+ui5-select,
+ui5-combobox,
+ui5-multi-combobox,
+ui5-file-uploader {
   width: 100%;
-}
-
-.ts-wrapper .ts-control {
   min-height: 44px;
-  padding: 0.35rem 2.25rem 0.35rem 0.45rem;
-  border-color: var(--border);
-  border-radius: 0.35rem;
-  background: var(--surface);
+  font: inherit;
+}
+
+ui5-checkbox {
+  color: var(--ink);
+}
+
+ui5-card {
+  display: block;
+  width: 100%;
   color: var(--ink);
   font: inherit;
 }
 
-.ts-wrapper.focus .ts-control {
-  border-color: var(--warning);
-  box-shadow: 0 0 0 3px rgb(164 91 22 / 24%);
+.card-grid > ui5-card.job-card {
+  display: block;
 }
 
-.ts-wrapper.multi .ts-control > div {
-  margin: 0.1rem 0.3rem 0.1rem 0;
-  padding: 0.25rem 0.35rem 0.25rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: #E7EFEB;
-  color: var(--ink);
-  font-size: 0.78rem;
-  font-weight: 700;
+ui5-card.console-card {
+  display: block;
 }
 
-.ts-wrapper.plugin-remove_button:not(.rtl) .item .remove {
-  margin-left: 0.3rem;
-  padding-inline: 0.35rem;
-  border-left-color: var(--border);
-  border-radius: 0 999px 999px 0;
-  color: var(--muted);
+ui5-card::part(root) {
+  border: 0;
+  border-radius: inherit;
+  box-shadow: none;
 }
 
-.ts-wrapper.plugin-remove_button:not(.rtl) .item .remove:hover {
-  background: var(--surface);
-  color: var(--danger);
-}
-
-.ts-dropdown {
-  border-color: var(--border);
-  border-radius: 0.35rem;
-  box-shadow: 0 0.7rem 1.5rem rgb(23 33 43 / 14%);
-  color: var(--ink);
-  font: inherit;
-}
-
-.ts-dropdown .option,
-.ts-dropdown .create {
-  min-height: 40px;
-  padding: 0.55rem 0.65rem;
-}
-
-.ts-dropdown .active {
-  background: #E7EFEB;
-  color: var(--action);
-}
-
-.ts-dropdown .create {
+ui5-card.console-card::part(content) {
   display: grid;
-  gap: 0.05rem;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  padding: 0;
 }
 
-.ts-dropdown .create span {
-  color: var(--muted);
-  font-size: 0.7rem;
+ui5-card.job-card:not(.console-card)::part(content) {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  padding: 0;
+}
+
+ui5-card.job-preview-card::part(content) {
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+}
+
+ui5-card.ats-report::part(content) {
+  padding: 0;
+}
+
+ui5-panel {
+  width: 100%;
+  color: var(--ink);
+  font: inherit;
 }
 
 .console-state strong {
@@ -134,13 +106,13 @@ code {
   color: inherit;
 }
 
-.flow-nav a[aria-current="step"] {
+.flow-nav [aria-current="step"] {
   border-color: var(--action);
   background: var(--action);
   color: var(--surface);
 }
 
-.flow-nav a[aria-current="step"] span {
+.flow-nav [aria-current="step"] span {
   background: rgb(255 255 255 / 18%);
   color: var(--surface);
 }
@@ -524,30 +496,44 @@ label > small {
   display: none;
 }
 
+.api-model-summary .field-label,
+.api-model-summary .form-text,
+.schedule-status-copy .field-label,
+.schedule-status-copy .form-text {
+  display: block;
+}
+
+.schedule-status-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+}
+
+.schedule-status-copy {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.schedule-status-card #remove-schedule {
+  flex-shrink: 0;
+}
+
 .advanced-settings {
   margin-bottom: 1.2rem;
   border-block: 1px solid var(--border);
 }
 
-.advanced-settings .accordion-item {
-  border: 0;
-  background: transparent;
-}
-
-.advanced-settings .accordion-button {
+.advanced-settings::part(header) {
   min-height: 52px;
-  padding: 0;
-  background: transparent;
   color: var(--ink);
-  box-shadow: none;
   font-weight: 750;
 }
 
-.advanced-settings .accordion-button:not(.collapsed) {
-  color: var(--action);
-}
-
-.advanced-settings .accordion-body {
+.advanced-settings::part(content) {
   padding: 0 0 1rem;
 }
 
@@ -587,19 +573,20 @@ label > small {
   letter-spacing: -0.05em;
 }
 
-.progress {
+ui5-progress-indicator.progress {
+  width: 100%;
   height: 0.55rem;
   margin-block: 1rem 1.5rem;
   border-radius: 999px;
-  background: var(--paper);
   overflow: hidden;
 }
 
-.progress-bar {
-  width: 0;
-  border-radius: inherit;
+ui5-progress-indicator.progress::part(bar) {
   background: var(--action);
-  transition: width 350ms ease;
+}
+
+ui5-progress-indicator.progress::part(remaining-bar) {
+  background: var(--paper);
 }
 
 .run-log {
@@ -690,6 +677,10 @@ label > small {
 .scan-history-section {
   padding: 0;
   overflow: hidden;
+}
+
+.scan-history-section::part(content) {
+  padding: 0;
 }
 
 .scan-history-heading {
@@ -835,6 +826,221 @@ label > small {
 .job-card.is-ats-selected {
   outline: 2px solid var(--action);
   outline-offset: -2px;
+}
+
+.card-grid:has(> .job-preview-card) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.job-card.job-preview-card {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: 160px;
+  box-sizing: border-box;
+  border-top: 1px solid var(--border);
+  border-left: 4px solid var(--action);
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.job-preview-card:hover {
+  border-color: var(--action);
+  box-shadow: 0 0.7rem 1.5rem rgb(23 33 43 / 12%);
+  transform: translateY(-2px);
+}
+
+.job-preview-card:focus-visible {
+  outline: 3px solid rgb(164 91 22 / 45%);
+  outline-offset: 3px;
+}
+
+.job-preview-status {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 0.55rem 0.7rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 0;
+  background: #E7EFEB;
+  font-size: 0.67rem;
+}
+
+.job-preview-status > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+  align-content: center;
+  padding: 0.35rem 0.2rem;
+  overflow: hidden;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.job-preview-status > span + span {
+  border-top: 1px solid var(--border);
+  border-left: 0;
+}
+
+.job-preview-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 13.5rem;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.55rem 1rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.job-preview-summary {
+  display: grid;
+  min-height: 0;
+  grid-row: 1 / -1;
+  gap: 0.45rem;
+  align-content: start;
+  padding-right: 1rem;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.job-preview-summary .card-header {
+  min-height: 0;
+  align-items: start;
+}
+
+.job-preview-summary h3 {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font-size: 1.05rem;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.job-preview-summary .reason {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.job-preview-summary .labels {
+  flex-wrap: nowrap;
+  margin: 0;
+  max-height: 1.75rem;
+  overflow: hidden;
+}
+
+.job-preview-status-form {
+  margin: 0;
+  align-self: start;
+}
+
+.job-preview-status-form label > span {
+  font-size: 0.7rem;
+}
+
+.job-preview-status-form select,
+.job-preview-status-form button {
+  min-height: 38px;
+  font-size: 0.78rem;
+}
+
+.job-preview-footer {
+  display: flex;
+  min-height: 1.8rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  color: var(--action);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.job-preview-footer .ats-job-selector {
+  padding: 0;
+  border-top: 0;
+  font-size: 0.72rem;
+}
+
+.job-detail-dialog {
+  width: min(46rem, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1.25rem 4rem rgb(23 33 43 / 24%);
+}
+
+.job-detail-dialog::part(content) {
+  padding: 0;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.job-detail-dialog::backdrop {
+  background: rgb(23 33 43 / 48%);
+}
+
+.job-detail-panel {
+  min-width: 0;
+}
+
+.job-detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: start;
+  padding: 1.15rem 1.25rem;
+  border-top: 4px solid var(--action);
+  border-bottom: 1px solid var(--border);
+}
+
+.job-detail-header h3 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.job-detail-header-actions {
+  display: flex;
+  align-items: start;
+  gap: 1rem;
+}
+
+.job-detail-header-actions .btn {
+  min-height: 38px;
+}
+
+.status-rail.job-detail-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  padding: 0.7rem 1.25rem;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+  background: #E7EFEB;
+  font-size: 0.72rem;
+}
+
+.job-detail-body {
+  padding: 1.25rem;
+}
+
+.job-detail-source {
+  justify-self: start;
 }
 
 .ats-running-card {
@@ -1201,13 +1407,17 @@ label > small {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .progress-bar {
+  .job-preview-card {
     transition: none;
   }
 }
 
 @media (max-width: 50rem) {
   .console-card {
+    grid-template-columns: 1fr;
+  }
+
+  ui5-card.console-card::part(content) {
     grid-template-columns: 1fr;
   }
 
@@ -1272,6 +1482,59 @@ label > small {
     border-bottom: 4px solid var(--action);
   }
 
+  .job-card.job-preview-card {
+    grid-template-columns: 1fr;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: auto;
+    border-top: 4px solid var(--action);
+    border-left: 1px solid var(--border);
+  }
+
+  ui5-card.job-preview-card::part(content) {
+    grid-template-columns: 1fr;
+  }
+
+  .job-preview-status {
+    min-height: 3.5rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .job-preview-status > span {
+    padding: 0.35rem 0.55rem;
+  }
+
+  .job-preview-status > span + span {
+    border-top: 0;
+    border-left: 1px solid var(--border);
+  }
+
+  .job-preview-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .job-preview-summary {
+    grid-row: auto;
+    padding-right: 0;
+    padding-bottom: 0.75rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .job-detail-header,
+  .job-detail-header-actions {
+    display: grid;
+  }
+
+  .status-rail.job-detail-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-bottom: 1px solid var(--border);
+  }
+
   .ats-check-list li + li {
     border-top: 1px solid var(--border);
     border-left: 0;
@@ -1298,6 +1561,11 @@ label > small {
 
   .ai-editor-actions > span {
     display: none;
+  }
+
+  .schedule-status-card {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .run-summary div + div {

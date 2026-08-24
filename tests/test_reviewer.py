@@ -455,6 +455,41 @@ def test_invalid_member_is_schema_failure_without_rejecting_valid_siblings(
     assert len(fake.requests) == 2
 
 
+def test_single_invalid_member_is_retried_with_field_validation_feedback() -> None:
+    fake = FakeClaude(
+        stdout(review_item("job-a", score=101)),
+        stdout(review_item("job-a")),
+    )
+
+    outcome = ClaudeReviewer(fake).review([job("job-a")], PROFILE, config())
+
+    assert set(outcome.accepted) == {"job-a"}
+    assert outcome.failed == {}
+    assert len(fake.requests) == 2
+    retry_prompt = fake.requests[1].prompt
+    assert "Previous validation failures" in retry_prompt
+    assert "score" in retry_prompt
+    assert "less than or equal to 100" in retry_prompt
+
+
+def test_single_invalid_member_fails_after_one_safe_corrective_retry() -> None:
+    fake = FakeClaude(
+        stdout(review_item("job-a", german_requirement="sometimes")),
+        stdout(review_item("job-a", german_requirement="sometimes")),
+    )
+
+    outcome = ClaudeReviewer(fake).review([job("job-a")], PROFILE, config())
+
+    assert outcome.accepted == {}
+    failure = outcome.failed["job-a"]
+    assert failure.category == "schema"
+    assert failure.message.startswith("AI returned an invalid result for this job.")
+    assert "german_requirement" in failure.message
+    assert "Input should be" in failure.message
+    assert "sometimes" not in failure.message
+    assert len(fake.requests) == 2
+
+
 @pytest.mark.parametrize(
     "updates",
     [
@@ -477,12 +512,14 @@ def test_invalid_member_is_schema_failure_without_rejecting_valid_siblings(
 def test_invalid_eligibility_evidence_rejects_the_member(
     updates: dict[str, Any],
 ) -> None:
-    outcome = ClaudeReviewer(FakeClaude(stdout(review_item("job-a", **updates)))).review(
-        [job("job-a")], PROFILE, config()
-    )
+    invalid_response = stdout(review_item("job-a", **updates))
+    fake = FakeClaude(invalid_response, invalid_response)
+
+    outcome = ClaudeReviewer(fake).review([job("job-a")], PROFILE, config())
 
     assert outcome.accepted == {}
     assert outcome.failed["job-a"].category == "schema"
+    assert len(fake.requests) == 2
 
 
 def test_german_requirement_without_evidence_does_not_discard_valid_job_review() -> None:

@@ -8,8 +8,7 @@
   const reviewLink = document.querySelector("#review-link");
   const headerStatus = document.querySelector("#header-status");
   const formError = document.querySelector("#form-error");
-  const progressBar = document.querySelector("#progress-bar");
-  const progress = progressBar.closest(".progress");
+  const progress = document.querySelector("[aria-label='Scan progress']");
   const runPercent = document.querySelector("#run-percent");
   const runMessage = document.querySelector("#run-message");
   const runSummary = document.querySelector("#run-summary");
@@ -32,7 +31,6 @@
   const apiModelSettings = document.querySelector("#api-model-settings");
   const apiModelSummary = document.querySelector("#api-model-summary");
   const atsRunProgress = document.querySelector("#ats-run-progress");
-  const atsRunProgressBar = document.querySelector("#ats-run-progress-bar");
   const atsRunPercent = document.querySelector("#ats-run-percent");
   const atsRunMessage = document.querySelector("#ats-run-message");
   const atsRunBadge = document.querySelector("#ats-run-badge");
@@ -75,33 +73,32 @@
     { key: "publish", percent: 100, message: "Review queue published.", result: "9 eligible jobs" },
   ];
 
-  const initializeSearchSelect = (select) => {
-    if (select.tomselect) return select.tomselect;
-    const multiple = select.multiple;
-    const instance = new TomSelect(select, {
-      plugins: multiple ? { remove_button: { title: "Remove" } } : {},
-      create: select.dataset.create === "true",
-      createOnBlur: true,
-      addPrecedence: true,
-      persist: false,
-      maxItems: multiple ? null : 1,
-      hideSelected: true,
-      closeAfterSelect: true,
-      placeholder: placeholders[select.id] || "Search or type a value",
-      render: {
-        option_create(data, escape) {
-          return `<div class="create"><span>Add custom value</span><strong>${escape(data.input)}</strong></div>`;
-        },
-      },
-      onInitialize() {
-        this.wrapper.dataset.field = select.id || select.name;
-      },
-    });
-    return instance;
+  const selectItems = (control) => [
+    ...control.querySelectorAll("ui5-option, ui5-cb-item, ui5-mcb-item"),
+  ];
+
+  const createSelectItem = (tagName, value, label = value) => {
+    const item = document.createElement(tagName);
+    item.value = value;
+    item.setAttribute("text", label);
+    item.textContent = label;
+    return item;
   };
 
   const initializeSearchSelects = (root = document) => {
-    root.querySelectorAll("select[data-search-select]").forEach(initializeSearchSelect);
+    root.querySelectorAll("ui5-combobox[data-search-select], ui5-multi-combobox[data-search-select]").forEach((control) => {
+      control.placeholder = placeholders[control.id] || "Search or type a value";
+      if (control.dataset.create !== "true" || control.localName !== "ui5-multi-combobox") return;
+      control.addEventListener("change", () => {
+        const customValue = control.value.trim();
+        if (!customValue) return;
+        if (!selectItems(control).some((item) => item.value === customValue)) {
+          control.append(createSelectItem("ui5-mcb-item", customValue));
+        }
+        control.selectedValues = [...new Set([...control.selectedValues, customValue])];
+        control.value = "";
+      });
+    });
   };
 
   const providerInitials = (name) => name
@@ -113,9 +110,10 @@
     .toUpperCase() || "AI";
 
   const createProviderButton = (label, attribute) => {
-    const button = document.createElement("button");
+    const button = document.createElement("ui5-button");
     button.className = "btn btn-outline-secondary";
-    button.type = "button";
+    button.type = "Button";
+    button.setAttribute("data-ui5-adapted", "");
     button.textContent = label;
     button.toggleAttribute(attribute, true);
     return button;
@@ -162,14 +160,15 @@
 
   const syncAiRuntime = () => {
     const previousValue = aiRuntime.value;
-    aiRuntime.querySelectorAll("option[value^='api:']").forEach((option) => option.remove());
+    aiRuntime.querySelectorAll("ui5-option[value^='api:']").forEach((option) => option.remove());
     aiProviders.forEach((provider) => {
-      const option = document.createElement("option");
-      option.value = `api:${provider.id}`;
-      option.textContent = `${provider.name} API · ${provider.model}`;
-      aiRuntime.append(option);
+      aiRuntime.append(createSelectItem(
+        "ui5-option",
+        `api:${provider.id}`,
+        `${provider.name} API · ${provider.model}`,
+      ));
     });
-    aiRuntime.value = [...aiRuntime.options].some(
+    aiRuntime.value = selectItems(aiRuntime).some(
       (option) => option.value === previousValue,
     ) ? previousValue : "claude-code";
 
@@ -188,12 +187,10 @@
   };
 
   const setProviderModel = (value, options = []) => {
-    const control = aiProviderModel.tomselect;
-    control.clearOptions();
+    aiProviderModel.replaceChildren();
     const values = [...new Set([value, ...options].filter(Boolean))];
-    values.forEach((model) => control.addOption({ value: model, text: model }));
-    control.refreshOptions(false);
-    control.setValue(value, true);
+    values.forEach((model) => aiProviderModel.append(createSelectItem("ui5-cb-item", model)));
+    aiProviderModel.value = value;
   };
 
   const openAiEditor = (provider = null) => {
@@ -202,6 +199,7 @@
     aiEditorTitle.textContent = provider?.name || "Connect a provider";
     aiProviderName.value = provider?.name || "";
     aiProviderBaseUrl.value = provider?.baseUrl || "";
+    aiProviderBaseUrl.valueState = "None";
     aiProviderApiKey.value = "";
     aiProviderApiKey.placeholder = provider ? "Configured · enter to replace" : "Required for a new configuration";
     setProviderModel(provider?.model || "");
@@ -215,6 +213,15 @@
   const closeAiEditor = () => {
     aiProviderEditor.hidden = true;
     aiEditorFeedback.textContent = "";
+  };
+
+  const isValidProviderBaseUrl = () => {
+    try {
+      const url = new URL(aiProviderBaseUrl.value.trim());
+      return ["http:", "https:"].includes(url.protocol);
+    } catch (_error) {
+      return false;
+    }
   };
 
   const renderSchedule = () => {
@@ -235,8 +242,8 @@
     const activeStep = selected.startsWith("ats") ? "ats" : selected;
     document.querySelectorAll("[data-nav-step]").forEach((link) => {
       const active = link.dataset.navStep === activeStep;
-      link.classList.toggle("btn-primary", active);
-      link.classList.toggle("btn-outline-secondary", !active);
+      link.design = active ? "Emphasized" : "Default";
+      link.toggleAttribute("data-active", active);
       if (active) link.setAttribute("aria-current", "step");
       else link.removeAttribute("aria-current");
     });
@@ -253,7 +260,8 @@
 
   const resetRun = () => {
     timers.splice(0).forEach(window.clearTimeout);
-    progressBar.style.width = "0%";
+    progress.value = 0;
+    progress.displayValue = "0%";
     progress.setAttribute("aria-valuenow", "0");
     runPercent.textContent = "0%";
     runMessage.textContent = "Preparing your factual profile...";
@@ -272,7 +280,8 @@
     });
     const item = document.querySelector(`[data-run-item="${step.key}"]`);
     item.querySelector("small").textContent = index === steps.length - 1 ? step.result : "Running";
-    progressBar.style.width = `${step.percent}%`;
+    progress.value = step.percent;
+    progress.displayValue = `${step.percent}%`;
     progress.setAttribute("aria-valuenow", String(step.percent));
     runPercent.textContent = `${step.percent}%`;
     runMessage.textContent = step.message;
@@ -309,7 +318,8 @@
 
   const updateAtsProgress = (completed, total, message) => {
     const percent = Math.round((completed / total) * 100);
-    atsRunProgressBar.style.width = `${percent}%`;
+    atsRunProgress.value = percent;
+    atsRunProgress.displayValue = `${percent}%`;
     atsRunProgress.setAttribute("aria-valuenow", String(percent));
     atsRunPercent.textContent = `${percent}%`;
     atsRunMessage.textContent = message;
@@ -329,7 +339,8 @@
   };
 
   const selectedAtsJobs = () => Array.from(
-    document.querySelectorAll("#recommended [data-ats-select-job]:checked"),
+    document.querySelectorAll("#recommended [data-ats-select-job]"),
+  ).filter((checkbox) => checkbox.checked).map(
     (checkbox, index) => ({
       key: `job-${index + 1}`,
       title: checkbox.closest(".job-card").querySelector("h3").textContent.trim(),
@@ -337,8 +348,9 @@
   );
 
   const syncAtsSelection = () => {
-    const selected = document.querySelectorAll("#recommended [data-ats-select-job]:checked");
-    document.querySelectorAll("#recommended [data-ats-select-job]").forEach((checkbox) => {
+    const selectors = [...document.querySelectorAll("#recommended [data-ats-select-job]")];
+    const selected = selectors.filter((checkbox) => checkbox.checked);
+    selectors.forEach((checkbox) => {
       checkbox.closest(".job-card").classList.toggle("is-ats-selected", checkbox.checked);
     });
     atsStartButton.disabled = selected.length === 0;
@@ -556,29 +568,36 @@
     };
     const sources = [...new Set(reviewCards.flatMap(cardSources))].sort();
     sources.forEach((source) => {
-      const option = document.createElement("option");
-      option.value = source;
-      option.textContent = sourceLabels[source] || source;
-      option.selected = true;
-      sourceSelect.append(option);
+      sourceSelect.append(createSelectItem("ui5-mcb-item", source, sourceLabels[source] || source));
     });
-    const sourceControl = new TomSelect(sourceSelect, {
-      plugins: {
-        checkbox_options: {},
-        remove_button: { title: "Remove" },
-      },
-      closeAfterSelect: false,
-      hideSelected: false,
-      maxItems: null,
-      placeholder: "Choose sources",
-      onChange(values) {
-        applyReviewFilters(Array.isArray(values) ? values : [values].filter(Boolean));
-      },
-    });
-    const applyCurrentFilters = () => applyReviewFilters(sourceControl.items);
+    sourceSelect.placeholder = "Choose sources";
+    sourceSelect.selectedValues = sources;
+    const applyCurrentFilters = () => applyReviewFilters(sourceSelect.selectedValues);
+    sourceSelect.addEventListener("selection-change", applyCurrentFilters);
     postedWithinSelect.addEventListener("change", applyCurrentFilters);
     companySizeSelect.addEventListener("change", applyCurrentFilters);
     applyCurrentFilters();
+
+    const previewCard = document.querySelector("[data-job-preview-card]");
+    const detailDialog = document.querySelector("#job-detail-dialog");
+    if (previewCard && detailDialog) {
+      const openDetails = (event) => {
+        if (event.target.closest("a, ui5-button, ui5-checkbox, ui5-select, label, form, ui5-panel")) return;
+        detailDialog.showModal();
+      };
+      previewCard.addEventListener("click", openDetails);
+      previewCard.addEventListener("keydown", (event) => {
+        if (event.target !== previewCard || !["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        detailDialog.showModal();
+      });
+      detailDialog.querySelector("[data-close-job-detail]").addEventListener("click", () => {
+        detailDialog.close();
+      });
+      detailDialog.addEventListener("click", (event) => {
+        if (event.target === detailDialog) detailDialog.close();
+      });
+    }
 
     document.querySelectorAll("form[data-job-action]").forEach((jobForm) => {
       jobForm.addEventListener("submit", (event) => {
@@ -594,11 +613,18 @@
           jobForm.remove();
           return;
         }
-        const status = jobForm.elements.namedItem("status").value;
-        setStatusLine(card.querySelector("[data-user-status]"), "User status", status);
-        const button = jobForm.querySelector('button[type="submit"]');
+        const status = jobForm.querySelector("[name='status']").value;
+        const jobKey = CSS.escape(jobForm.dataset.jobKey);
+        document.querySelectorAll(`[data-job-key="${jobKey}"] [data-user-status]`).forEach(
+          (line) => setStatusLine(line, "User status", status),
+        );
+        document.querySelectorAll(
+          `form[data-job-action="status"][data-job-key="${jobKey}"] [name="status"]`,
+        ).forEach((select) => { select.value = status; });
+        const button = jobForm.querySelector("ui5-button");
+        const buttonLabel = button.textContent;
         button.textContent = "Saved";
-        window.setTimeout(() => { button.textContent = "Save status"; }, 700);
+        window.setTimeout(() => { button.textContent = buttonLabel; }, 700);
       });
     });
 
@@ -630,9 +656,9 @@
 
   aiRuntime.addEventListener("change", syncAiRuntime);
 
-  document.querySelector("#claude-model").tomselect.on("change", (model) => {
-    const option = aiRuntime.querySelector("option[value='claude-code']");
-    option.textContent = `Claude Code CLI · ${model}`;
+  document.querySelector("#claude-model").addEventListener("change", (event) => {
+    const option = aiRuntime.querySelector("ui5-option[value='claude-code']");
+    option.textContent = `Claude Code CLI · ${event.currentTarget.value}`;
   });
 
   document.querySelector("[data-add-ai-provider]").addEventListener("click", () => {
@@ -656,13 +682,20 @@
       aiEditorFeedback.textContent = "Enter a Base URL and API key before fetching models.";
       return;
     }
+    if (!isValidProviderBaseUrl()) {
+      aiProviderBaseUrl.valueState = "Negative";
+      aiEditorFeedback.dataset.state = "error";
+      aiEditorFeedback.textContent = "Enter a valid Base URL.";
+      return;
+    }
+    aiProviderBaseUrl.valueState = "None";
     const button = event.currentTarget;
     button.disabled = true;
     button.textContent = "Fetching models...";
     aiEditorFeedback.removeAttribute("data-state");
     aiEditorFeedback.textContent = "Checking the Anthropic-compatible models endpoint.";
     window.setTimeout(() => {
-      setProviderModel(aiProviderModel.tomselect.getValue() || "deepseek-v4-flash", [
+      setProviderModel(aiProviderModel.value || "deepseek-v4-flash", [
         "deepseek-v4-flash",
         "deepseek-chat",
         "deepseek-reasoner",
@@ -676,12 +709,19 @@
   document.querySelector("[data-save-ai-provider]").addEventListener("click", () => {
     const name = aiProviderName.value.trim();
     const baseUrl = aiProviderBaseUrl.value.trim();
-    const model = aiProviderModel.tomselect.getValue().trim();
+    const model = aiProviderModel.value.trim();
     if (!name || !baseUrl || !model || (editingProviderId === null && !aiProviderApiKey.value.trim())) {
       aiEditorFeedback.dataset.state = "error";
       aiEditorFeedback.textContent = "Complete provider name, Base URL, API key, and model.";
       return;
     }
+    if (!isValidProviderBaseUrl()) {
+      aiProviderBaseUrl.valueState = "Negative";
+      aiEditorFeedback.dataset.state = "error";
+      aiEditorFeedback.textContent = "Enter a valid Base URL.";
+      return;
+    }
+    aiProviderBaseUrl.valueState = "None";
     const existing = aiProviders.find((provider) => provider.id === editingProviderId);
     if (existing) {
       Object.assign(existing, { name, baseUrl, model, effort: aiProviderEffort.value });
@@ -700,8 +740,8 @@
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!form.reportValidity()) return;
-    const resume = form.elements.namedItem("resume");
-    if (resume.files.length === 0) {
+    const resume = document.querySelector("#resume");
+    if (!resume.files?.length) {
       formError.textContent = "Choose a PDF or DOCX resume before starting the scan.";
       formError.hidden = false;
       return;

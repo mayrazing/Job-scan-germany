@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Literal, Self
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -74,6 +75,49 @@ class UserStatusHistoryEntry(BaseModel):
     def normalize_changed_at(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("changed_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class SalaryPeriod(StrEnum):
+    MONTH = "month"
+    YEAR = "year"
+
+
+class SalaryValue(BaseModel):
+    """Store one user-entered salary amount and its period."""
+
+    amount: str = Field(min_length=1, max_length=100)
+    period: SalaryPeriod
+
+    @field_validator("amount")
+    @classmethod
+    def trim_amount(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("salary amount cannot be blank")
+        return value
+
+
+class JobNote(BaseModel):
+    """Store one dated user note attached to a Job Tracker job."""
+
+    id: UUID
+    content: str = Field(min_length=1, max_length=2000)
+    created_at: datetime
+
+    @field_validator("content")
+    @classmethod
+    def trim_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("note cannot be empty")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def normalize_created_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("note created_at must be timezone-aware")
         return value.astimezone(UTC)
 
 
@@ -437,6 +481,43 @@ class JobRecord(BaseModel):
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",
         exclude_if=lambda value: value is None,
+    )
+    application_resume_filename: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        exclude_if=lambda value: value is None,
+    )
+    expected_salary: SalaryValue | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    offer_salary: SalaryValue | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    notes: list[JobNote] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+    manual_posted_at: date | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    manual_company_size: int | None = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+    )
+    manual_company_industry: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=300,
+        exclude_if=lambda value: value is None,
+    )
+    manual_import_errors: list[str] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
     )
     global_status_deleted_at: datetime | None = Field(
         default=None,

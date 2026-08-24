@@ -11,7 +11,6 @@
   const atsTaskList = document.querySelector("[data-ats-task-list]");
   const atsResultsLink = document.querySelector("#ats-results-link");
   const atsStartButton = document.querySelector("[data-open-ats]");
-  const atsResumeInput = document.querySelector("#ats-resume");
   const reviewOnlyControls = [
     ...document.querySelectorAll("[data-review-only]"),
   ];
@@ -870,11 +869,7 @@
     const count = selectedAtsJobKeys().length;
     atsStartButton.textContent = `Check ${count} selected jobs`;
     atsStartButton.removeAttribute("aria-disabled");
-    const hasResume = Boolean(
-      atsResumeInput?.files[0] || atsStartButton.dataset.searchRunId,
-    );
-    atsStartButton.disabled =
-      atsStartInFlight || count === 0 || !hasResume;
+    atsStartButton.disabled = atsStartInFlight || count === 0;
     atsJobSelectors().forEach((control) => {
       control.closest(".job-card").classList.toggle("is-ats-selected", control.checked);
     });
@@ -902,8 +897,8 @@
     atsResultsLink.hidden = state.status !== "complete";
     if (state.status === "complete") {
       activeAtsRunId = null;
-      completedAtsRunId = state.run_id;
-      atsResultsLink.href = `/setup?ats_run_id=${encodeURIComponent(state.run_id)}#ats-check`;
+      completedAtsRunId = state.result_ids[0];
+      atsResultsLink.href = `/setup?ats_run_id=${encodeURIComponent(completedAtsRunId)}#ats-check`;
       headerStatus.textContent = "ATS ready";
     } else if (state.status === "failed") {
       activeAtsRunId = null;
@@ -996,14 +991,7 @@
     if (atsStartInFlight) return;
     const searchRunId = button.dataset.searchRunId;
     const jobKeys = selectedAtsJobKeys();
-    const uploadedResume = atsResumeInput?.files[0];
-    const selectedResumeId = document.body.dataset.selectedResumeId;
-    if (
-      (!searchRunId && !uploadedResume && !selectedResumeId)
-      || jobKeys.length === 0
-    ) {
-      return;
-    }
+    if (jobKeys.length === 0) return;
     atsCurrentRequestVersion += 1;
     atsStartInFlight = true;
     syncAtsSelection();
@@ -1011,8 +999,6 @@
       const payload = new FormData();
       payload.append("job_keys", JSON.stringify(jobKeys));
       if (searchRunId) payload.append("search_run_id", searchRunId);
-      if (uploadedResume) payload.append("resume", uploadedResume, uploadedResume.name);
-      else if (selectedResumeId) payload.append("resume_id", selectedResumeId);
       const response = await fetch("/api/ats-runs", {
         method: "POST",
         credentials: "same-origin",
@@ -1119,24 +1105,6 @@
     initializeTooltips(jobTrackerView);
     syncAtsSelection();
   });
-  atsResumeInput?.addEventListener("change", syncAtsSelection);
-  const syncAtsDefaultResumeLabel = () => {
-    const defaultLabel = document.querySelector("[data-ats-default-resume]");
-    const select = document.querySelector("[data-global-resume-select]");
-    if (!defaultLabel || !select) return;
-    const uploaded = atsResumeInput?.files?.[0];
-    if (uploaded) {
-      defaultLabel.textContent = `Default: ${uploaded.name}`;
-    } else {
-      const option = select.selectedOptions[0];
-      const filename = option?.dataset.resumeFilename;
-      const createdAt = option?.dataset.resumeCreatedAt;
-      defaultLabel.textContent = filename
-        ? `Default: ${filename}${createdAt ? ` (${createdAt})` : ""}`
-        : "Upload a PDF or DOCX resume";
-    }
-  };
-  atsResumeInput?.addEventListener("change", syncAtsDefaultResumeLabel);
   atsStartButton.addEventListener("click", () => startAts(atsStartButton));
   syncAtsSelection();
   const restoredSetupDraft = restoreSetupDraft();
@@ -1379,10 +1347,6 @@
         window.location.assign("/setup#review");
         return;
       }
-      if (result.resume_deleted) {
-        window.location.assign("/setup#review");
-        return;
-      }
       row.remove();
     } catch (error) {
       deleteButton.disabled = false;
@@ -1491,23 +1455,6 @@
       }).format(instant);
     }
   });
-
-  document
-    .querySelectorAll("[data-global-resume-select] option[data-resume-created-at-iso]")
-    .forEach((option) => {
-      const instant = new Date(option.dataset.resumeCreatedAtIso);
-      if (Number.isNaN(instant.getTime())) return;
-      const local = new Intl.DateTimeFormat(undefined, {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(instant);
-      option.dataset.resumeCreatedAt = local;
-      const filename = option.dataset.resumeFilename;
-      if (filename) {
-        option.textContent = `${filename} (${local})`;
-      }
-    });
-  syncAtsDefaultResumeLabel();
 
   reviewLink.addEventListener("click", (event) => {
     event.preventDefault();

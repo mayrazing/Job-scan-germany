@@ -11,26 +11,29 @@
     ) {
       return options;
     }
-    if (action === "application-resume") {
+    if (action === "resume") {
+      return {
+        ...options,
+        body: new FormData(form),
+      };
+    }
+    if (action === "salary") {
       return {
         ...options,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          resume_id: form.elements.namedItem("resume_id").value,
+          expected_salary: form.elements.namedItem("expected_salary").value,
+          expected_salary_period: form.elements.namedItem("expected_salary_period").value,
+          offer_salary: form.elements.namedItem("offer_salary").value,
+          offer_salary_period: form.elements.namedItem("offer_salary_period").value,
         }),
       };
     }
     const status = form.elements.namedItem("status").value;
-    const payload = { status };
-    const statusScope = form.closest("[data-status-scope]")?.dataset.statusScope;
-    const selectedResumeId = document.body.dataset.selectedResumeId;
-    if (statusScope === "global" && selectedResumeId) {
-      payload.resume_id = selectedResumeId;
-    }
     return {
       ...options,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ status }),
     };
   };
 
@@ -496,6 +499,8 @@
     );
 
     let draggedTab = null;
+    let draggedJobCard = null;
+    const jobDragPreviewScale = 0.6;
     let touchPointerId = null;
     let touchDropTarget = null;
     let touchDropBefore = false;
@@ -507,6 +512,19 @@
           "is-drag-over-after",
         );
       });
+    };
+    const clearJobDropTargets = () => {
+      reviewGroupTabs(navigation).forEach((tab) => {
+        tab.classList.remove("is-job-drop-target");
+      });
+    };
+    const clearJobDragState = () => {
+      draggedJobCard?.classList.remove("is-job-dragging");
+      clearJobDropTargets();
+    };
+    const finishJobDrag = () => {
+      clearJobDragState();
+      draggedJobCard = null;
     };
     const finishDrag = () => {
       draggedTab = null;
@@ -572,6 +590,15 @@
     });
     navigation.addEventListener("dragover", (event) => {
       const target = dropTarget(event);
+      if (draggedJobCard) {
+        const sourceGroup = draggedJobCard.closest(".job-group");
+        clearJobDropTargets();
+        if (!target || sourceGroup?.id === target.dataset.reviewGroupTab) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        target.classList.add("is-job-drop-target");
+        return;
+      }
       if (!draggedTab || !target || target === draggedTab) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
@@ -583,8 +610,30 @@
         before ? "is-drag-over-before" : "is-drag-over-after",
       );
     });
+    navigation.addEventListener("dragleave", (event) => {
+      if (
+        draggedJobCard
+        && (!event.relatedTarget || !navigation.contains(event.relatedTarget))
+      ) {
+        clearJobDropTargets();
+      }
+    });
     navigation.addEventListener("drop", (event) => {
       const target = dropTarget(event);
+      if (draggedJobCard) {
+        const card = draggedJobCard;
+        const sourceGroup = card.closest(".job-group");
+        if (!target || sourceGroup?.id === target.dataset.reviewGroupTab) return;
+        event.preventDefault();
+        const form = card.querySelector('[data-job-action="status"]');
+        const select = form?.elements.namedItem("status");
+        const targetStatus = target.dataset.reviewGroupTab;
+        finishJobDrag();
+        if (!form || !select || !targetStatus) return;
+        select.value = targetStatus;
+        if (select.value === targetStatus) form.requestSubmit();
+        return;
+      }
       if (!draggedTab || !target || target === draggedTab) return;
       event.preventDefault();
       const bounds = target.getBoundingClientRect();
@@ -597,6 +646,43 @@
       finishDrag();
     });
     navigation.addEventListener("dragend", finishDrag);
+    container.addEventListener("dragstart", (event) => {
+      const card = event.target.closest("[data-job-drag-source]");
+      if (!card) return;
+      const bounds = card.getBoundingClientRect();
+      const preview = document.createElement("div");
+      const previewCard = card.cloneNode(true);
+      preview.className = "card-grid";
+      preview.setAttribute("aria-hidden", "true");
+      Object.assign(preview.style, {
+        position: "fixed",
+        top: "0",
+        left: "0",
+        width: `${bounds.width * jobDragPreviewScale}px`,
+        height: `${bounds.height * jobDragPreviewScale}px`,
+        overflow: "hidden",
+        pointerEvents: "none",
+      });
+      Object.assign(previewCard.style, {
+        width: `${bounds.width}px`,
+        height: `${bounds.height}px`,
+        transform: `scale(${jobDragPreviewScale})`,
+        transformOrigin: "top left",
+      });
+      preview.append(previewCard);
+      document.body.append(preview);
+      event.dataTransfer.setDragImage(
+        preview,
+        (event.clientX - bounds.left) * jobDragPreviewScale,
+        (event.clientY - bounds.top) * jobDragPreviewScale,
+      );
+      requestAnimationFrame(() => preview.remove());
+      draggedJobCard = card;
+      card.classList.add("is-job-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", card.dataset.jobKey);
+    });
+    container.addEventListener("dragend", finishJobDrag);
     navigation.addEventListener("pointerdown", (event) => {
       if (
         event.pointerType === "mouse"
@@ -689,7 +775,46 @@
     syncReviewGroupEmptyState(liveGroup);
   };
 
-  const reconcileReviewJob = (refreshedDocument, jobKey) => {
+  const refreshOpenJobCard = (liveCard, refreshedCard, selectedForAts) => {
+    const liveDialog = liveCard.querySelector(
+      ":scope > [data-job-detail-dialog]",
+    );
+    const refreshedDialog = refreshedCard.querySelector(
+      ":scope > [data-job-detail-dialog]",
+    );
+    if (!liveDialog?.open || !refreshedDialog) return false;
+
+    [...liveCard.attributes].forEach((attribute) => {
+      if (!refreshedCard.hasAttribute(attribute.name)) {
+        liveCard.removeAttribute(attribute.name);
+      }
+    });
+    [...refreshedCard.attributes].forEach((attribute) => {
+      liveCard.setAttribute(attribute.name, attribute.value);
+    });
+    [...liveCard.children].forEach((child) => {
+      if (child !== liveDialog) child.remove();
+    });
+    [...refreshedCard.children].forEach((child) => {
+      if (child !== refreshedDialog) {
+        liveCard.insertBefore(document.importNode(child, true), liveDialog);
+      }
+    });
+    liveDialog.replaceChildren(
+      ...[...refreshedDialog.childNodes].map(
+        (node) => document.importNode(node, true),
+      ),
+    );
+    const atsCheckbox = liveCard.querySelector("[data-ats-select-job]");
+    if (atsCheckbox) atsCheckbox.checked = selectedForAts;
+    return true;
+  };
+
+  const reconcileReviewJob = (
+    refreshedDocument,
+    jobKey,
+    { preserveOpenDetail = false } = {},
+  ) => {
     const selectedForAts = [
       ...document.querySelectorAll("article.job-card[data-job-key]"),
     ].some(
@@ -709,6 +834,13 @@
       if (!refreshedCard) {
         liveCard?.remove();
         if (previousGroup) syncReviewGroupEmptyState(previousGroup);
+        return;
+      }
+      if (
+        preserveOpenDetail
+        && liveCard
+        && refreshOpenJobCard(liveCard, refreshedCard, selectedForAts)
+      ) {
         return;
       }
       const replacement = document.importNode(refreshedCard, true);
@@ -736,19 +868,32 @@
     );
   };
 
-  const refreshReviewJob = async (jobKey) => {
+  const refreshReviewJob = async (jobKey, options = {}) => {
     const refreshedDocument = await fetchReviewDocument(window.location.href);
-    reconcileReviewJob(refreshedDocument, jobKey);
+    reconcileReviewJob(refreshedDocument, jobKey, options);
   };
 
-  const reconcileGlobalResumeSelection = (refreshedDocument) => {
+  const refreshJobLifecycle = async (card, jobKey) => {
+    const refreshedDocument = await fetchReviewDocument(window.location.href);
+    const blockName = card.closest("[data-review-block]")?.dataset.reviewBlock;
+    const refreshedBlock = [
+      ...refreshedDocument.querySelectorAll("[data-review-block]"),
+    ].find((block) => block.dataset.reviewBlock === blockName);
+    const liveLifecycle = card.querySelector("[data-job-lifecycle]");
+    const refreshedLifecycle = reviewCardForJob(
+      refreshedBlock || refreshedDocument,
+      jobKey,
+    )?.querySelector("[data-job-lifecycle]");
+    if (!liveLifecycle || !refreshedLifecycle) {
+      throw new Error("Could not refresh this job lifecycle.");
+    }
+    liveLifecycle.replaceWith(document.importNode(refreshedLifecycle, true));
+  };
+
+  const reconcileGlobalJobs = (refreshedDocument) => {
     const liveBlock = document.querySelector('[data-review-block="global"]');
     const refreshedBlock = refreshedDocument.querySelector(
       '[data-review-block="global"]',
-    );
-    const liveResumeSection = liveBlock?.querySelector(".global-resume-section");
-    const refreshedResumeSection = refreshedBlock?.querySelector(
-      ".global-resume-section",
     );
     const liveGroups = liveBlock?.querySelector(
       "[data-review-workspace] > .review-groups",
@@ -759,12 +904,10 @@
     if (
       !liveBlock
       || !refreshedBlock
-      || !liveResumeSection
-      || !refreshedResumeSection
       || !liveGroups
       || !refreshedGroups
     ) {
-      throw new Error("Could not refresh this resume's tracked jobs.");
+      throw new Error("Could not refresh Job Tracker.");
     }
 
     const selectedForAts = new Set(
@@ -797,51 +940,8 @@
       liveGroups.append(replacement);
     });
     liveGroups.scrollTop = scrollTop;
-    liveResumeSection.replaceWith(
-      document.importNode(refreshedResumeSection, true),
-    );
-    document.body.dataset.selectedResumeId =
-      refreshedDocument.body.dataset.selectedResumeId || "";
-    localizeResumeOptionTimes(liveBlock);
-    updateAtsDefaultResume();
     updateReviewGroupCounts();
     document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
-  };
-
-  const updateAtsDefaultResume = () => {
-    const select = document.querySelector("[data-global-resume-select]");
-    const defaultLabel = document.querySelector("[data-ats-default-resume]");
-    if (!select || !defaultLabel) return;
-    const option = select.selectedOptions[0];
-    if (!option) {
-      defaultLabel.textContent = "Upload a PDF or DOCX resume";
-      return;
-    }
-    const filename = option.dataset.resumeFilename;
-    const createdAt = option.dataset.resumeCreatedAt;
-    defaultLabel.textContent = filename
-      ? `Default: ${filename}${createdAt ? ` (${createdAt})` : ""}`
-      : "Upload a PDF or DOCX resume";
-  };
-
-  const localizeResumeOptionTimes = (root = document) => {
-    root
-      .querySelectorAll(
-        "[data-global-resume-select] option[data-resume-created-at-iso]",
-      )
-      .forEach((option) => {
-        const instant = new Date(option.dataset.resumeCreatedAtIso);
-        if (Number.isNaN(instant.getTime())) return;
-        const local = new Intl.DateTimeFormat(undefined, {
-          dateStyle: "medium",
-          timeStyle: "short",
-        }).format(instant);
-        option.dataset.resumeCreatedAt = local;
-        const filename = option.dataset.resumeFilename;
-        if (filename) {
-          option.textContent = `${filename} (${local})`;
-        }
-      });
   };
 
   const responseError = async (response, fallback) => {
@@ -895,14 +995,10 @@
       }
     };
 
-    const finalizeManualImport = async (state) => {
+    const finalizeManualImport = async () => {
       const destination = new URL(window.location.href);
-      if (typeof state?.resume_id === "string") {
-        destination.searchParams.set("resume_id", state.resume_id);
-      }
       const refreshedDocument = await fetchReviewDocument(destination.href);
-      reconcileGlobalResumeSelection(refreshedDocument);
-      window.history.replaceState(null, "", destination.href);
+      reconcileGlobalJobs(refreshedDocument);
       resetManualImportButton();
       dialog.close();
     };
@@ -935,7 +1031,7 @@
         const state = await response.json();
         renderManualImportState(state);
         if (state.status === "complete") {
-          await finalizeManualImport(state);
+          await finalizeManualImport();
           return;
         }
         if (state.status === "failed") {
@@ -977,31 +1073,14 @@
         progressMessage.classList.remove("manual-job-error");
       }
       try {
-        const uploadedResume = resumeInput?.files?.[0];
-        let endpoint = "/api/global-jobs/import";
-        let options;
-        if (uploadedResume) {
-          const data = new FormData();
-          data.append("url", urlInput.value);
-          data.append("resume", uploadedResume);
-          endpoint = "/api/global-jobs/import-with-resume";
-          options = {
-            method: "POST",
-            credentials: "same-origin",
-            body: data,
-          };
-        } else {
-          const payload = { url: urlInput.value };
-          const resumeId = document.body.dataset.selectedResumeId?.trim();
-          if (resumeId) payload.resume_id = resumeId;
-          options = {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          };
-        }
-        const response = await fetch(endpoint, options);
+        const data = new FormData();
+        data.append("url", urlInput.value);
+        data.append("resume", resumeInput.files[0]);
+        const response = await fetch("/api/global-jobs/import-with-resume", {
+          method: "POST",
+          credentials: "same-origin",
+          body: data,
+        });
         if (!response.ok) {
           const message = await responseError(response);
           throw new Error(message);
@@ -1012,7 +1091,7 @@
         }
         renderManualImportState(state);
         if (state.status === "complete") {
-          await finalizeManualImport(state);
+          await finalizeManualImport();
           return;
         }
         if (state.status === "failed") {
@@ -1034,7 +1113,6 @@
     initializeSourceFilter();
     initializeGlobalSourceFilter();
     initializeManualJobImport();
-    localizeResumeOptionTimes();
   };
 
   if (document.readyState === "loading") {
@@ -1042,6 +1120,293 @@
   } else {
     initializeReview();
   }
+
+  const openJobDetail = (card) => {
+    const dialog = card.querySelector("[data-job-detail-dialog]");
+    if (dialog && !dialog.open) dialog.showModal();
+  };
+
+  const openJobNoteDialog = (trigger, note = null) => {
+    const card = trigger.closest("[data-job-preview-card]");
+    const dialog = card?.querySelector("[data-job-note-dialog]");
+    const form = dialog?.querySelector("[data-job-note-form]");
+    const input = form?.elements.namedItem("content");
+    const noteId = form?.elements.namedItem("note_id");
+    if (!dialog || !form || !input || !noteId) return;
+    form.reset();
+    noteId.value = note?.dataset.noteId || "";
+    input.value = note?.querySelector("[data-job-note-content]")?.textContent || "";
+    dialog.querySelector("[data-job-note-dialog-title]").textContent = (
+      note ? "Edit note" : "Add note"
+    );
+    dialog.querySelector("[data-job-note-save]").textContent = (
+      note ? "Save changes" : "Save note"
+    );
+    const errorMessage = dialog.querySelector("[data-job-note-error]");
+    errorMessage.hidden = true;
+    dialog.ariaLabel = note ? "Edit note" : "Add note";
+    dialog.showModal();
+    input.focus();
+  };
+
+  const updateManualFact = (card, fieldName, rawValue) => {
+    const fact = card.querySelector(`[data-manual-fact="${fieldName}"]`);
+    const valueNode = fact?.querySelector("[data-manual-fact-value]");
+    if (!fact || !valueNode) return;
+    const value = fieldName === "company_industry" ? rawValue.trim() : rawValue;
+    valueNode.textContent = "";
+    if (fieldName === "posted_at") {
+      const time = document.createElement("time");
+      time.dateTime = value;
+      time.textContent = value;
+      valueNode.append(time);
+      card.dataset.postedAt = value;
+      const preview = card.querySelector(".job-preview-posted");
+      if (preview) {
+        preview.textContent = "Posted: ";
+        preview.append(time.cloneNode(true));
+      }
+    } else if (fieldName === "company_size") {
+      const employeeCount = Number(value);
+      valueNode.textContent = `${new Intl.NumberFormat("en-US").format(employeeCount)} employees`;
+      card.dataset.companySizeMinimum = String(employeeCount);
+      card.dataset.companySizeMaximum = String(employeeCount);
+    } else {
+      valueNode.textContent = value;
+      card.dataset.companyIndustry = value;
+    }
+    const provenance = fact.querySelector("[data-manual-fact-provenance]");
+    if (provenance) provenance.textContent = " · Manually added";
+    document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+  };
+
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest("[data-manual-fact-open]");
+    if (trigger) {
+      const detail = trigger.closest("[data-job-detail-dialog]");
+      const fieldName = trigger.dataset.manualFactOpen;
+      const dialog = detail?.querySelector(
+        `[data-manual-fact-dialog][data-manual-fact-field="${fieldName}"]`,
+      );
+      if (!dialog) return;
+      dialog.showModal();
+      const input = dialog.querySelector('input[name="value"]');
+      input?.focus();
+      if (input?.type === "date" && typeof input.showPicker === "function") {
+        try {
+          input.showPicker();
+        } catch {
+          // Keep the visible date input available when showPicker is unavailable.
+        }
+      }
+      return;
+    }
+    const cancel = event.target.closest("[data-manual-fact-cancel]");
+    cancel?.closest("[data-manual-fact-dialog]")?.close();
+  });
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-manual-fact-form]");
+    if (!form) return;
+    event.preventDefault();
+    const dialog = form.closest("[data-manual-fact-dialog]");
+    const card = form.closest("[data-job-key]");
+    const fieldName = form.dataset.manualFactField;
+    const input = form.querySelector('input[name="value"]');
+    const button = form.querySelector("[data-manual-fact-save]");
+    const errorMessage = form.querySelector("[data-manual-fact-error]");
+    const value = input.value;
+    const payloadValue = fieldName === "company_size" ? Number(value) : value;
+    button.disabled = true;
+    errorMessage.hidden = true;
+    try {
+      const response = await fetch(
+        `/api/global-jobs/${encodeURIComponent(card.dataset.jobKey)}/facts`,
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ [fieldName]: payloadValue }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not save this job detail.",
+        ));
+      }
+      updateManualFact(card, fieldName, value);
+      dialog.close();
+      dialog.remove();
+    } catch (error) {
+      errorMessage.textContent = error.message;
+      errorMessage.hidden = false;
+      button.disabled = false;
+    }
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    const editor = event.target.closest(".lifecycle-date-editor");
+    const input = editor?.querySelector("[data-lifecycle-date-input]");
+    if (!input || input.disabled || typeof input.showPicker !== "function") return;
+    try {
+      input.showPicker();
+      event.preventDefault();
+    } catch {
+      // Keep the browser's normal date-input behavior when showPicker is unavailable.
+    }
+  });
+
+  document.addEventListener("dblclick", (event) => {
+    const step = event.target.closest("[data-lifecycle-step]");
+    if (!step || event.target.closest(".lifecycle-date-editor")) return;
+    if (step.dataset.lifecycleStatus === "saved") {
+      window.alert("Saved is the lifecycle starting point and cannot be deleted.");
+      return;
+    }
+    const card = step.closest("[data-job-key]");
+    const dialog = card?.querySelector("[data-lifecycle-delete-dialog]");
+    if (!dialog) return;
+    dialog.dataset.lifecycleEventIndex = step.dataset.lifecycleEventIndex;
+    dialog.querySelector("[data-lifecycle-delete-status]").textContent = (
+      step.dataset.lifecycleStatusLabel
+    );
+    event.preventDefault();
+    dialog.showModal();
+  });
+
+  document.addEventListener("click", (event) => {
+    const addNoteButton = event.target.closest("[data-job-note-add]");
+    if (addNoteButton) {
+      openJobNoteDialog(addNoteButton);
+      return;
+    }
+
+    const editNoteButton = event.target.closest("[data-job-note-edit]");
+    if (editNoteButton) {
+      openJobNoteDialog(editNoteButton, editNoteButton.closest("[data-job-note]"));
+      return;
+    }
+
+    const deleteNoteButton = event.target.closest("[data-job-note-delete]");
+    if (deleteNoteButton) {
+      const card = deleteNoteButton.closest("[data-job-preview-card]");
+      const dialog = card?.querySelector("[data-job-note-delete-dialog]");
+      const note = deleteNoteButton.closest("[data-job-note]");
+      if (!dialog || !note) return;
+      dialog.dataset.noteId = note.dataset.noteId;
+      dialog.showModal();
+      return;
+    }
+
+    const cancelNoteButton = event.target.closest("[data-job-note-cancel]");
+    if (cancelNoteButton) {
+      cancelNoteButton.closest("[data-job-note-dialog]")?.close();
+      return;
+    }
+
+    const replaceResumeButton = event.target.closest("[data-job-resume-replace]");
+    if (replaceResumeButton) {
+      replaceResumeButton
+        .closest("form")
+        ?.querySelector("[data-job-resume-input]")
+        ?.click();
+      return;
+    }
+
+    const closeButton = event.target.closest("[data-close-job-detail]");
+    if (closeButton) {
+      const dialog = closeButton.closest("[data-job-detail-dialog]");
+      const card = dialog?.closest("[data-job-preview-card]");
+      dialog?.close();
+      card?.focus();
+      return;
+    }
+
+    const detailDialog = event.target.closest("[data-job-detail-dialog]");
+    if (detailDialog) {
+      if (event.target === detailDialog) detailDialog.close();
+      return;
+    }
+
+    const card = event.target.closest("[data-job-preview-card]");
+    if (!card) return;
+    if (event.target.closest("a, button, input, select, label, form, summary, details")) {
+      return;
+    }
+    openJobDetail(card);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const card = event.target.closest("[data-job-preview-card]");
+    if (!card || event.target !== card || !["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    openJobDetail(card);
+  });
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-job-note-form]");
+    if (!form) return;
+    event.preventDefault();
+    const card = form.closest("[data-job-preview-card]");
+    const dialog = form.closest("[data-job-note-dialog]");
+    const button = form.querySelector("[data-job-note-save]");
+    const errorMessage = form.querySelector("[data-job-note-error]");
+    const rawJobKey = card.dataset.jobKey;
+    const noteId = form.elements.namedItem("note_id").value;
+    const content = form.elements.namedItem("content").value;
+    button.disabled = true;
+    errorMessage.hidden = true;
+    try {
+      const baseEndpoint = `/api/global-jobs/${encodeURIComponent(rawJobKey)}/notes`;
+      const response = await fetch(
+        noteId ? `${baseEndpoint}/${encodeURIComponent(noteId)}` : baseEndpoint,
+        {
+          method: noteId ? "PUT" : "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Could not save this note."));
+      }
+      dialog.close();
+      await refreshReviewJob(rawJobKey, { preserveOpenDetail: true });
+    } catch (error) {
+      errorMessage.textContent = error.message;
+      errorMessage.hidden = false;
+      button.disabled = false;
+      if (!dialog.open) dialog.showModal();
+    }
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-job-note-delete-confirm]");
+    if (!button || button.disabled) return;
+    const dialog = button.closest("[data-job-note-delete-dialog]");
+    const card = button.closest("[data-job-preview-card]");
+    const rawJobKey = card.dataset.jobKey;
+    const noteId = dialog.dataset.noteId;
+    button.disabled = true;
+    try {
+      const response = await fetch(
+        `/api/global-jobs/${encodeURIComponent(rawJobKey)}/notes/${encodeURIComponent(noteId)}`,
+        {
+          method: "DELETE",
+          credentials: "same-origin",
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Could not delete this note."));
+      }
+      dialog.close();
+      await refreshReviewJob(rawJobKey, { preserveOpenDetail: true });
+    } catch (error) {
+      window.alert(error.message);
+      button.disabled = false;
+    }
+  });
 
   document.addEventListener("submit", async (event) => {
     const form = event.target.closest("form[data-job-action]");
@@ -1056,7 +1421,8 @@
     const forceSuffix = action === "snapshot-force" ? "?force=1" : "";
     const endpoint = statusScope === "global" && (
       action === "status"
-      || action === "application-resume"
+      || action === "salary"
+      || action === "resume"
       || action === "snapshot"
       || action === "snapshot-force"
     )
@@ -1064,64 +1430,143 @@
       : runId
         ? `/api/scan-history/${encodeURIComponent(runId)}/jobs/${jobKey}/${snapshotAction}${forceSuffix}`
         : `/api/jobs/${jobKey}/${snapshotAction}${forceSuffix}`;
-    const button = form.querySelector('button[type="submit"]');
+    const button = form.querySelector(
+      'button[type="submit"], [data-job-resume-replace]',
+    );
     if (button?.disabled) return;
     const buttonText = button?.textContent;
     if (button) button.disabled = true;
+    if (button && (action === "status" || action === "salary")) {
+      button.classList.add("is-saving");
+      button.textContent = "Saving...";
+    }
     if (
       button
-      && (action === "snapshot" || action === "snapshot-force")
+      && (
+        action === "snapshot"
+        || action === "snapshot-force"
+        || action === "resume"
+      )
     ) {
-      button.textContent = "Generating...";
+      button.textContent = action === "resume" ? "Uploading..." : "Generating...";
     }
     try {
       const response = await fetch(endpoint, requestOptions(action, form));
       if (!response.ok) {
         throw new Error(await responseError(response, "Could not update this job."));
       }
-      await refreshReviewJob(rawJobKey);
+      await refreshReviewJob(rawJobKey, {
+        preserveOpenDetail: action === "resume",
+      });
     } catch (error) {
       window.alert(error.message);
       if (button) {
         button.disabled = false;
+        button.classList.remove("is-saving");
         button.textContent = buttonText;
       }
     }
   });
 
-  let globalResumeRequestVersion = 0;
   document.addEventListener("change", async (event) => {
-    const select = event.target.closest("[data-global-resume-select]");
-    if (!select || select.disabled) return;
-    const selectedOption = select.selectedOptions[0];
-    const destinationUrl = selectedOption?.dataset.reviewUrl;
-    if (!destinationUrl) return;
-    if (selectedOption.dataset.globalResumeId === document.body.dataset.selectedResumeId) {
+    const lifecycleDateInput = event.target.closest("[data-lifecycle-date-input]");
+    if (lifecycleDateInput) {
+      const lifecycle = lifecycleDateInput.closest("[data-job-lifecycle]");
+      const card = lifecycleDateInput.closest("[data-job-key]");
+      const eventIndex = lifecycleDateInput.dataset.lifecycleEventIndex;
+      const eventNumber = Number(eventIndex);
+      const changedOn = lifecycleDateInput.value;
+      const previousValue = lifecycleDateInput.defaultValue;
+      const matchingInputs = lifecycle.querySelectorAll(
+        `[data-lifecycle-date-input][data-lifecycle-event-index="${eventIndex}"]`,
+      );
+      const adjacentDate = (index) => lifecycle.querySelector(
+        `[data-lifecycle-date-input][data-lifecycle-event-index="${index}"]`,
+      )?.value;
+      const previousDate = eventNumber > 0
+        ? adjacentDate(eventNumber - 1)
+        : null;
+      const nextDate = adjacentDate(eventNumber + 1);
+      if (
+        (previousDate && changedOn < previousDate)
+        || (nextDate && changedOn > nextDate)
+      ) {
+        matchingInputs.forEach((input) => { input.value = previousValue; });
+        window.alert("This date must stay between its adjacent lifecycle dates.");
+        return;
+      }
+      matchingInputs.forEach((input) => { input.disabled = true; });
+      try {
+        const response = await fetch(
+          `/api/global-jobs/${encodeURIComponent(card.dataset.jobKey)}/lifecycle/${eventIndex}/date`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ changed_on: changedOn }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await responseError(
+            response,
+            "Could not update this lifecycle date.",
+          ));
+        }
+        card.querySelectorAll(`[data-lifecycle-time="${eventIndex}"]`).forEach(
+          (time) => {
+            time.dateTime = `${changedOn}${time.dateTime.slice(10)}`;
+            time.textContent = time.dataset.lifecycleTimeFormat === "datetime"
+              ? `${changedOn}${time.textContent.slice(10)}`
+              : changedOn;
+          },
+        );
+        matchingInputs.forEach((input) => {
+          input.value = changedOn;
+          input.defaultValue = changedOn;
+        });
+      } catch (error) {
+        matchingInputs.forEach((input) => { input.value = previousValue; });
+        window.alert(error.message);
+      } finally {
+        matchingInputs.forEach((input) => { input.disabled = false; });
+      }
       return;
     }
 
-    const requestVersion = ++globalResumeRequestVersion;
-    const resumeSection = select.closest(".global-resume-section");
-    const destination = new URL(destinationUrl, window.location.href);
-    destination.hash = window.location.hash || destination.hash;
-    select.disabled = true;
-    resumeSection?.setAttribute("aria-busy", "true");
+    const resumeInput = event.target.closest("[data-job-resume-input]");
+    if (resumeInput) {
+      resumeInput.form?.requestSubmit();
+    }
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-confirm-lifecycle-delete]");
+    if (!button || button.disabled) return;
+    const dialog = button.closest("[data-lifecycle-delete-dialog]");
+    const card = dialog.closest("[data-job-key]");
+    const rawJobKey = card.dataset.jobKey;
+    const eventIndex = dialog.dataset.lifecycleEventIndex;
+    button.disabled = true;
     try {
-      const refreshedDocument = await fetchReviewDocument(destination.href);
-      if (requestVersion !== globalResumeRequestVersion) return;
-      reconcileGlobalResumeSelection(refreshedDocument);
-      updateAtsDefaultResume();
-      window.history.replaceState(null, "", destination.href);
+      const response = await fetch(
+        `/api/global-jobs/${encodeURIComponent(rawJobKey)}/lifecycle/${eventIndex}`,
+        {
+          method: "DELETE",
+          credentials: "same-origin",
+        },
+      );
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not delete this lifecycle node.",
+        ));
+      }
+      dialog.close();
+      await refreshJobLifecycle(card, rawJobKey);
+      button.disabled = false;
     } catch (error) {
-      if (requestVersion === globalResumeRequestVersion) {
-        select.value = document.body.dataset.selectedResumeId || "";
-        window.alert(error.message);
-      }
-    } finally {
-      if (requestVersion === globalResumeRequestVersion) {
-        select.disabled = false;
-        resumeSection?.removeAttribute("aria-busy");
-      }
+      window.alert(error.message);
+      button.disabled = false;
     }
   });
 

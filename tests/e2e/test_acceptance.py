@@ -278,7 +278,7 @@ def test_fresh_home_meets_all_release_acceptance_criteria(
         }
         assert captured_app is not None
         with TestClient(captured_app, base_url=ORIGIN) as client:
-            dashboard = client.get("/")
+            dashboard = client.get("/setup")
             assert dashboard.status_code == 200
             dashboard_soup = BeautifulSoup(dashboard.content, "html.parser")
             for view in PrimaryView:

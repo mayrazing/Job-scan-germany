@@ -1,37 +1,131 @@
-{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current', resumes=()) -%}
-  {% set has_application = job.application_resume_id or job.user_status.value in ('applied', 'interviewing', 'offer', 'withdrawn', 'rejected') %}
-  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}">
-    <div class="status-rail" aria-label="Job status">
+{% macro manual_fact_dialog(field_name, label, input_type) -%}
+  <dialog class="manual-fact-dialog" data-manual-fact-dialog data-manual-fact-field="{{ field_name }}" aria-label="Add {{ label }}">
+    <form class="manual-fact-form" data-manual-fact-form data-manual-fact-field="{{ field_name }}">
+      <label>
+        <span>{{ label }}</span>
+        <input class="form-control" name="value" type="{{ input_type }}" required{% if input_type == 'number' %} min="1" step="1" inputmode="numeric"{% elif input_type == 'text' %} maxlength="300"{% endif %}>
+      </label>
+      <p class="manual-fact-error" role="alert" data-manual-fact-error hidden></p>
+      <div class="manual-fact-actions">
+        <button class="btn btn-primary" type="submit" data-manual-fact-save>Save</button>
+        <button class="btn btn-outline-secondary" type="button" data-manual-fact-cancel>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+{%- endmacro %}
+
+{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
+  {% set saved_event = namespace(entry=none, index=none) %}
+  {% if status_scope == 'global' %}
+    {% for event in job.user_status_history %}
+      {% if saved_event.entry is none and event.status.value == 'saved' %}
+        {% set saved_event.entry = event %}
+        {% set saved_event.index = loop.index0 %}
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if status_scope == 'global' %} draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}">
+    <div class="job-preview-status" aria-label="Job status">
+      <span><strong>User status</strong><small>{{ job.user_status.value | replace('_', ' ') }}</small></span>
+      <span><strong>Machine</strong><small>{{ job.machine_status.value | replace('_', ' ') }}</small></span>
+      <span><strong>Availability</strong><small>{{ job.availability_status.value }}</small></span>
+    </div>
+    <div class="job-preview-body">
+      <div class="job-preview-summary" data-job-preview-open-area>
+        <header class="job-preview-header">
+          <div>
+            <p class="company">{{ job.company }}</p>
+            <h3><a href="{{ job.url }}" target="_blank" rel="noopener noreferrer">{{ job.title }}</a></h3>
+            <p class="location job-preview-location">
+              <span>{{ job.location }}</span>
+              <span class="job-preview-posted">Posted: {% if job.posted_at %}<time datetime="{{ job.posted_at.isoformat() }}">{{ job.posted_at.isoformat() }}</time>{% else %}Unknown{% endif %}</span>
+              {% if saved_event.entry %}<span class="job-preview-added" data-job-preview-added>Added: <time data-lifecycle-time="{{ saved_event.index }}" data-lifecycle-time-format="date" datetime="{{ saved_event.entry.changed_at.isoformat() }}">{{ saved_event.entry.changed_at.date().isoformat() }}</time></span>{% endif %}
+            </p>
+          </div>
+          {% if job.score is not none %}
+            <p class="score"><strong>{{ job.score }}</strong><span>score</span></p>
+          {% endif %}
+        </header>
+        {% if status_scope == 'global' and (job.expected_salary or job.offer_salary) %}
+          <dl class="job-preview-salaries" data-job-preview-salaries>
+            {% if job.expected_salary %}
+              <div><dt>Expected salary:</dt><dd>{{ job.expected_salary.amount }} /{{ job.expected_salary.period.value }}</dd></div>
+            {% endif %}
+            {% if job.offer_salary %}
+              <div><dt>Offer salary:</dt><dd>{{ job.offer_salary.amount }} /{{ job.offer_salary.period.value }}</dd></div>
+            {% endif %}
+          </dl>
+        {% endif %}
+        {% if job.machine_status.value == 'pending_source' %}
+          <p class="job-preview-message is-warning">Source detail unavailable.</p>
+        {% elif job.review_error %}
+          <p class="job-preview-message is-danger">AI review failed.</p>
+        {% elif job.reason %}
+          <p class="job-preview-message">{{ job.reason }}</p>
+        {% endif %}
+        {% if job.labels or job.restored %}
+          <ul class="labels" aria-label="Labels">
+            {% if job.restored %}<li class="job-preview-restored">Restored</li>{% endif %}
+            {% for label in job.labels %}<li{% if label == 'German required' %} class="danger"{% endif %}>{{ label }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+      <form class="job-action job-preview-status-form" data-job-action="status" data-job-key="{{ job.canonical_key }}">
+        <label>
+          <span>Set user status</span>
+          <select name="status">
+            {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
+            {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
+              <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit">Save</button>
+      </form>
+      <footer class="job-preview-footer">
+        {% if ats_selectable %}
+          <label class="form-check ats-job-selector">
+            <input
+              class="form-check-input"
+              type="checkbox"
+              value="{{ job.canonical_key }}"
+              data-ats-select-job
+              aria-label="Select {{ job.title }} at {{ job.company }} for ATS Check"
+              {% if not job.application_resume_filename %}disabled{% endif %}
+            >
+            <span class="form-check-label">{{ 'ATS Check' if job.application_resume_filename else 'No resume' }}</span>
+          </label>
+        {% else %}
+          <span aria-hidden="true"></span>
+        {% endif %}
+        <span class="job-preview-open-label" aria-hidden="true">View details →</span>
+      </footer>
+    </div>
+
+    <dialog class="job-detail-dialog" data-job-detail-dialog aria-label="Job details for {{ job.title }} at {{ job.company }}">
+      <div class="job-detail-panel">
+    <div class="status-rail job-detail-status" aria-label="Job status">
       <span><strong>User status:</strong> {{ job.user_status.value | replace('_', ' ') }}</span>
       <span><strong>Machine:</strong> {{ job.machine_status.value | replace('_', ' ') }}</span>
       <span><strong>Effective:</strong> {{ job.effective_status.value | replace('_', ' ') }}</span>
       <span><strong>Availability:</strong> {{ job.availability_status.value }}</span>
       {% if job.restored %}<span class="restored-label">Restored</span>{% endif %}
     </div>
-    <div class="card-body">
-      <header class="card-header">
+    <div class="card-body job-detail-body">
+      <header class="card-header job-detail-header">
         <div>
-          {% if ats_selectable %}
-            <label class="form-check ats-job-selector">
-              <input
-                class="form-check-input"
-                type="checkbox"
-                value="{{ job.canonical_key }}"
-                data-ats-select-job
-                aria-label="Select {{ job.title }} at {{ job.company }} for ATS Check"
-              >
-              <span class="form-check-label">Select for ATS Check</span>
-            </label>
-          {% endif %}
           <p class="company">{{ job.company }}</p>
           <h3>
             <a href="{{ job.url }}" target="_blank" rel="noopener noreferrer">{{ job.title }}</a>
           </h3>
           <p class="location">{{ job.location }}</p>
         </div>
-        {% if job.score is not none %}
-          <p class="score"><strong>{{ job.score }}</strong><span>score</span></p>
-        {% endif %}
+        <div class="job-detail-header-actions">
+          {% if job.score is not none %}
+            <p class="score"><strong>{{ job.score }}</strong><span>score</span></p>
+          {% endif %}
+          <button class="job-detail-close" type="button" data-close-job-detail aria-label="Close job details">Close</button>
+        </div>
       </header>
 
       {% if job.reason %}<p class="reason">{{ job.reason }}</p>{% endif %}
@@ -42,6 +136,14 @@
 
       {% if job.review_error %}
         <p class="review-error" role="alert"><strong>AI review failed.</strong> Error: {{ job.review_error | replace('_', ' ') }}.</p>
+      {% endif %}
+
+      {% if job.manual_import_errors %}
+        <details class="manual-import-errors">
+          <summary>Error</summary>
+          <p>This job was saved, but some information could not be checked against the original page.</p>
+          <ul>{% for error in job.manual_import_errors %}<li>{{ error }}</li>{% endfor %}</ul>
+        </details>
       {% endif %}
 
       {% if job.labels %}
@@ -65,10 +167,17 @@
           </header>
           <ol class="lifecycle-steps" aria-label="Status progress">
             {% for event in job.user_status_history %}
-              <li data-lifecycle-step data-state="{% if loop.last %}current{% else %}complete{% endif %}"{% if loop.last %} aria-current="step"{% endif %}>
+              <li data-lifecycle-step data-lifecycle-event-index="{{ loop.index0 }}" data-lifecycle-status="{{ event.status.value }}" data-lifecycle-status-label="{{ event.status.value | replace('_', ' ') | title }}" data-state="{% if loop.last %}current{% else %}complete{% endif %}"{% if loop.last %} aria-current="step"{% endif %}>
                 <span class="lifecycle-dot" aria-hidden="true"></span>
                 <strong>{{ event.status.value | replace('_', ' ') | title }}</strong>
-                <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
+                {% if status_scope == 'global' %}
+                  <label class="lifecycle-date-editor">
+                    <time data-lifecycle-time="{{ loop.index0 }}" data-lifecycle-time-format="date" datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
+                    <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status.value | replace('_', ' ') }} date">
+                  </label>
+                {% else %}
+                  <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
+                {% endif %}
               </li>
             {% endfor %}
           </ol>
@@ -77,23 +186,20 @@
             <ol>
               {% for event in job.user_status_history %}
                 <li data-lifecycle-event>
-                  <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                  {% if status_scope == 'global' %}
+                    <label class="lifecycle-date-editor">
+                      <time data-lifecycle-time="{{ loop.index0 }}" data-lifecycle-time-format="datetime" datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                      <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status.value | replace('_', ' ') }} date">
+                    </label>
+                  {% else %}
+                    <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                  {% endif %}
                   <span><strong>{{ event.status.value | replace('_', ' ') | title }}</strong></span>
                 </li>
               {% endfor %}
             </ol>
           </details>
         </section>
-      {% endif %}
-
-      {% if has_application %}
-        {% set applied_resume = namespace(label='Unknown') %}
-        {% for resume in resumes %}
-          {% if resume.resume_id == job.application_resume_id %}
-            {% set applied_resume.label = resume.candidate_name ~ ' - ' ~ resume.filename %}
-          {% endif %}
-        {% endfor %}
-        <p class="application-resume" data-application-resume><strong>Applied with:</strong> {{ applied_resume.label }}</p>
       {% endif %}
 
       <dl class="facts">
@@ -118,41 +224,39 @@
               </span>
             {% endif %}
           </dt>
-          <dd>
+          <dd data-manual-fact="company_size">
+            <span data-manual-fact-value>
             {% if job.company_size_label %}
               {{ job.company_size_label }}
-              {% if job.company_size_source_url %}
-                · <a href="{{ job.company_size_source_url }}" target="_blank" rel="noopener noreferrer">{{ job.company_size_source_title or 'Source' }}</a>
-              {% else %}
-                · No reliable source
-              {% endif %}
-              {% if job.company_size_checked_at %}· Checked {{ job.company_size_checked_at.date().isoformat() }}{% endif %}
             {% else %}
-              Unknown · No reliable source
+              {% if status_scope == 'global' %}<button class="manual-fact-trigger" type="button" data-manual-fact-open="company_size">Unknown</button>{% else %}Unknown{% endif %}
             {% endif %}
+            </span><span data-manual-fact-provenance>{% if job.company_size_manually_added %} · Manually added{% elif job.company_size_source_url %} · <a href="{{ job.company_size_source_url }}" target="_blank" rel="noopener noreferrer">{{ job.company_size_source_title or 'Source' }}</a>{% else %} · No reliable source{% endif %}{% if job.company_size_checked_at %} · Checked {{ job.company_size_checked_at.date().isoformat() }}{% endif %}</span>
+            {% if status_scope == 'global' and not job.company_size_label %}{{ manual_fact_dialog('company_size', 'Company size', 'number') }}{% endif %}
             {% if company_size_searchable %}<span class="company-size-search-error" role="alert" hidden></span>{% endif %}
           </dd>
         </div>
         {% endif %}
         <div class="company-industry">
           <dt>Company industry</dt>
-          <dd>
+          <dd data-manual-fact="company_industry">
+            <span data-manual-fact-value>
             {% if job.company_industry_label %}
               {{ job.company_industry_label }}
-              {% if job.company_industry_lookup_method == 'ai' %}
-                · AI from JD
-              {% elif job.company_industry_source_url %}
-                · Source: {{ job.company_industry_source_name }}
-                · <a href="{{ job.company_industry_source_url }}" target="_blank" rel="noopener noreferrer">{{ job.company_industry_source_title or 'Source' }}</a>
-              {% endif %}
-              {% if job.company_industry_confidence %}· {{ job.company_industry_confidence }} confidence{% endif %}
-              {% if job.company_industry_checked_at %}· Checked {{ job.company_industry_checked_at.date().isoformat() }}{% endif %}
             {% else %}
-              Unknown
+              {% if status_scope == 'global' %}<button class="manual-fact-trigger" type="button" data-manual-fact-open="company_industry">Unknown</button>{% else %}Unknown{% endif %}
             {% endif %}
+            </span><span data-manual-fact-provenance>{% if job.company_industry_lookup_method == 'manual' %} · Manually added{% elif job.company_industry_lookup_method == 'ai' %} · AI from JD{% elif job.company_industry_source_url %} · Source: {{ job.company_industry_source_name }} · <a href="{{ job.company_industry_source_url }}" target="_blank" rel="noopener noreferrer">{{ job.company_industry_source_title or 'Source' }}</a>{% endif %}{% if job.company_industry_confidence %} · {{ job.company_industry_confidence }} confidence{% endif %}{% if job.company_industry_checked_at %} · Checked {{ job.company_industry_checked_at.date().isoformat() }}{% endif %}</span>
+            {% if status_scope == 'global' and not job.company_industry_label %}{{ manual_fact_dialog('company_industry', 'Company industry', 'text') }}{% endif %}
           </dd>
         </div>
-        <div><dt>Posted</dt><dd>{% if job.posted_at %}<time datetime="{{ job.posted_at.isoformat() }}">{{ job.posted_at.isoformat() }}</time>{% else %}Unknown{% endif %}</dd></div>
+        <div>
+          <dt>Posted</dt>
+          <dd data-manual-fact="posted_at">
+            <span data-manual-fact-value>{% if job.posted_at %}<time datetime="{{ job.posted_at.isoformat() }}">{{ job.posted_at.isoformat() }}</time>{% elif status_scope == 'global' %}<button class="manual-fact-trigger" type="button" data-manual-fact-open="posted_at">Unknown</button>{% else %}Unknown{% endif %}</span>
+            {% if status_scope == 'global' and not job.posted_at %}{{ manual_fact_dialog('posted_at', 'Posted', 'date') }}{% endif %}
+          </dd>
+        </div>
         <div><dt>First seen</dt><dd><time datetime="{{ job.first_seen.isoformat() }}">{{ job.first_seen.date().isoformat() }}</time></dd></div>
         <div><dt>Last seen</dt><dd><time datetime="{{ job.last_seen.isoformat() }}">{{ job.last_seen.date().isoformat() }}</time></dd></div>
       </dl>
@@ -174,61 +278,175 @@
       </details>
 
       <div class="job-actions">
-        {% if job.job_snapshot_id %}
-          <div class="job-snapshot-control">
-            <a class="btn btn-outline-secondary" href="/api/job-snapshots/{{ job.job_snapshot_id }}" target="_blank" rel="noopener noreferrer" data-job-snapshot>Job snapshot</a>
-            <form class="job-snapshot-regenerate" data-job-action="snapshot-force" data-job-key="{{ job.canonical_key }}">
-              <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-regenerate>Regenerate snapshot</button>
-            </form>
+        <section class="job-action-group">
+          <h4 class="job-action-group-title">Snapshot</h4>
+          <div class="job-snapshot-control job-action-row">
+            {% if job.job_snapshot_id %}
+              <a class="btn btn-outline-secondary" href="/api/job-snapshots/{{ job.job_snapshot_id }}" target="_blank" rel="noopener noreferrer" data-job-snapshot>Job snapshot</a>
+              <form class="job-snapshot-regenerate" data-job-action="snapshot-force" data-job-key="{{ job.canonical_key }}">
+                <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-regenerate>Regenerate snapshot</button>
+              </form>
+            {% elif job.job_snapshot_triggerable %}
+              {% if job.job_snapshot_error_code %}<p class="job-snapshot-unavailable" data-job-snapshot-unavailable>Snapshot unavailable</p>{% endif %}
+              <form class="job-action" data-job-action="snapshot" data-job-key="{{ job.canonical_key }}">
+                <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-trigger>{{ 'Retry snapshot' if job.job_snapshot_error_code else 'Generate snapshot' }}</button>
+              </form>
+            {% endif %}
           </div>
-        {% elif job.job_snapshot_triggerable %}
-          <div class="job-snapshot-control">
-            {% if job.job_snapshot_error_code %}<p class="job-snapshot-unavailable" data-job-snapshot-unavailable>Snapshot unavailable</p>{% endif %}
-            <form class="job-action" data-job-action="snapshot" data-job-key="{{ job.canonical_key }}">
-              <button class="btn btn-outline-secondary" type="submit" data-job-snapshot-trigger>{{ 'Retry snapshot' if job.job_snapshot_error_code else 'Generate snapshot' }}</button>
-            </form>
-          </div>
-        {% endif %}
-        <form class="job-action" data-job-action="status" data-job-key="{{ job.canonical_key }}">
-          <label>
-            <span>Set user status</span>
-            <select name="status">
-              {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
-              {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
-                <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <button type="submit">Save status</button>
-        </form>
-        {% if status_scope == 'global' and resumes and has_application %}
-          <form class="job-action" data-job-action="application-resume" data-job-key="{{ job.canonical_key }}">
+        </section>
+
+        <section class="job-action-group">
+          <h4 class="job-action-group-title">Status</h4>
+          <form class="job-action" data-job-action="status" data-job-key="{{ job.canonical_key }}">
             <label>
-              <span>Applied resume</span>
-              <select name="resume_id">
-                {% for resume in resumes %}
-                  <option value="{{ resume.resume_id }}"{% if resume.resume_id == job.application_resume_id %} selected{% endif %}>{{ resume.candidate_name }} - {{ resume.filename }}</option>
+              <span>Set user status</span>
+              <select name="status">
+                {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
+                {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
+                  <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
                 {% endfor %}
               </select>
             </label>
-            <button type="submit">Change resume</button>
+            <button type="submit">Save status</button>
           </form>
-        {% endif %}
+        </section>
+
         {% if status_scope == 'global' %}
-          <button
-            class="btn btn-outline-danger"
-            type="button"
-            data-global-job-delete
-            aria-label="Delete {{ job.title }} at {{ job.company }} from Job Tracker"
-          >Delete</button>
+          <section class="job-action-group">
+            <h4 class="job-action-group-title">Compensation</h4>
+            <form class="job-salary-form" data-job-action="salary" data-job-key="{{ job.canonical_key }}">
+              <div class="job-salary-fields">
+                <label>
+                  <span>Expected salary</span>
+                  <span class="job-salary-value">
+                    <input type="text" name="expected_salary" value="{{ job.expected_salary.amount if job.expected_salary else '' }}" maxlength="100">
+                    <select name="expected_salary_period" aria-label="Expected salary period">
+                      <option value="month"{% if job.expected_salary and job.expected_salary.period.value == 'month' %} selected{% endif %}>/month</option>
+                      <option value="year"{% if not job.expected_salary or job.expected_salary.period.value == 'year' %} selected{% endif %}>/year</option>
+                    </select>
+                  </span>
+                </label>
+                <label>
+                  <span>Offer salary</span>
+                  <span class="job-salary-value">
+                    <input type="text" name="offer_salary" value="{{ job.offer_salary.amount if job.offer_salary else '' }}" maxlength="100">
+                    <select name="offer_salary_period" aria-label="Offer salary period">
+                      <option value="month"{% if job.offer_salary and job.offer_salary.period.value == 'month' %} selected{% endif %}>/month</option>
+                      <option value="year"{% if not job.offer_salary or job.offer_salary.period.value == 'year' %} selected{% endif %}>/year</option>
+                    </select>
+                  </span>
+                </label>
+              </div>
+              <button type="submit">Save salaries</button>
+            </form>
+          </section>
+
+          <section class="job-action-group">
+            <h4 class="job-action-group-title">Resume</h4>
+            <div class="job-resume-control job-action-row" data-job-resume>
+              <span data-job-resume-name>{{ job.application_resume_filename or 'Unknown' }}</span>
+              {% if job.application_resume_filename %}
+                <a class="btn btn-outline-secondary" href="/api/global-jobs/{{ job.canonical_key | urlencode }}/resume" data-job-resume-download>Download</a>
+              {% endif %}
+              <form data-job-action="resume" data-job-key="{{ job.canonical_key }}" enctype="multipart/form-data">
+                <input type="file" name="resume" accept=".pdf,.docx" required hidden data-job-resume-input>
+                <button class="btn btn-outline-secondary" type="button" data-job-resume-replace>Replace</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="job-action-group job-notes" data-job-notes>
+            <div class="job-notes-heading">
+              <h4 class="job-action-group-title">Notes</h4>
+              <button class="btn btn-outline-secondary job-note-add" type="button" data-job-note-add aria-label="Add note">+</button>
+            </div>
+            {% if job.notes %}
+              <ol class="job-note-list" data-job-note-list>
+                {% for note in job.notes %}
+                  <li data-job-note data-note-id="{{ note.id }}">
+                    <p class="job-note-content" data-job-note-content>{{ note.content }}</p>
+                    <footer>
+                      <time datetime="{{ note.created_at.isoformat() }}" data-job-note-date>{{ note.created_at.date().isoformat() }}</time>
+                      <span class="job-note-actions">
+                        <button class="btn btn-outline-secondary" type="button" data-job-note-edit>Edit</button>
+                        <button class="btn btn-outline-danger" type="button" data-job-note-delete>Delete</button>
+                      </span>
+                    </footer>
+                  </li>
+                {% endfor %}
+              </ol>
+            {% else %}
+              <p class="job-note-empty" data-job-note-empty>No notes yet.</p>
+            {% endif %}
+          </section>
+
+          <section class="job-action-group job-action-group-danger">
+            <button
+              class="btn btn-outline-danger"
+              type="button"
+              data-global-job-delete
+              aria-label="Delete {{ job.title }} at {{ job.company }} from Job Tracker"
+            >Delete job</button>
+          </section>
         {% endif %}
+
         {% if job.machine_status.value == 'excluded' and not job.restored and job.restorable %}
-          <form class="job-action" data-job-action="restore" data-job-key="{{ job.canonical_key }}">
-            <button type="submit">Restore job</button>
-          </form>
+          <section class="job-action-group">
+            <form class="job-action" data-job-action="restore" data-job-key="{{ job.canonical_key }}">
+              <button type="submit">Restore job</button>
+            </form>
+          </section>
         {% endif %}
       </div>
     </div>
+      </div>
+    </dialog>
+    {% if status_scope == 'global' %}
+      <dialog class="manual-job-dialog job-note-dialog" data-job-note-dialog aria-label="Add note">
+        <form data-job-note-form>
+          <header>
+            <h4 data-job-note-dialog-title>Add note</h4>
+            <p>Record a dated note for this job.</p>
+          </header>
+          <input type="hidden" name="note_id">
+          <label>
+            <span>Note</span>
+            <textarea name="content" maxlength="2000" required data-job-note-input></textarea>
+          </label>
+          <p class="manual-job-error" role="alert" data-job-note-error hidden></p>
+          <div class="manual-job-actions">
+            <button class="btn btn-outline-secondary" type="button" data-job-note-cancel>Cancel</button>
+            <button class="btn btn-primary" type="submit" data-job-note-save>Save note</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog class="manual-job-dialog job-note-delete-dialog" data-job-note-delete-dialog aria-label="Delete note">
+        <form method="dialog">
+          <header>
+            <h4>Delete note?</h4>
+            <p>This note will be permanently deleted.</p>
+          </header>
+          <div class="manual-job-actions">
+            <button class="btn btn-outline-secondary" type="submit" value="cancel">Cancel</button>
+            <button class="btn btn-outline-danger" type="button" data-job-note-delete-confirm>Delete</button>
+          </div>
+        </form>
+      </dialog>
+    {% endif %}
+    {% if status_scope == 'global' and job.user_status_history %}
+      <dialog class="manual-job-dialog lifecycle-delete-dialog" data-lifecycle-delete-dialog aria-label="Delete lifecycle node">
+        <form method="dialog">
+          <header>
+            <h4>Delete lifecycle node?</h4>
+            <p>Delete <strong data-lifecycle-delete-status></strong> from this job lifecycle?</p>
+          </header>
+          <div class="manual-job-actions">
+            <button type="submit" value="cancel" data-cancel-lifecycle-delete>Cancel</button>
+            <button type="button" data-confirm-lifecycle-delete>Delete</button>
+          </div>
+        </form>
+      </dialog>
+    {% endif %}
   </article>
 {%- endmacro %}
 
@@ -252,32 +470,15 @@
   </nav>
 {%- endmacro %}
 
-{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current', resumes=()) -%}
+{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
   {% for group in dashboard.active_groups.values() %}
     <section class="job-group" id="{{ group.id }}" aria-labelledby="{{ group.id }}-title"{% if not loop.first %} hidden{% endif %}>
       <h2 class="visually-hidden" id="{{ group.id }}-title">{{ group.title }}</h2>
       <div class="card-grid">
-        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope, resumes) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
+        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
       </div>
     </section>
   {% endfor %}
-{%- endmacro %}
-
-{% macro global_resume_list(resumes, selected_resume_id, review_path, selected_run_id=none, review_hash='review', resume_latest_searches=none) -%}
-  <section class="global-resume-section" aria-labelledby="global-resume-title">
-    <div class="global-resume-heading">
-      <h4 id="global-resume-title">Resumes</h4>
-      <span>Select a resume to view its matched jobs.</span>
-    </div>
-    <select class="global-resume-select" data-global-resume-select aria-label="Select resume"{% if not resumes %} disabled{% endif %}>
-      {% for resume in resumes %}
-        {% set display_time = (resume_latest_searches or {}).get(resume.resume_id, resume.created_at) %}
-        <option value="{{ resume.resume_id }}" data-global-resume-id="{{ resume.resume_id }}" data-resume-filename="{{ resume.filename }}" data-resume-created-at="{{ display_time.strftime('%Y-%m-%d %H:%M') }}" data-resume-created-at-iso="{{ display_time.isoformat() }}" data-review-url="{{ review_path }}?{% if selected_run_id %}run_id={{ selected_run_id | urlencode }}&amp;{% endif %}resume_id={{ resume.resume_id | urlencode }}#{{ review_hash }}"{% if resume.resume_id == selected_resume_id %} selected{% endif %}>{{ resume.filename }} ({{ display_time.strftime('%Y-%m-%d %H:%M') }})</option>
-      {% else %}
-        <option selected>No resumes associated with tracked jobs yet.</option>
-      {% endfor %}
-    </select>
-  </section>
 {%- endmacro %}
 
 {% macro manual_job_import() -%}
@@ -294,9 +495,8 @@
         <input id="manual-job-url" name="url" type="url" inputmode="url" autocomplete="url" placeholder="https://careers.example/jobs/123" required>
       </label>
       <label for="manual-job-resume">
-        <span>New resume, optional</span>
-        <input id="manual-job-resume" name="resume" type="file" accept=".pdf,.docx">
-        <small>Leave empty to use the selected resume above.</small>
+        <span>New resume</span>
+        <input id="manual-job-resume" name="resume" type="file" accept=".pdf,.docx" required>
       </label>
       <p class="manual-job-error" data-manual-job-error role="alert" hidden></p>
       <p class="manual-job-progress" data-manual-job-progress hidden role="status"></p>

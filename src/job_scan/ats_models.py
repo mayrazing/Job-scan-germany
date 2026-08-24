@@ -63,6 +63,7 @@ class AtsJobResult(_FrozenModel):
 class AtsCheckBundle(_FrozenModel):
     run_id: str = Field(min_length=1, max_length=100)
     search_run_id: str = Field(min_length=1, max_length=100)
+    resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     candidate_name: str = Field(min_length=1, max_length=200)
     resume_filename: str = Field(min_length=1, max_length=255)
     started_at: datetime
@@ -80,6 +81,7 @@ class AtsCheckBundle(_FrozenModel):
 class AtsHistoryEntry(_FrozenModel):
     run_id: str
     search_run_id: str
+    resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     candidate_name: str
     resume_filename: str
     finished_at: datetime
@@ -104,4 +106,5 @@ class AtsRunState(_FrozenModel):
     message: str
     progress_percent: float = Field(ge=0, le=100)
     tasks: list[AtsTaskState]
+    result_ids: list[str] = Field(default_factory=list)
     error: str | None = None

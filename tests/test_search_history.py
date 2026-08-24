@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings, save_config
 from job_scan.dashboard.render import render_dashboard
 from job_scan.domain import (
     AvailabilityStatus,
@@ -20,13 +22,24 @@ from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
-from job_scan.resume_catalog import ResumeCatalogStore
 from job_scan.review_server import create_review_app
 from job_scan.search_history import SearchHistoryStore
 
-_HISTORY_RESUME = "sha256:" + "a" * 64
-_LIVE_RESUME = "sha256:" + "b" * 64
-_PROFILE_HASH = "sha256:" + "0" * 64
+
+def _save_review_config(paths: AppPaths, resume: Path) -> None:
+    save_config(
+        paths.config_toml,
+        AppConfig(
+            resume_path=resume,
+            resume_sha256="sha256:" + hashlib.sha256(resume.read_bytes()).hexdigest(),
+            profile_sha256="sha256:" + "b" * 64,
+            search_terms=["backend"],
+            locations=["Berlin"],
+            german_level="B1",
+            claude=ClaudeSettings(model="sonnet", effort="medium"),
+            scheduler=SchedulerSettings(),
+        ),
+    )
 
 
 def _snapshot(key: str, *, recommended: bool = False) -> Snapshot:
@@ -54,23 +67,6 @@ def _snapshot(key: str, *, recommended: bool = False) -> Snapshot:
                 user_status_updated_at=now,
             )
         ],
-    )
-
-
-def _config_toml(resume_sha256: str) -> str:
-    return (
-        'candidate_name = "Candidate"\n'
-        f'resume_sha256 = "{resume_sha256}"\n'
-        f'profile_sha256 = "{_PROFILE_HASH}"\n'
-        'resume_path = "candidate.pdf"\n'
-        'search_terms = ["backend"]\n'
-        'locations = ["Berlin"]\n'
-        'german_level = "B2"\n'
-        'needs_visa_sponsorship = true\n'
-        "[claude]\n"
-        'model = "sonnet"\n'
-        'effort = "medium"\n'
-        "[scheduler]\n"
     )
 
 
@@ -177,13 +173,14 @@ def test_delete_reports_whether_the_latest_search_was_deleted(tmp_path: Path) ->
     assert legacy_cache.read_text(encoding="utf-8") == "legacy"
 
 
-def test_history_api_downloads_resume_and_deleting_latest_clears_live_results(
+def test_history_api_deleting_latest_keeps_setup_and_resume_files(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
     repository.mutate(lambda _old: _snapshot("latest", recommended=True))
-    resume = tmp_path / "Ada CV.pdf"
+    resume = paths.root / "resumes" / "ada.pdf"
+    resume.parent.mkdir(parents=True)
     resume.write_bytes(b"resume bytes")
     paths.profile_md.write_text("profile", encoding="utf-8")
     paths.config_toml.write_text("config", encoding="utf-8")
@@ -205,7 +202,7 @@ def test_history_api_downloads_resume_and_deleting_latest_clears_live_results(
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         download = client.get("/api/scan-history/run-latest/resume")
         assert download.status_code == 200
         assert download.content == b"resume bytes"
@@ -225,10 +222,11 @@ def test_history_api_downloads_resume_and_deleting_latest_clears_live_results(
         )
 
     assert deleted.status_code == 200
-    assert deleted.json() == {"deleted_latest": True, "resume_deleted": False}
+    assert deleted.json() == {"deleted_latest": True}
     assert repository.load().jobs == []
-    assert not paths.config_toml.exists()
-    assert not paths.profile_md.exists()
+    assert paths.config_toml.read_text(encoding="utf-8") == "config"
+    assert paths.profile_md.read_text(encoding="utf-8") == "profile"
+    assert resume.read_bytes() == b"resume bytes"
     with pytest.raises(KeyError):
         history.read_resume("run-latest")
 
@@ -262,12 +260,12 @@ def test_latest_delete_restores_history_and_live_files_when_one_rename_fails(
     expected_dashboard = paths.dashboard_html.read_bytes()
     real_replace = os.replace
 
-    def fail_config_quarantine(source: Path | str, destination: Path | str) -> None:
-        if Path(destination).name.startswith(".deleted.config.toml."):
-            raise OSError("injected config quarantine failure")
+    def fail_dashboard_quarantine(source: Path | str, destination: Path | str) -> None:
+        if Path(destination).name.startswith(".deleted.index.html."):
+            raise OSError("injected dashboard quarantine failure")
         real_replace(source, destination)
 
-    monkeypatch.setattr(os, "replace", fail_config_quarantine)
+    monkeypatch.setattr(os, "replace", fail_dashboard_quarantine)
     origin = "http://127.0.0.1:8765"
     app = create_review_app(
         repository,
@@ -277,8 +275,8 @@ def test_latest_delete_restores_history_and_live_files_when_one_rename_fails(
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
-        with pytest.raises(OSError, match="injected config quarantine failure"):
+        client.cookies.set("job_scan_session", "token")
+        with pytest.raises(OSError, match="injected dashboard quarantine failure"):
             client.delete(
                 "/api/scan-history/run-latest",
                 headers={"Origin": origin, "Host": "127.0.0.1:8765"},
@@ -344,7 +342,8 @@ def test_deleting_older_history_keeps_live_setup_and_public_cache(tmp_path: Path
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"resume")
     paths.profile_md.write_text("profile", encoding="utf-8")
-    paths.config_toml.write_text("config", encoding="utf-8")
+    _save_review_config(paths, resume)
+    expected_config = paths.config_toml.read_text(encoding="utf-8")
     cache_sentinel = paths.cache_dir / "company-sizes.json"
     cache_sentinel.write_text("public cache", encoding="utf-8")
     history = SearchHistoryStore(paths)
@@ -369,170 +368,19 @@ def test_deleting_older_history_keeps_live_setup_and_public_cache(tmp_path: Path
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         response = client.delete(
             "/api/scan-history/run-old",
             headers={"Origin": origin, "Host": "127.0.0.1:8765"},
         )
 
     assert response.status_code == 200
-    assert response.json() == {"deleted_latest": False, "resume_deleted": False}
+    assert response.json() == {"deleted_latest": False}
     assert repository.load().jobs[0].canonical_job_key == "live"
     assert paths.profile_md.read_text(encoding="utf-8") == "profile"
-    assert paths.config_toml.read_text(encoding="utf-8") == "config"
+    assert paths.config_toml.read_text(encoding="utf-8") == expected_config
     assert cache_sentinel.read_text(encoding="utf-8") == "public cache"
     assert [entry.run_id for entry in history.list()] == ["run-live"]
-
-
-def _delete_history_with_resume_catalog(
-    tmp_path: Path,
-    *,
-    live_resume: str = _LIVE_RESUME,
-    history_resume: str = _HISTORY_RESUME,
-    add_live_history: bool = True,
-) -> tuple[TestClient, SearchHistoryStore, ResumeCatalogStore, GlobalJobStore]:
-    paths = AppPaths.from_root(tmp_path / "home")
-    repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
-    repository.mutate(lambda _old: _snapshot("live"))
-    resume = tmp_path / "candidate.pdf"
-    resume.write_bytes(b"resume bytes")
-    paths.profile_md.parent.mkdir(parents=True, exist_ok=True)
-    paths.profile_md.write_text("profile", encoding="utf-8")
-    paths.config_toml.write_text(_config_toml(live_resume), encoding="utf-8")
-    history = SearchHistoryStore(paths)
-    history.archive(
-        run_id="run-old",
-        candidate_name="Old Candidate",
-        resume_filename="candidate.pdf",
-        resume_path=resume,
-        snapshot=_snapshot("old"),
-        finished_at=datetime(2026, 8, 7, 10, 0, tzinfo=UTC),
-        profile_bytes=b"profile",
-        config_bytes=_config_toml(history_resume).encode("utf-8"),
-    )
-    if add_live_history:
-        history.archive(
-            run_id="run-live",
-            candidate_name="Live Candidate",
-            resume_filename="candidate.pdf",
-            resume_path=resume,
-            snapshot=_snapshot("live"),
-            finished_at=datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
-            profile_bytes=b"profile",
-            config_bytes=_config_toml(live_resume).encode("utf-8"),
-        )
-    resume_catalog = ResumeCatalogStore(paths)
-    global_jobs = GlobalJobStore(paths)
-    origin = "http://127.0.0.1:8765"
-    app = create_review_app(
-        repository,
-        "token",
-        frozenset({origin}),
-        history_store=history,
-        global_job_store=global_jobs,
-        resume_catalog_store=resume_catalog,
-    )
-    client = TestClient(app, base_url=origin)
-    return client, history, resume_catalog, global_jobs
-
-
-def test_deleting_history_removes_resume_without_visible_jobs(
-    tmp_path: Path,
-) -> None:
-    client, _history, resume_catalog, _global_jobs = (
-        _delete_history_with_resume_catalog(tmp_path)
-    )
-
-    with client:
-        client.get("/")
-        response = client.delete(
-            "/api/scan-history/run-old",
-            headers={"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"deleted_latest": False, "resume_deleted": True}
-    assert [entry.resume_id for entry in resume_catalog.list()] == [_LIVE_RESUME]
-
-
-def test_deleting_history_keeps_resume_with_visible_jobs(tmp_path: Path) -> None:
-    client, _history, resume_catalog, global_jobs = (
-        _delete_history_with_resume_catalog(tmp_path)
-    )
-    global_jobs.upsert_with_default_status(
-        _snapshot("tracked").jobs[0],
-        UserStatus.SAVED,
-        resume_id=_HISTORY_RESUME,
-        profile_hash=_PROFILE_HASH,
-    )
-
-    with client:
-        client.get("/")
-        response = client.delete(
-            "/api/scan-history/run-old",
-            headers={"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"deleted_latest": False, "resume_deleted": False}
-    assert _HISTORY_RESUME in {
-        entry.resume_id for entry in resume_catalog.list()
-    }
-
-
-def test_deleting_history_keeps_resume_used_by_another_search(
-    tmp_path: Path,
-) -> None:
-    client, history, resume_catalog, _global_jobs = (
-        _delete_history_with_resume_catalog(tmp_path)
-    )
-    resume = tmp_path / "candidate.pdf"
-    resume.write_bytes(b"resume bytes")
-    history.archive(
-        run_id="run-newer",
-        candidate_name="Newer Candidate",
-        resume_filename="candidate.pdf",
-        resume_path=resume,
-        snapshot=_snapshot("newer"),
-        finished_at=datetime(2026, 8, 7, 12, 0, tzinfo=UTC),
-        profile_bytes=b"profile",
-        config_bytes=_config_toml(_HISTORY_RESUME).encode("utf-8"),
-    )
-
-    with client:
-        client.get("/")
-        response = client.delete(
-            "/api/scan-history/run-old",
-            headers={"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"deleted_latest": False, "resume_deleted": False}
-    assert _HISTORY_RESUME in {
-        entry.resume_id for entry in resume_catalog.list()
-    }
-
-
-def test_deleting_latest_history_removes_orphaned_resume(tmp_path: Path) -> None:
-    client, _history, resume_catalog, _global_jobs = (
-        _delete_history_with_resume_catalog(
-            tmp_path,
-            live_resume=_HISTORY_RESUME,
-            history_resume=_HISTORY_RESUME,
-            add_live_history=False,
-        )
-    )
-
-    with client:
-        client.get("/")
-        response = client.delete(
-            "/api/scan-history/run-old",
-            headers={"Origin": "http://127.0.0.1:8765", "Host": "127.0.0.1:8765"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"deleted_latest": True, "resume_deleted": True}
-    assert resume_catalog.list() == []
 
 
 def test_historical_job_status_mutation_is_saved_globally(
@@ -544,7 +392,7 @@ def test_historical_job_status_mutation_is_saved_globally(
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"resume")
     paths.profile_md.write_text("profile", encoding="utf-8")
-    paths.config_toml.write_text("config", encoding="utf-8")
+    _save_review_config(paths, resume)
     history = SearchHistoryStore(paths)
     history.archive(
         run_id="run-old",
@@ -563,7 +411,7 @@ def test_historical_job_status_mutation_is_saved_globally(
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         response = client.post(
             "/api/scan-history/run-old/jobs/old/status",
             json={"status": "applied"},
@@ -586,7 +434,7 @@ def test_live_status_does_not_overwrite_an_unrelated_latest_history(
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"resume")
     paths.profile_md.write_text("profile", encoding="utf-8")
-    paths.config_toml.write_text("config", encoding="utf-8")
+    _save_review_config(paths, resume)
     history = SearchHistoryStore(paths)
     history.archive(
         run_id="run-other",
@@ -605,7 +453,7 @@ def test_live_status_does_not_overwrite_an_unrelated_latest_history(
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         response = client.post(
             "/api/jobs/live/status",
             json={"status": "applied"},
@@ -629,7 +477,7 @@ def test_live_status_leaves_matching_history_snapshot_unchanged(
     resume = tmp_path / "candidate.pdf"
     resume.write_bytes(b"resume")
     paths.profile_md.write_text("profile", encoding="utf-8")
-    paths.config_toml.write_text("config", encoding="utf-8")
+    _save_review_config(paths, resume)
     history = SearchHistoryStore(paths)
     history.archive(
         run_id="run-live",
@@ -650,7 +498,7 @@ def test_live_status_leaves_matching_history_snapshot_unchanged(
     )
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         response = client.post(
             "/api/jobs/live/status",
             json={"status": "applied"},
@@ -671,7 +519,7 @@ def test_live_status_is_rejected_while_scan_lock_is_held(tmp_path: Path) -> None
     app = create_review_app(repository, "token", frozenset({origin}))
 
     with TestClient(app, base_url=origin) as client:
-        client.get("/")
+        client.cookies.set("job_scan_session", "token")
         with FileRWLock(paths.scan_lock_file).exclusive():
             response = client.post(
                 "/api/jobs/live/status",

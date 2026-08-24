@@ -38,6 +38,7 @@ StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 class AtsCheckInput:
     run_id: str
     search_run_id: str
+    resume_id: str
     candidate_name: str
     resume_filename: str
     resume_bytes: bytes
@@ -74,34 +75,80 @@ class AtsCheckService:
         inputs: AtsCheckInput,
         config: AppConfig,
         progress: Callable[[AtsProgressUpdate], None] | None = None,
+        *,
+        previous: AtsCheckBundle | None = None,
     ) -> AtsCheckBundle:
         """Return one complete ATS bundle after all requested checks settle."""
         started_at = self._clock()
-        extracted = self._extract(inputs.resume_filename, inputs.resume_bytes)
-        self._emit(progress, "resume", "running", "Checking resume content readiness...")
-        resume = self._invoke_resume(extracted.text, config)
-        resume = AtsResumeAssessment.model_validate(
-            {
-                **resume.model_dump(),
-                "findings": [
-                    AtsResumeFinding(
-                        label="Text extraction",
-                        status="pass",
-                        detail="Selectable resume text was extracted.",
-                    ),
-                    *[
-                        item
-                        for item in resume.findings
-                        if item.label != "Text extraction"
-                    ][:11],
-                ],
-            }
+        previous_jobs = {item.job_key: item for item in previous.jobs} if previous else {}
+        jobs_to_check = tuple(
+            job
+            for job in inputs.jobs
+            if (
+                job.canonical_job_key not in previous_jobs
+                or previous_jobs[job.canonical_job_key].content_hash != job.content_hash
+            )
         )
-        self._emit(progress, "resume", "complete", "Resume check complete.")
-        jobs = self._check_jobs(inputs.jobs, extracted.text, config, progress)
+        extracted = (
+            self._extract(inputs.resume_filename, inputs.resume_bytes)
+            if previous is None or jobs_to_check
+            else None
+        )
+        if previous is None:
+            assert extracted is not None
+            self._emit(progress, "resume", "running", "Checking resume content readiness...")
+            resume = self._invoke_resume(extracted.text, config)
+            resume = AtsResumeAssessment.model_validate(
+                {
+                    **resume.model_dump(),
+                    "findings": [
+                        AtsResumeFinding(
+                            label="Text extraction",
+                            status="pass",
+                            detail="Selectable resume text was extracted.",
+                        ),
+                        *[
+                            item
+                            for item in resume.findings
+                            if item.label != "Text extraction"
+                        ][:11],
+                    ],
+                }
+            )
+            self._emit(progress, "resume", "complete", "Resume check complete.")
+        else:
+            resume = previous.resume
+            self._emit(progress, "resume", "complete", "Reused existing resume check.")
+        for job in inputs.jobs:
+            cached = previous_jobs.get(job.canonical_job_key)
+            if cached is not None and cached.content_hash == job.content_hash:
+                self._emit(
+                    progress,
+                    job.canonical_job_key,
+                    "complete",
+                    "Reused existing job check.",
+                )
+        checked_jobs = self._check_jobs(
+            jobs_to_check,
+            extracted.text if extracted is not None else "",
+            config,
+            progress,
+        )
+        checked_by_key = {item.job_key: item for item in checked_jobs}
+        jobs = [
+            checked_by_key.get(item.job_key, item)
+            for item in (previous.jobs if previous else [])
+        ]
+        previous_keys = {item.job_key for item in jobs}
+        jobs.extend(
+            checked_by_key[job.canonical_job_key]
+            for job in inputs.jobs
+            if job.canonical_job_key not in previous_keys
+        )
         return AtsCheckBundle(
             run_id=inputs.run_id,
             search_run_id=inputs.search_run_id,
+            resume_id=inputs.resume_id,
             candidate_name=inputs.candidate_name,
             resume_filename=inputs.resume_filename,
             started_at=started_at,

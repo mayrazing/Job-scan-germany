@@ -214,9 +214,15 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
     assert set(dumped["jobs"][0]) == set(JobRecord.model_fields) - {
         "global_status_deleted_at",
         "application_resume_id",
-        "resume_matches",
-        "user_status_history",
-    }
+        "application_resume_filename",
+            "expected_salary",
+            "offer_salary",
+            "manual_posted_at",
+            "manual_company_size",
+            "manual_company_industry",
+            "resume_matches",
+            "user_status_history",
+        }
     assert set(dumped_occurrence) == set(SourceOccurrence.model_fields)
     assert "source_job_key" not in dumped_occurrence
     assert "source_occurrence_key" not in dumped_occurrence

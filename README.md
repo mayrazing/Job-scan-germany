@@ -72,11 +72,10 @@ On Linux, start the local server and open the published Setup URL for the browse
 ```text
 $ job-scan review --port 8765
 Setup: http://job-scan-germany.local:8765/setup
-Review: http://job-scan-germany.local:8765
 LAN fallback: http://192.168.3.28:8765
 ```
 
-The displayed fallback address is the server's current LAN IPv4 address and will differ by network. The Setup page can save and activate Anthropic-compatible API configurations. Advanced settings selects either Claude Code CLI or the active API model. The page then saves the uploaded resume and validated settings, reconciles the optional daily schedule, runs the real scan, and shows a link to the Review page after publication.
+The displayed fallback address is the server's current LAN IPv4 address and will differ by network. The Setup page can save and activate Anthropic-compatible API configurations. Advanced settings selects either Claude Code CLI or the active API model. The page then saves the uploaded resume and validated settings, reconciles the optional daily schedule, runs the real scan, and opens the Review step after publication.
 
 On Linux, `review` listens on the server's network interfaces and publishes `job-scan-germany.local` through mDNS. It checks the active LAN IPv4 address every two seconds and republishes the hostname after an address change. `Ctrl-C` stops both the HTTP server and the project-owned mDNS publisher. Devices must be on the same LAN broadcast domain and support mDNS; the hostname is not a public Internet address. Client isolation, separate VLANs, or a host firewall can still block access. On macOS, `review` keeps its existing loopback-only `127.0.0.1` service; this Avahi-based LAN hostname feature is not enabled.
 
@@ -84,7 +83,6 @@ macOS output remains:
 
 ```text
 Setup: http://127.0.0.1:8765/setup
-Review: http://127.0.0.1:8765
 ```
 
 The CLI setup flow remains available:
@@ -118,7 +116,6 @@ $ job-scan doctor
 $ job-scan scan
 $ job-scan review --port 8765
 Setup: http://job-scan-germany.local:8765/setup
-Review: http://job-scan-germany.local:8765
 LAN fallback: http://192.168.3.28:8765
 ```
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
+from httpx import Response
 from pydantic import HttpUrl
 
 from job_scan.ai_config import AiProviderDraft, AiProviderStore
@@ -55,7 +57,6 @@ from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock, LockUnavailable
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
-from job_scan.resume_catalog import ResumeCatalogStore
 from job_scan.review_server import create_review_app
 from job_scan.search_history import SearchHistoryStore
 from job_scan.setup_service import SetupAnswers, SetupPreparation
@@ -117,6 +118,63 @@ def _wait_manual_import_completion(
     raise AssertionError(f"Manual import did not finish: {import_id}")
 
 
+def _prepare_uploaded_resume(paths: AppPaths) -> Callable[
+    [Path, SetupAnswers],
+    SetupPreparation,
+]:
+    def prepare(resume_path: Path, answers: SetupAnswers) -> SetupPreparation:
+        resume_id = "sha256:" + hashlib.sha256(resume_path.read_bytes()).hexdigest()
+        profile_bytes = b"# Uploaded resume profile"
+        profile_hash = "sha256:" + hashlib.sha256(profile_bytes).hexdigest()
+        config = load_config(paths.job_tracker_config_toml).model_copy(
+            update={
+                "candidate_name": answers.candidate_name,
+                "resume_path": resume_path,
+                "resume_sha256": resume_id,
+                "profile_sha256": profile_hash,
+            }
+        )
+        return SetupPreparation(
+            config=config,
+            profile_bytes=profile_bytes,
+            config_bytes=serialize_config(config).encode("utf-8"),
+            profile_hash=profile_hash,
+        )
+
+    return prepare
+
+
+def _post_job_with_resume(
+    client: TestClient,
+    url: str = "https://careers.example/jobs/manual",
+    **data: str,
+) -> Response:
+    return client.post(
+        "/api/global-jobs/import-with-resume",
+        data={"url": url, **data},
+        files={"resume": ("backend.docx", SAMPLE_RESUME.read_bytes())},
+        headers=HEADERS,
+    )
+
+
+def _attach_resume(
+    paths: AppPaths,
+    store: GlobalJobStore,
+    job_key: str,
+    filename: str,
+    contents: bytes,
+) -> str:
+    digest = hashlib.sha256(contents).hexdigest()
+    resume_id = f"sha256:{digest}"
+    resume_dir = paths.root / "resumes"
+    resume_dir.mkdir(parents=True, exist_ok=True)
+    (resume_dir / f"{digest}{Path(filename).suffix.lower()}").write_bytes(contents)
+    job = store.find(job_key)
+    assert job is not None
+    store.set_application_resume(job, resume_id, filename)
+    return resume_id
+
+
 def _job(
     key: str,
     *,
@@ -170,14 +228,18 @@ def _repository(paths: AppPaths, *jobs: JobRecord) -> JsonlRepository:
 
 
 def _save_config(paths: AppPaths) -> None:
+    paths.ensure_directories()
+    resume_bytes = b"DEFAULT REVIEW RESUME"
+    resume_path = paths.root / "default.pdf"
+    resume_path.write_bytes(resume_bytes)
     save_config(
         paths.config_toml,
         AppConfig(
             candidate_name="Ada",
             ai_runtime="api:deepseek",
             ai_model="current-model",
-            resume_path=paths.root / "default.pdf",
-            resume_sha256="sha256:" + "a" * 64,
+            resume_path=resume_path,
+            resume_sha256="sha256:" + hashlib.sha256(resume_bytes).hexdigest(),
             profile_sha256="sha256:" + "b" * 64,
             search_terms=["backend"],
             locations=["Berlin"],
@@ -195,10 +257,28 @@ def _archive(
     snapshot: Snapshot,
     resume_bytes: bytes = b"ARCHIVED RESUME",
     profile_bytes: bytes = b"profile",
-    config_bytes: bytes = b"config",
+    config_bytes: bytes | None = None,
 ) -> None:
     resume = tmp_path / f"{run_id}.pdf"
     resume.write_bytes(resume_bytes)
+    if config_bytes is None:
+        config_bytes = serialize_config(
+            AppConfig(
+                candidate_name="Ada",
+                resume_path=resume,
+                resume_sha256=(
+                    "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+                ),
+                profile_sha256=(
+                    "sha256:" + hashlib.sha256(profile_bytes).hexdigest()
+                ),
+                search_terms=["backend"],
+                locations=["Berlin"],
+                german_level="B1",
+                claude=ClaudeSettings(model="sonnet", effort="medium"),
+                scheduler=SchedulerSettings(),
+            )
+        ).encode("utf-8")
     history.archive(
         run_id=run_id,
         candidate_name="Ada",
@@ -237,10 +317,12 @@ def _ats_bundle(
     *,
     resume_filename: str,
     finished_at: datetime,
+    resume_id: str = "sha256:" + "a" * 64,
 ) -> AtsCheckBundle:
     return AtsCheckBundle(
         run_id=run_id,
         search_run_id="search-1",
+        resume_id=resume_id,
         candidate_name="Ada",
         resume_filename=resume_filename,
         started_at=finished_at,
@@ -267,6 +349,7 @@ def _ats_bundle(
 class RecordingAtsWorkflow:
     def __init__(self) -> None:
         self.inputs: list[AtsWorkflowInput] = []
+        self.busy = False
 
     def start(self, inputs: AtsWorkflowInput) -> AtsRunState:
         self.inputs.append(inputs)
@@ -286,9 +369,12 @@ class RecordingAtsWorkflow:
     def read_current_run(self) -> AtsRunState | None:
         return None
 
+    def is_busy(self) -> bool:
+        return self.busy
+
 
 def _open_session(client: TestClient) -> None:
-    assert client.get("/").status_code == 200
+    client.cookies.set("job_scan_session", TOKEN)
 
 
 @pytest.mark.parametrize(
@@ -308,6 +394,7 @@ def test_every_status_change_is_global_and_new_is_rejected(
     selected_status: str,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
+    _save_config(paths)
     repository = _repository(paths, _job("current", external_id="shared"))
     global_jobs = GlobalJobStore(paths)
     app = create_review_app(
@@ -336,7 +423,34 @@ def test_every_status_change_is_global_and_new_is_rejected(
     assert global_jobs.find("current").user_status is UserStatus(selected_status)
 
 
-def test_global_status_records_the_selected_application_resume(
+def test_review_status_rejects_transfer_when_resume_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        _repository(paths, _job("current", external_id="current")),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/jobs/current/status",
+            json={"status": "saved"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "The resume for this review is unavailable."
+    }
+    assert global_jobs.find("current") is None
+
+
+def test_global_status_does_not_attach_a_resume(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -364,89 +478,104 @@ def test_global_status_records_the_selected_application_resume(
         _open_session(client)
         response = client.post(
             "/api/global-jobs/tracked/status",
-            json={
-                "status": "applied",
-                "resume_id": config.resume_sha256,
-            },
+            json={"status": "applied"},
             headers=HEADERS,
         )
 
     saved = global_jobs.find("tracked")
     assert response.status_code == 204
     assert saved is not None
-    assert saved.application_resume_id == config.resume_sha256
-
-
-def test_global_status_rejects_an_unknown_application_resume(
-    tmp_path: Path,
-) -> None:
-    paths = AppPaths.from_root(tmp_path / "home")
-    paths.ensure_directories()
-    _save_config(paths)
-    paths.profile_md.write_text("# Current profile", encoding="utf-8")
-    config = load_config(paths.config_toml)
-    global_jobs = GlobalJobStore(paths)
-    job = _job("tracked", external_id="tracked")
-    global_jobs.set_status(
-        job,
-        UserStatus.SAVED,
-        NOW,
-        resume_id=config.resume_sha256,
-        profile_hash=config.profile_sha256,
-    )
-    app = create_review_app(
-        _repository(paths),
-        TOKEN,
-        frozenset({ORIGIN}),
-        global_job_store=global_jobs,
-    )
-
-    with TestClient(app, base_url=ORIGIN) as client:
-        _open_session(client)
-        response = client.post(
-            "/api/global-jobs/tracked/status",
-            json={
-                "status": "applied",
-                "resume_id": "sha256:" + "f" * 64,
-            },
-            headers=HEADERS,
-        )
-
-    saved = global_jobs.find("tracked")
-    assert response.status_code == 404
-    assert saved is not None
-    assert saved.user_status is UserStatus.SAVED
     assert saved.application_resume_id is None
 
 
-def test_application_resume_can_be_corrected_through_the_global_api(
-    tmp_path: Path,
-) -> None:
+def test_live_review_status_copies_its_resume_into_job_tracker(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     _save_config(paths)
-    paths.profile_md.write_text("# Current profile", encoding="utf-8")
-    config = load_config(paths.config_toml)
-    resume_b = "sha256:" + "c" * 64
-    ResumeCatalogStore(paths).register(
-        resume_id=resume_b,
-        profile_hash="sha256:" + "d" * 64,
-        candidate_name="Platform CV",
-        filename="platform.pdf",
-        profile_bytes=b"# Platform profile",
-        config_bytes=serialize_config(config).encode("utf-8"),
-        resume_bytes=b"PLATFORM RESUME",
-        created_at=NOW,
+    resume_bytes = b"CURRENT REVIEW RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    resume_path = paths.root / "current.pdf"
+    resume_path.write_bytes(resume_bytes)
+    save_config(
+        paths.config_toml,
+        load_config(paths.config_toml).model_copy(
+            update={"resume_path": resume_path, "resume_sha256": resume_id}
+        ),
     )
     global_jobs = GlobalJobStore(paths)
-    job = _job("tracked", external_id="tracked")
-    global_jobs.set_status(
-        job,
-        UserStatus.APPLIED,
-        NOW,
-        resume_id=config.resume_sha256,
-        profile_hash=config.profile_sha256,
+    app = create_review_app(
+        _repository(paths, _job("current", external_id="current")),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
     )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        changed = client.post(
+            "/api/jobs/current/status",
+            json={"status": "saved"},
+            headers=HEADERS,
+        )
+        paths.config_toml.unlink()
+        downloaded = client.get("/api/global-jobs/current/resume")
+
+    saved = global_jobs.find("current")
+    assert changed.status_code == 204
+    assert saved is not None
+    assert saved.application_resume_id == resume_id
+    assert saved.application_resume_filename == "current.pdf"
+    assert downloaded.status_code == 200
+    assert downloaded.content == resume_bytes
+
+
+def test_review_transfer_keeps_resume_when_tracker_commit_reaches_disk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        _repository(paths, _job("current", external_id="current")),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    def fail_directory_fsync(_path: Path) -> None:
+        raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(
+        "job_scan.global_jobs._fsync_directory",
+        fail_directory_fsync,
+    )
+    with TestClient(
+        app,
+        base_url=ORIGIN,
+        raise_server_exceptions=False,
+    ) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/jobs/current/status",
+            json={"status": "saved"},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("current")
+    assert response.status_code == 500
+    assert saved is not None
+    assert saved.application_resume_id is not None
+    assert saved.application_resume_filename == "default.pdf"
+    digest = saved.application_resume_id.removeprefix("sha256:")
+    assert (paths.root / "resumes" / f"{digest}.pdf").exists()
+
+
+def test_global_lifecycle_date_can_be_changed(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
     app = create_review_app(
         _repository(paths),
         TOKEN,
@@ -457,23 +586,325 @@ def test_application_resume_can_be_corrected_through_the_global_api(
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
         response = client.post(
-            "/api/global-jobs/tracked/application-resume",
-            json={"resume_id": resume_b},
+            "/api/global-jobs/tracked/lifecycle/0/date",
+            json={"changed_on": "2026-08-05"},
             headers=HEADERS,
         )
 
     saved = global_jobs.find("tracked")
     assert response.status_code == 204
     assert saved is not None
-    assert saved.application_resume_id == resume_b
-    assert saved.user_status is UserStatus.APPLIED
+    assert saved.user_status is UserStatus.SAVED
+    assert saved.user_status_history[0].changed_at == datetime(
+        2026,
+        8,
+        5,
+        10,
+        0,
+        tzinfo=UTC,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "field_name", "expected"),
+    [
+        ({"posted_at": "2026-08-12"}, "manual_posted_at", date(2026, 8, 12)),
+        ({"company_size": 4200}, "manual_company_size", 4200),
+        ({"company_industry": " Logistics "}, "manual_company_industry", "Logistics"),
+    ],
+)
+def test_global_unknown_fact_can_be_saved(
+    tmp_path: Path,
+    payload: dict[str, object],
+    field_name: str,
+    expected: object,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked").model_copy(
+        update={"posted_at": None}
+    )
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/facts",
+            json=payload,
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert getattr(saved, field_name) == expected
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"company_size": 0},
+        {"company_industry": "   "},
+        {"posted_at": "2026-08-12", "company_size": 4200},
+    ],
+)
+def test_global_manual_fact_rejects_invalid_input(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked").model_copy(
+        update={"posted_at": None}
+    )
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/facts",
+            json=payload,
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+
+
+def test_global_manual_fact_rejects_a_known_value(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/facts",
+            json={"posted_at": "2026-08-12"},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 422
+    assert saved is not None
+    assert saved.manual_posted_at is None
+
+
+def test_global_lifecycle_date_cannot_cross_the_previous_event(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(job, UserStatus.APPLIED, NOW.replace(day=21))
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/lifecycle/1/date",
+            json={"changed_on": "2026-08-18"},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Lifecycle dates must stay between adjacent lifecycle events."
+    )
+    assert saved is not None
+    assert len(saved.user_status_history) == 2
+    assert saved.user_status_history[1].changed_at == NOW.replace(day=21)
+
+
+def test_global_lifecycle_event_can_be_deleted(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(job, UserStatus.APPLIED, NOW.replace(day=21))
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.delete(
+            "/api/global-jobs/tracked/lifecycle/1",
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
     assert [entry.status for entry in saved.user_status_history] == [
-        UserStatus.SAVED,
-        UserStatus.APPLIED,
+        UserStatus.SAVED
+    ]
+    assert saved.user_status is UserStatus.SAVED
+
+
+def test_global_saved_lifecycle_event_cannot_be_deleted(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.delete(
+            "/api/global-jobs/tracked/lifecycle/0",
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "The Saved lifecycle event cannot be deleted."
+    )
+    assert saved is not None
+    assert [entry.status for entry in saved.user_status_history] == [
+        UserStatus.SAVED
     ]
 
 
-def test_history_status_appears_in_global_block_of_another_history(tmp_path: Path) -> None:
+def test_global_job_salaries_can_be_saved_and_cleared(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        saved_response = client.post(
+            "/api/global-jobs/tracked/salary",
+            json={
+                "expected_salary": " 5,500 EUR ",
+                "expected_salary_period": "month",
+                "offer_salary": "70,000 EUR",
+                "offer_salary_period": "year",
+            },
+            headers=HEADERS,
+        )
+        cleared_response = client.post(
+            "/api/global-jobs/tracked/salary",
+            json={
+                "expected_salary": "",
+                "expected_salary_period": "year",
+                "offer_salary": "72,000 EUR",
+                "offer_salary_period": "year",
+            },
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert saved_response.status_code == 204
+    assert cleared_response.status_code == 204
+    assert saved is not None
+    assert saved.expected_salary is None
+    assert saved.offer_salary is not None
+    assert saved.offer_salary.amount == "72,000 EUR"
+    assert saved.offer_salary.period.value == "year"
+
+
+def test_global_job_notes_can_be_added_edited_and_deleted(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked")
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        added_response = client.post(
+            "/api/global-jobs/tracked/notes",
+            json={"content": "  Follow up with recruiter.  "},
+            headers=HEADERS,
+        )
+        added = global_jobs.find("tracked")
+        assert added is not None
+        note_id = added.notes[0].id
+        created_at = added.notes[0].created_at
+        edited_response = client.put(
+            f"/api/global-jobs/tracked/notes/{note_id}",
+            json={"content": "Follow up on Tuesday."},
+            headers=HEADERS,
+        )
+        edited = global_jobs.find("tracked")
+        invalid_response = client.post(
+            "/api/global-jobs/tracked/notes",
+            json={"content": "   "},
+            headers=HEADERS,
+        )
+        missing_response = client.delete(
+            "/api/global-jobs/tracked/notes/22222222-2222-4222-8222-222222222222",
+            headers=HEADERS,
+        )
+        deleted_response = client.delete(
+            f"/api/global-jobs/tracked/notes/{note_id}",
+            headers=HEADERS,
+        )
+
+    deleted = global_jobs.find("tracked")
+    assert added_response.status_code == 204
+    assert edited_response.status_code == 204
+    assert invalid_response.status_code == 422
+    assert missing_response.status_code == 404
+    assert deleted_response.status_code == 204
+    assert created_at.tzinfo is not None
+    assert edited is not None
+    assert edited.notes[0].content == "Follow up on Tuesday."
+    assert edited.notes[0].created_at == created_at
+    assert deleted is not None
+    assert deleted.notes == []
+
+
+def test_history_status_is_copied_without_changing_another_review(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     repository = _repository(paths)
     history = SearchHistoryStore(paths)
@@ -503,12 +934,64 @@ def test_history_status_appears_in_global_block_of_another_history(tmp_path: Pat
     assert response.status_code == 204
     assert page_response.status_code == 200
     assert page.select_one('[data-review-block="global"] #applied [data-job-key]')
-    assert page.select_one('[data-review-block="current"] [data-job-key="b"]') is None
+    assert page.select_one('[data-review-block="current"] [data-job-key="b"]')
     assert history.load("run-a").jobs[0].user_status is UserStatus.NEW
     assert history.load("run-b").jobs[0].user_status is UserStatus.NEW
 
 
-def test_same_global_job_shows_each_history_resumes_own_match(tmp_path: Path) -> None:
+def test_history_status_copies_its_resume_into_job_tracker(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    resume_bytes = b"HISTORY APPLICATION RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    history_config = load_config(paths.config_toml).model_copy(
+        update={
+            "resume_sha256": resume_id,
+            "profile_sha256": "sha256:" + "d" * 64,
+        }
+    )
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(_job("a", external_id="a")),
+        resume_bytes=resume_bytes,
+        config_bytes=serialize_config(history_config).encode("utf-8"),
+    )
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        history_store=history,
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        changed = client.post(
+            "/api/scan-history/run-a/jobs/a/status",
+            json={"status": "applied"},
+            headers=HEADERS,
+        )
+        deleted = client.delete("/api/scan-history/run-a", headers=HEADERS)
+        downloaded = client.get("/api/global-jobs/a/resume")
+
+    saved = global_jobs.find("a")
+    assert changed.status_code == 204
+    assert deleted.status_code == 200
+    assert saved is not None
+    assert saved.application_resume_id == resume_id
+    assert saved.application_resume_filename == "run-a.pdf"
+    assert downloaded.status_code == 200
+    assert downloaded.content == resume_bytes
+
+
+def test_same_global_job_uses_the_latest_visible_review_in_tracker(
+    tmp_path: Path,
+) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     _save_config(paths)
@@ -585,140 +1068,386 @@ def test_same_global_job_shows_each_history_resumes_own_match(tmp_path: Path) ->
             headers=HEADERS,
         ).status_code == 204
         page_a = BeautifulSoup(
-            client.get(f"/setup?resume_id={resume_a_id}#review").text,
+            client.get("/setup#review").text,
             "html.parser",
         )
         page_b = BeautifulSoup(
-            client.get(f"/setup?resume_id={resume_b_id}#review").text,
+            client.get("/setup#review").text,
             "html.parser",
         )
 
     card_a = page_a.select_one('[data-review-block="global"] [data-job-key]')
     card_b = page_b.select_one('[data-review-block="global"] [data-job-key]')
-    assert len(page_a.select("[data-global-resume-id]")) == 3
-    default_a = page_a.select_one("[data-ats-default-resume]")
-    default_b = page_b.select_one("[data-ats-default-resume]")
-    assert default_a is not None
-    assert default_b is not None
-    assert default_a.get_text(" ", strip=True).startswith(
-        f"Default: run-a.pdf ({NOW.strftime('%Y-%m-%d %H:%M')})"
-    )
-    assert default_b.get_text(" ", strip=True).startswith(
-        f"Default: run-b.pdf ({NOW.strftime('%Y-%m-%d %H:%M')})"
-    )
     assert len(global_jobs.load().jobs) == 1
     assert card_a is not None
-    assert card_a.get("data-score") == "91"
-    assert "Strong Java match" in card_a.get_text(" ", strip=True)
+    assert card_a.get("data-score") == "63"
+    assert "Missing Kotlin experience" in card_a.get_text(" ", strip=True)
     assert card_b is not None
     assert card_b.get("data-score") == "63"
     assert "Missing Kotlin experience" in card_b.get_text(" ", strip=True)
     assert "applied" in card_a.get_text(" ", strip=True).lower()
 
 
-def test_completed_history_appears_in_resume_list_without_server_restart(
-    tmp_path: Path,
-) -> None:
+def test_job_tracker_aggregates_all_saved_jobs(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
-    _save_config(paths)
-    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("from-a", external_id="from-a"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    global_jobs.set_status(
+        _job("from-b", external_id="from-b"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        page = BeautifulSoup(
+            client.get("/setup#job-tracker").text,
+            "html.parser",
+        )
+
+    assert {
+        card.get("data-job-key")
+        for card in page.select('[data-review-block="global"] [data-job-key]')
+    } == {"from-a", "from-b"}
+
+
+def test_opening_job_tracker_does_not_import_review_history(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    reviewed = _job("review-only", external_id="review-only").model_copy(
+        update={"user_status": UserStatus.SAVED}
+    )
     history = SearchHistoryStore(paths)
+    _archive(history, tmp_path, "run-a", _snapshot(reviewed))
+    global_jobs = GlobalJobStore(paths)
     app = create_review_app(
         _repository(paths),
         TOKEN,
         frozenset({ORIGIN}),
         workflow=SimpleNamespace(load_setup_answers=lambda: None),
         history_store=history,
-    )
-    resume_bytes = b"LATER RESUME"
-    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
-    history_config = load_config(paths.config_toml).model_copy(
-        update={
-            "candidate_name": "Later History",
-            "resume_sha256": resume_id,
-            "profile_sha256": "sha256:" + "c" * 64,
-        }
+        global_job_store=global_jobs,
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
-        _open_session(client)
-        _archive(
-            history,
-            tmp_path,
-            "run-later",
-            _snapshot(),
-            resume_bytes=resume_bytes,
-            profile_bytes=b"# Later profile",
-            config_bytes=serialize_config(history_config).encode("utf-8"),
-        )
-        page = BeautifulSoup(
-            client.get("/setup?run_id=run-later#review").text,
-            "html.parser",
-        )
+        response = client.get("/setup#job-tracker")
 
-    selected = page.select_one(
-        f'option[data-global-resume-id="{resume_id}"][selected]'
-    )
-    assert selected is not None
-    assert "run-later.pdf" in selected.get_text(" ", strip=True)
+    assert response.status_code == 200
+    assert global_jobs.find("review-only") is None
 
 
-def test_same_resume_keeps_old_and_new_profile_hash_migrations(tmp_path: Path) -> None:
+def test_job_tracker_resume_can_be_downloaded(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
-    _save_config(paths)
-    paths.profile_md.write_text("# Current profile", encoding="utf-8")
-    current_config = load_config(paths.config_toml)
-    old_profile_job = _job("old-profile", external_id="old-profile")
-    old_profile_job.last_successful_review_profile_hash = current_config.profile_sha256
-    new_profile_hash = "sha256:" + "c" * 64
-    new_profile_job = _job("new-profile", external_id="new-profile")
-    new_profile_job.last_successful_review_profile_hash = new_profile_hash
+    resume_bytes = b"RESUME BYTES"
+    resume_digest = hashlib.sha256(resume_bytes).hexdigest()
+    resume_id = f"sha256:{resume_digest}"
+    resume_dir = paths.root / "resumes"
+    resume_dir.mkdir()
+    (resume_dir / f"{resume_digest}.pdf").write_bytes(resume_bytes)
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(old_profile_job, UserStatus.SAVED, NOW)
-    global_jobs.set_status(new_profile_job, UserStatus.APPLIED, NOW)
-    history = SearchHistoryStore(paths)
-    history_config = current_config.model_copy(
-        update={"profile_sha256": new_profile_hash}
-    )
-    _archive(
-        history,
-        tmp_path,
-        "run-new-profile",
-        _snapshot(new_profile_job),
-        profile_bytes=b"# New profile",
-        config_bytes=serialize_config(history_config).encode("utf-8"),
-    )
+    tracked = global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    global_jobs.set_application_resume(tracked, resume_id, "backend cv.pdf")
     app = create_review_app(
         _repository(paths),
         TOKEN,
         frozenset({ORIGIN}),
-        history_store=history,
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        response = client.get("/api/global-jobs/tracked/resume")
+
+    assert response.status_code == 200
+    assert response.content == resume_bytes
+    assert "backend%20cv.pdf" in response.headers["content-disposition"]
+
+
+def test_legacy_resume_catalog_is_migrated_to_job_attachment(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    resume_bytes = b"LEGACY RESUME"
+    resume_digest = hashlib.sha256(resume_bytes).hexdigest()
+    resume_id = f"sha256:{resume_digest}"
+    legacy_dir = paths.root / "global-resumes" / resume_digest
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "resume_id": resume_id,
+                "profile_hash": "sha256:" + "d" * 64,
+                "profile_hashes": [],
+                "candidate_name": "Legacy CV",
+                "filename": "legacy cv.pdf",
+                "created_at": NOW.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (legacy_dir / "resume").write_bytes(resume_bytes)
+    global_jobs = GlobalJobStore(paths)
+    tracked = global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    global_jobs.set_application_resume(tracked, resume_id)
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        response = client.get("/setup")
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 200
+    assert saved is not None
+    assert saved.application_resume_filename == "legacy cv.pdf"
+    assert (paths.root / "resumes" / f"{resume_digest}.pdf").read_bytes() == (
+        resume_bytes
+    )
+    assert not (paths.root / "global-resumes").exists()
+
+
+def test_job_tracker_accepts_first_resume_without_setup_config(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    uploaded_bytes = SAMPLE_RESUME.read_bytes()
+    uploaded_digest = hashlib.sha256(uploaded_bytes).hexdigest()
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
         global_job_store=global_jobs,
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/resume",
+            files={"resume": ("first.docx", uploaded_bytes)},
+            headers=HEADERS,
+        )
 
-    associated = global_jobs.load_for_resume(current_config.resume_sha256)
-    assert {job.canonical_job_key for job in associated.jobs} == {
-        "old-profile",
-        "new-profile",
-    }
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.application_resume_id == f"sha256:{uploaded_digest}"
+    assert saved.application_resume_filename == "first.docx"
+    assert (paths.root / "resumes" / f"{uploaded_digest}.docx").read_bytes() == (
+        uploaded_bytes
+    )
 
 
-def test_ats_uses_uploaded_resume_with_current_and_global_jobs(tmp_path: Path) -> None:
+def test_job_tracker_resume_can_be_replaced_by_upload(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
-    current = _job("current", external_id="current")
-    global_job = _job("global", external_id="global")
-    repository = _repository(paths, current)
+    paths.ensure_directories()
     _save_config(paths)
+    paths.profile_md.write_text("# Current profile", encoding="utf-8")
+    old_config = paths.config_toml.read_bytes()
+    old_profile = paths.profile_md.read_bytes()
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    old_resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "old.pdf",
+        b"OLD RESUME",
+    )
+    uploaded_bytes = SAMPLE_RESUME.read_bytes()
+    uploaded_resume_id = "sha256:" + hashlib.sha256(uploaded_bytes).hexdigest()
+
+    def fail_preparation(_resume_path: Path, _answers: SetupAnswers) -> SetupPreparation:
+        raise AssertionError("Job attachment upload must not prepare a profile")
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_resume_preparer=fail_preparation,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/resume",
+            files={
+                "resume": (
+                    "updated.docx",
+                    uploaded_bytes,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.application_resume_id == uploaded_resume_id
+    assert saved.application_resume_filename == "updated.docx"
+    assert old_resume_id != uploaded_resume_id
+    digest = uploaded_resume_id.removeprefix("sha256:")
+    assert (paths.root / "resumes" / f"{digest}.docx").read_bytes() == uploaded_bytes
+    assert paths.config_toml.read_bytes() == old_config
+    assert paths.profile_md.read_bytes() == old_profile
+
+
+def test_invalid_job_tracker_resume_does_not_replace_the_attachment(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    old_resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "old.pdf",
+        b"OLD RESUME",
+    )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/resume",
+            files={"resume": ("invalid.txt", b"NOT A RESUME")},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 422
+    assert saved is not None
+    assert saved.application_resume_id == old_resume_id
+    assert saved.application_resume_filename == "old.pdf"
+
+
+def test_ats_groups_selected_jobs_by_their_application_resume(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = _repository(paths)
+    _save_config(paths)
+    resume_a_bytes = b"RESUME A"
+    resume_b_bytes = b"RESUME B"
+    resume_a = "sha256:" + hashlib.sha256(resume_a_bytes).hexdigest()
+    resume_b = "sha256:" + hashlib.sha256(resume_b_bytes).hexdigest()
+    resume_dir = paths.root / "resumes"
+    resume_dir.mkdir()
+    for resume_id, filename, resume_bytes in (
+        (resume_a, "resume-a.pdf", resume_a_bytes),
+        (resume_b, "resume-b.pdf", resume_b_bytes),
+    ):
+        digest = resume_id.removeprefix("sha256:")
+        (resume_dir / f"{digest}.pdf").write_bytes(resume_bytes)
+    global_jobs = GlobalJobStore(paths)
+    for key, resume_id, filename in (
+        ("job-a", resume_a, "resume-a.pdf"),
+        ("job-c", resume_a, "resume-a.pdf"),
+        ("job-b", resume_b, "resume-b.pdf"),
+    ):
+        global_jobs.set_status(
+            _job(key, external_id=key),
+            UserStatus.SAVED,
+            NOW,
+        )
+        tracked = global_jobs.find(key)
+        assert tracked is not None
+        global_jobs.set_application_resume(tracked, resume_id, filename)
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+    assert paths.job_tracker_config_toml.exists()
+    paths.config_toml.unlink()
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={
+                "job_keys": json.dumps(["job-a", "job-c", "job-b"]),
+            },
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 202, response.text
+    inputs = ats_workflow.inputs[0]
+    assert inputs.search_run_id == "global"
+    assert [item.resume_id for item in inputs.resumes] == [resume_a, resume_b]
+    assert [
+        [job.canonical_job_key for job in item.jobs]
+        for item in inputs.resumes
+    ] == [["job-a", "job-c"], ["job-b"]]
+    assert [item.resume_bytes for item in inputs.resumes] == [
+        resume_a_bytes,
+        resume_b_bytes,
+    ]
+    assert inputs.config.selected_model == "sonnet"
+
+
+def test_ats_rejects_a_selected_job_without_an_application_resume(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("job-a", external_id="job-a"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        _repository(paths),
         TOKEN,
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
@@ -730,21 +1459,60 @@ def test_ats_uses_uploaded_resume_with_current_and_global_jobs(tmp_path: Path) -
         _open_session(client)
         response = client.post(
             "/api/ats-runs",
-            data={"search_run_id": "", "job_keys": json.dumps(["current", "global"])},
-            files={"resume": ("Other CV.pdf", b"CUSTOM RESUME", "application/pdf")},
+            data={"job_keys": json.dumps(["job-a"])},
             headers=HEADERS,
         )
 
-    assert response.status_code == 202
-    inputs = ats_workflow.inputs[0]
-    assert inputs.search_run_id == "global"
-    assert inputs.resume_filename == "Other CV.pdf"
-    assert inputs.resume_bytes == b"CUSTOM RESUME"
-    assert [job.canonical_job_key for job in inputs.jobs] == ["current", "global"]
-    assert inputs.config.selected_model == "sonnet"
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Backend Engineer job-a has no saved application resume."
+    )
+    assert ats_workflow.inputs == []
 
 
-def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
+def test_ats_rejects_a_selected_job_whose_saved_resume_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    tracked = global_jobs.set_status(
+        _job("job-a", external_id="job-a"),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    global_jobs.set_application_resume(
+        tracked,
+        "sha256:" + "c" * 64,
+        "missing.pdf",
+    )
+    ats_workflow = RecordingAtsWorkflow()
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        ats_workflow=ats_workflow,
+        ats_history_store=AtsHistoryStore(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/ats-runs",
+            data={"job_keys": json.dumps(["job-a"])},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "The saved resume for Backend Engineer job-a is unavailable."
+    )
+    assert ats_workflow.inputs == []
+
+
+def test_ats_ignores_review_history_context_and_uses_the_job_resume(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -752,9 +1520,22 @@ def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
     repository = _repository(paths)
     _save_config(paths)
     history = SearchHistoryStore(paths)
-    _archive(history, tmp_path, "run-a", _snapshot(global_job), b"DEFAULT RESUME")
+    resume_bytes = b"DEFAULT RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
+    _archive(history, tmp_path, "run-a", _snapshot(global_job), resume_bytes)
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(
+        global_job,
+        UserStatus.SAVED,
+        NOW,
+    )
+    assert _attach_resume(
+        paths,
+        global_jobs,
+        "global",
+        "job-resume.pdf",
+        resume_bytes,
+    ) == resume_id
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -776,32 +1557,36 @@ def test_ats_defaults_to_selected_history_resume_when_no_upload_is_given(
 
     assert response.status_code == 202
     inputs = ats_workflow.inputs[0]
-    assert inputs.search_run_id == "run-a"
-    assert inputs.resume_filename == "run-a.pdf"
-    assert inputs.resume_bytes == b"DEFAULT RESUME"
+    assert inputs.search_run_id == "global"
+    assert inputs.resumes[0].resume_id == resume_id
+    assert inputs.resumes[0].resume_filename == "job-resume.pdf"
+    assert inputs.resumes[0].resume_bytes == resume_bytes
 
 
-def test_ats_uses_resume_selected_in_resume_catalog(tmp_path: Path) -> None:
+def test_ats_ignores_a_page_resume_override_and_uses_the_job_resume(
+    tmp_path: Path,
+) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     global_job = _job("global", external_id="global")
     repository = _repository(paths)
     _save_config(paths)
     history = SearchHistoryStore(paths)
     _archive(history, tmp_path, "run-a", _snapshot(global_job), b"DEFAULT RESUME")
-    resume_bytes = b"CATALOG RESUME"
+    resume_bytes = b"JOB RESUME"
     resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
-    ResumeCatalogStore(paths).register(
-        resume_id=resume_id,
-        profile_hash="sha256:" + "c" * 64,
-        candidate_name="Ada",
-        filename="catalog.pdf",
-        profile_bytes=b"profile",
-        config_bytes=b"config",
-        resume_bytes=resume_bytes,
-        created_at=NOW,
-    )
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(
+        global_job,
+        UserStatus.SAVED,
+        NOW,
+    )
+    assert _attach_resume(
+        paths,
+        global_jobs,
+        "global",
+        "job.pdf",
+        resume_bytes,
+    ) == resume_id
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -818,8 +1603,7 @@ def test_ats_uses_resume_selected_in_resume_catalog(tmp_path: Path) -> None:
         response = client.post(
             "/api/ats-runs",
             data={
-                "search_run_id": "run-a",
-                "resume_id": resume_id,
+                "resume_id": "sha256:" + "f" * 64,
                 "job_keys": json.dumps(["global"]),
             },
             headers=HEADERS,
@@ -827,20 +1611,25 @@ def test_ats_uses_resume_selected_in_resume_catalog(tmp_path: Path) -> None:
 
     assert response.status_code == 202
     inputs = ats_workflow.inputs[0]
-    assert inputs.resume_filename == "catalog.pdf"
-    assert inputs.resume_bytes == b"CATALOG RESUME"
+    assert inputs.resumes[0].resume_id == resume_id
+    assert inputs.resumes[0].resume_filename == "job.pdf"
+    assert inputs.resumes[0].resume_bytes == b"JOB RESUME"
 
 
-def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path) -> None:
+def test_ats_uses_job_tracker_config_instead_of_review_history_config(
+    tmp_path: Path,
+) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     global_job = _job("global", external_id="global")
     repository = _repository(paths)
     _save_config(paths)
+    resume_bytes = b"HISTORY JOB RESUME"
+    resume_id = "sha256:" + hashlib.sha256(resume_bytes).hexdigest()
     history_config = AppConfig(
         candidate_name="History Candidate",
         ai_runtime="claude-code",
         resume_path=paths.root / "history.pdf",
-        resume_sha256="sha256:" + "c" * 64,
+        resume_sha256=resume_id,
         profile_sha256="sha256:" + "d" * 64,
         search_terms=["backend"],
         locations=["Berlin"],
@@ -854,10 +1643,22 @@ def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path)
         tmp_path,
         "run-a",
         _snapshot(global_job),
+        resume_bytes=resume_bytes,
         config_bytes=serialize_config(history_config).encode("utf-8"),
     )
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(
+        global_job,
+        UserStatus.SAVED,
+        NOW,
+    )
+    assert _attach_resume(
+        paths,
+        global_jobs,
+        "global",
+        "history-job.pdf",
+        resume_bytes,
+    ) == resume_id
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -874,7 +1675,6 @@ def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path)
         response = client.post(
             "/api/ats-runs",
             data={
-                "search_run_id": "run-a",
                 "ai_choice": "history",
                 "job_keys": json.dumps(["global"]),
             },
@@ -885,7 +1685,6 @@ def test_ats_keeps_history_context_but_uses_the_global_ai_config(tmp_path: Path)
     inputs = ats_workflow.inputs[0]
     assert inputs.config.ai_runtime == "claude-code"
     assert inputs.config.selected_model == "sonnet"
-    assert inputs.candidate_name == "History Candidate"
 
 
 def test_review_removes_the_ats_ai_picker_and_uses_the_global_modal(tmp_path: Path) -> None:
@@ -948,6 +1747,14 @@ def test_ats_can_override_history_ai_with_saved_provider(tmp_path: Path) -> None
     current = _job("current", external_id="current")
     repository = _repository(paths, current)
     _save_config(paths)
+    paths.profile_md.write_text("# Ada", encoding="utf-8")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        current,
+        UserStatus.SAVED,
+        NOW,
+    )
+    _attach_resume(paths, global_jobs, "current", "current.pdf", b"RESUME")
     ai_store = AiProviderStore(paths.ai_config_toml)
     provider = ai_store.create(
         AiProviderDraft(
@@ -970,6 +1777,7 @@ def test_ats_can_override_history_ai_with_saved_provider(tmp_path: Path) -> None
         TOKEN,
         frozenset({ORIGIN}),
         ai_store=ai_store,
+        global_job_store=global_jobs,
         ats_workflow=ats_workflow,
         ats_history_store=AtsHistoryStore(paths),
     )
@@ -982,7 +1790,6 @@ def test_ats_can_override_history_ai_with_saved_provider(tmp_path: Path) -> None
                 "ai_choice": f"runtime:api:{provider.id}",
                 "job_keys": json.dumps(["current"]),
             },
-            files={"resume": ("Current.pdf", b"RESUME", "application/pdf")},
             headers=HEADERS,
         )
 
@@ -1030,7 +1837,12 @@ def test_ats_uses_global_ai_selection_instead_of_history_ai(tmp_path: Path) -> N
         config_bytes=serialize_config(history_config).encode("utf-8"),
     )
     global_jobs = GlobalJobStore(paths)
-    global_jobs.set_status(global_job, UserStatus.SAVED, NOW)
+    global_jobs.set_status(
+        global_job,
+        UserStatus.SAVED,
+        NOW,
+    )
+    _attach_resume(paths, global_jobs, "global", "global.pdf", b"GLOBAL RESUME")
     ats_workflow = RecordingAtsWorkflow()
     app = create_review_app(
         repository,
@@ -1048,7 +1860,6 @@ def test_ats_uses_global_ai_selection_instead_of_history_ai(tmp_path: Path) -> N
         response = client.post(
             "/api/ats-runs",
             data={
-                "search_run_id": "run-a",
                 "ai_choice": "history",
                 "job_keys": json.dumps(["global"]),
             },
@@ -1060,7 +1871,6 @@ def test_ats_uses_global_ai_selection_instead_of_history_ai(tmp_path: Path) -> N
     assert inputs.config.ai_runtime == f"api:{provider.id}"
     assert inputs.config.selected_model == "current-model"
     assert inputs.config.claude.model == "opus"
-    assert inputs.candidate_name == "History Candidate"
 
 
 def test_manual_job_import_rejects_non_public_url(tmp_path: Path) -> None:
@@ -1073,10 +1883,9 @@ def test_manual_job_import_rejects_non_public_url(tmp_path: Path) -> None:
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "http://127.0.0.1:8765/setup"},
-            headers=HEADERS,
+        response = _post_job_with_resume(
+            client,
+            "http://127.0.0.1:8765/setup",
         )
 
     assert response.status_code == 422
@@ -1115,6 +1924,7 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
         manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
         company_size_service=CompanySizeService(
             CompanySizeStore(paths.cache_dir / "company-sizes.json"),
             UnavailableCompanySizeLookup(),
@@ -1123,18 +1933,14 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
 
     assert response.status_code == 202
     started = response.json()
     assert started["status"] == "running"
     assert isinstance(started["import_id"], str)
     assert started["progress_percent"] >= 0
-    assert started["resume_id"] == "sha256:" + "a" * 64
+    assert started["resume_id"] is None
     state = _wait_manual_import_completion(client, started["import_id"])
     assert state["status"] == "complete"
     assert state["job_key"] == "manual"
@@ -1145,7 +1951,7 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
     assert isinstance(config, AppConfig)
     assert config.ai_runtime == "claude-code"
     assert config.claude.model == "opus"
-    assert profile == "# Current candidate profile"
+    assert profile == "# Uploaded resume profile"
     assert isinstance(imported_at, datetime)
     assert imported_at.tzinfo is not None
     saved = global_jobs.find("manual")
@@ -1153,7 +1959,7 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
     assert saved.user_status is UserStatus.SAVED
 
 
-def test_manual_job_import_uses_selected_resume_profile_and_config(
+def test_manual_job_import_does_not_read_selected_history_profile_or_config(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -1196,6 +2002,7 @@ def test_manual_job_import_uses_selected_resume_profile_and_config(
         history_store=history,
         global_job_store=global_jobs,
         manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
         company_size_service=CompanySizeService(
             CompanySizeStore(paths.cache_dir / "company-sizes.json"),
             UnavailableCompanySizeLookup(),
@@ -1204,14 +2011,7 @@ def test_manual_job_import_uses_selected_resume_profile_and_config(
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={
-                "url": "https://careers.example/jobs/manual",
-                "resume_id": history_config.resume_sha256,
-            },
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client, run_id="run-a")
 
     assert response.status_code == 202
     started = response.json()
@@ -1220,76 +2020,14 @@ def test_manual_job_import_uses_selected_resume_profile_and_config(
     assert len(import_inputs) == 1
     _url, config, profile, _imported_at = import_inputs[0]
     assert isinstance(config, AppConfig)
-    assert config.candidate_name == "History Candidate"
-    assert config.resume_sha256 == "sha256:" + "c" * 64
+    assert config.candidate_name == "backend"
+    assert config.resume_sha256 != "sha256:" + "c" * 64
     assert config.ai_runtime == "claude-code"
     assert config.claude.model == "opus"
-    assert profile == "# History candidate profile"
+    assert profile == "# Uploaded resume profile"
 
 
-def test_job_tracker_resume_time_uses_latest_remaining_history_search(
-    tmp_path: Path,
-) -> None:
-    paths = AppPaths.from_root(tmp_path / "home")
-    history_config = AppConfig(
-        candidate_name="Ada",
-        ai_runtime="claude-code",
-        resume_path=paths.root / "history.pdf",
-        resume_sha256="sha256:" + "c" * 64,
-        profile_sha256="sha256:" + "d" * 64,
-        search_terms=["backend"],
-        locations=["Berlin"],
-        german_level="B1",
-        claude=ClaudeSettings(model="sonnet", effort="medium"),
-        scheduler=SchedulerSettings(),
-    )
-    config_bytes = serialize_config(history_config).encode("utf-8")
-    history = SearchHistoryStore(paths)
-    _archive_with_time(
-        history,
-        tmp_path,
-        "run-old",
-        datetime(2026, 8, 18, 9, 0, tzinfo=UTC),
-        config_bytes,
-    )
-    _archive_with_time(
-        history,
-        tmp_path,
-        "run-new",
-        datetime(2026, 8, 20, 15, 30, tzinfo=UTC),
-        config_bytes,
-    )
-    app = create_review_app(
-        _repository(paths),
-        TOKEN,
-        frozenset({ORIGIN}),
-        workflow=SimpleNamespace(load_setup_answers=lambda: None),
-        history_store=history,
-        ats_history_store=AtsHistoryStore(paths),
-    )
-
-    with TestClient(app, base_url=ORIGIN) as client:
-        _open_session(client)
-        assert (
-            client.delete("/api/scan-history/run-new", headers=HEADERS).status_code
-            == 200
-        )
-        page = BeautifulSoup(client.get("/setup").text, "html.parser")
-        option = page.select_one(
-            '[data-global-resume-select] option[data-resume-filename="run-new.pdf"]'
-        )
-        assert option is not None
-        assert option["data-resume-created-at"] == "2026-08-18 09:00"
-        assert "run-new.pdf (2026-08-18 09:00)" in option.get_text()
-        footer = page.select_one("footer#review-actions")
-        assert footer is not None
-        assert (
-            "Default: run-new.pdf (2026-08-18 09:00)"
-            in footer.get_text(" ", strip=True)
-        )
-
-
-def test_ats_history_time_follows_latest_search_history_for_same_resume(
+def test_ats_history_time_does_not_follow_review_history(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -1325,19 +2063,23 @@ def test_ats_history_time_follows_latest_search_history_for_same_resume(
     )
     ats_history = AtsHistoryStore(paths)
     ats_history.archive(
-        _ats_bundle(
-            "ats-1",
-            resume_filename="history.pdf",
-            finished_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
-        ),
+            _ats_bundle(
+                "ats-1",
+                resume_filename="history.pdf",
+                finished_at=datetime(2026, 8, 19, 10, 0, tzinfo=UTC),
+                resume_id=resume_id,
+            ),
         resume_bytes,
     )
     ats_history.archive(
-        _ats_bundle(
-            "ats-2",
-            resume_filename="other.pdf",
-            finished_at=datetime(2026, 8, 19, 11, 0, tzinfo=UTC),
-        ),
+            _ats_bundle(
+                "ats-2",
+                resume_filename="other.pdf",
+                finished_at=datetime(2026, 8, 19, 11, 0, tzinfo=UTC),
+                resume_id=(
+                    "sha256:" + hashlib.sha256(b"OTHER RESUME").hexdigest()
+                ),
+            ),
         b"OTHER RESUME",
     )
     app = create_review_app(
@@ -1359,7 +2101,7 @@ def test_ats_history_time_follows_latest_search_history_for_same_resume(
             '[data-ats-history-id="ats-2"] time[data-local-datetime]'
         )
         assert ats1_time is not None and ats2_time is not None
-        assert ats1_time["datetime"] == "2026-08-20T15:30:00+00:00"
+        assert ats1_time["datetime"] == "2026-08-19T10:00:00+00:00"
         assert ats2_time["datetime"] == "2026-08-19T11:00:00+00:00"
 
         assert (
@@ -1371,7 +2113,7 @@ def test_ats_history_time_follows_latest_search_history_for_same_resume(
             '[data-ats-history-id="ats-1"] time[data-local-datetime]'
         )
         assert ats1_time is not None
-        assert ats1_time["datetime"] == "2026-08-18T09:00:00+00:00"
+        assert ats1_time["datetime"] == "2026-08-19T10:00:00+00:00"
 
 
 def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
@@ -1381,8 +2123,17 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
     paths.ensure_directories()
     _save_config(paths)
     paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
-    old_config = paths.config_toml.read_bytes()
-    old_profile = paths.profile_md.read_bytes()
+    review_config = paths.config_toml.read_bytes()
+    history = SearchHistoryStore(paths)
+    _archive(
+        history,
+        tmp_path,
+        "run-a",
+        _snapshot(),
+        config_bytes=review_config,
+    )
+    paths.config_toml.unlink()
+    paths.profile_md.unlink()
     uploaded_bytes = SAMPLE_RESUME.read_bytes()
     resume_id = "sha256:" + hashlib.sha256(uploaded_bytes).hexdigest()
     profile_hash = "sha256:" + "e" * 64
@@ -1390,7 +2141,7 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
 
     def prepare_resume(resume_path: Path, answers: SetupAnswers) -> SetupPreparation:
         prepared_inputs.append((resume_path, answers))
-        config = load_config(paths.config_toml).model_copy(
+        config = load_config(paths.job_tracker_config_toml).model_copy(
             update={
                 "candidate_name": answers.candidate_name,
                 "resume_path": resume_path,
@@ -1410,6 +2161,7 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
         _repository(paths),
         TOKEN,
         frozenset({ORIGIN}),
+        history_store=history,
         global_job_store=global_jobs,
         manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
         manual_resume_preparer=prepare_resume,
@@ -1418,6 +2170,8 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
             UnavailableCompanySizeLookup(),
         ),
     )
+    tracker_config = paths.job_tracker_config_toml.read_bytes()
+    history.delete("run-a")
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
@@ -1442,16 +2196,18 @@ def test_manual_job_import_with_new_resume_adds_resume_and_associated_job(
     assert state["resume_id"] == resume_id
     assert len(prepared_inputs) == 1
     assert prepared_inputs[0][1].candidate_name == "backend"
-    assert paths.config_toml.read_bytes() == old_config
-    assert paths.profile_md.read_bytes() == old_profile
-    assert ResumeCatalogStore(paths).read(resume_id).profile_bytes == (
-        b"# Uploaded resume profile"
-    )
-    associated = global_jobs.load_for_resume(resume_id)
-    assert [job.canonical_job_key for job in associated.jobs] == ["manual"]
+    assert paths.job_tracker_config_toml.read_bytes() == tracker_config
+    assert not paths.config_toml.exists()
+    assert not paths.profile_md.exists()
+    saved = global_jobs.find("manual")
+    assert saved is not None
+    assert saved.application_resume_id == resume_id
+    assert saved.application_resume_filename == "backend.docx"
+    digest = resume_id.removeprefix("sha256:")
+    assert (paths.root / "resumes" / f"{digest}.docx").read_bytes() == uploaded_bytes
 
 
-def test_manual_job_import_rejects_missing_selected_history(tmp_path: Path) -> None:
+def test_legacy_job_import_without_resume_is_gone(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     _save_config(paths)
@@ -1478,9 +2234,9 @@ def test_manual_job_import_rejects_missing_selected_history(tmp_path: Path) -> N
             headers=HEADERS,
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 410
     assert response.json() == {
-        "detail": "The selected search history is unavailable."
+        "detail": "Add one job requires a new resume upload."
     }
 
 
@@ -1502,16 +2258,13 @@ def test_manual_job_import_persists_company_size_before_saving(
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
         manual_job_importer=lambda *_inputs: imported,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
         company_size_service=company_sizes,
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
 
     assert response.status_code == 202
     started = response.json()
@@ -1541,16 +2294,13 @@ def test_manual_job_import_stays_saved_when_company_size_is_unknown(
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
         manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
         company_size_service=company_sizes,
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
 
     assert response.status_code == 202
     started = response.json()
@@ -1583,6 +2333,8 @@ def test_global_company_size_search_updates_the_global_job(tmp_path: Path) -> No
         global_job_store=global_jobs,
         company_size_service=company_sizes,
     )
+    assert paths.job_tracker_config_toml.exists()
+    paths.config_toml.unlink()
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
@@ -1696,6 +2448,7 @@ def test_manual_job_import_rejects_while_scan_is_running(tmp_path: Path) -> None
         TOKEN,
         frozenset({ORIGIN}),
         manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
     )
 
     with FileRWLock(paths.scan_lock_file).exclusive(), TestClient(
@@ -1703,11 +2456,7 @@ def test_manual_job_import_rejects_while_scan_is_running(tmp_path: Path) -> None
         base_url=ORIGIN,
     ) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
 
     assert response.status_code == 409
     assert response.json() == {
@@ -1737,15 +2486,12 @@ def test_manual_job_import_holds_scan_lock_until_import_finishes(tmp_path: Path)
         TOKEN,
         frozenset({ORIGIN}),
         manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
 
     assert response.status_code == 202
     assert lock_available_during_import == [False]
@@ -1767,20 +2513,21 @@ def test_reimported_manual_job_preserves_existing_global_status(tmp_path: Path) 
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
         manual_job_importer=lambda *_inputs: refreshed,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
     )
 
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
-        response = client.post(
-            "/api/global-jobs/import",
-            json={"url": "https://careers.example/jobs/manual"},
-            headers=HEADERS,
-        )
+        response = _post_job_with_resume(client)
+        started = response.json()
+        state = _wait_manual_import_completion(client, started["import_id"])
 
     assert response.status_code == 202
-    started = response.json()
     assert started["status"] == "running"
-    state = _wait_manual_import_completion(client, started["import_id"])
     assert state["status"] == "complete"
     assert state["result_status"] == "applied"
     

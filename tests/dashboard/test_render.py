@@ -162,6 +162,52 @@ def test_render_distinguishes_pending_ai_review_failures_from_source_failures() 
     )
 
 
+def test_render_relabels_persisted_claude_review_error_as_ai() -> None:
+    review_failure = _job("legacy-review-failure")
+    review_failure.machine_status = MachineStatus.PENDING
+    review_failure.last_error = "Claude returned an invalid result for this job."
+
+    page = BeautifulSoup(
+        render_dashboard(Snapshot(meta=StoreMeta(data_revision=42), jobs=[review_failure])),
+        "html.parser",
+    )
+
+    review_error = page.select_one(
+        '[data-job-key="legacy-review-failure"] .review-error'
+    )
+    assert review_error is not None
+    review_error_text = review_error.get_text(" ", strip=True)
+    assert (
+        "AI review failed. Error: AI returned an invalid result for this job."
+        in review_error_text
+    )
+    assert "Claude" not in review_error_text
+
+
+def test_render_keeps_manual_import_error_collapsed_in_job_details() -> None:
+    job = _job("manual-import-error")
+    error = (
+        'Job title: AI read "Senior Developer". The same wording was not found on the '
+        "original page. Check that this information is correct."
+    )
+    job.manual_import_errors = [error]
+
+    page = BeautifulSoup(
+        render_dashboard(Snapshot(meta=StoreMeta(data_revision=42), jobs=[job])),
+        "html.parser",
+    )
+
+    details = page.select_one(
+        '[data-job-key="manual-import-error"] .job-detail-dialog '
+        "details.manual-import-errors"
+    )
+    assert details is not None
+    assert not details.has_attr("open")
+    assert details.select_one("summary").get_text(" ", strip=True) == "Error"
+    assert "This job was saved" in details.get_text(" ", strip=True)
+    assert error in details.get_text(" ", strip=True)
+
+
 def test_render_shows_snapshot_links_and_automatic_source_triggers() -> None:
     saved = _job("saved-snapshot")
     saved.source_occurrences[0].job_snapshot = JobSnapshotReference(
@@ -347,13 +393,13 @@ def test_packaged_dashboard_javascript_uses_review_api_request_contract() -> Non
     assert 'method: "POST"' in javascript
     assert 'credentials: "same-origin"' in javascript
     assert '"Content-Type": "application/json"' in javascript
-    assert "const payload = { status }" in javascript
-    assert "payload.resume_id = selectedResumeId" in javascript
-    assert "JSON.stringify(payload)" in javascript
-    assert 'if (action === "restore" || action === "snapshot")' in javascript
+    assert "const status = form.elements.namedItem(\"status\").value" in javascript
+    assert "payload.resume_id = selectedResumeId" not in javascript
+    assert "JSON.stringify({ status })" in javascript
+    assert 'action === "snapshot-force"' in javascript
     assert "return options" in javascript
     assert "response.ok" in javascript
-    assert "await refreshReviewJob(rawJobKey)" in javascript
+    assert "preserveOpenDetail: action === \"resume\"" in javascript
     assert 'submitButton.textContent = "Import to Saved"' in javascript
     assert "Import to Shortlisted" not in javascript
 

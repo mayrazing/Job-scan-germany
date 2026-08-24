@@ -175,6 +175,13 @@ main {
   box-shadow: inset 0 -3px 0 var(--action);
 }
 
+.review-group-nav a.is-job-drop-target {
+  border-color: var(--action);
+  background: #F9FBFA;
+  box-shadow: inset 4px 0 0 var(--action);
+  color: var(--action);
+}
+
 .review-group-nav .review-group-drag-handle {
   display: inline-grid;
   min-width: 0;
@@ -245,42 +252,6 @@ main {
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
-}
-
-.global-resume-section {
-  margin: 0 0 1rem;
-  padding: 1rem;
-  border: 1px solid var(--border);
-  border-radius: 0.45rem;
-  background: var(--surface);
-}
-
-.global-resume-heading {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0.35rem 1rem;
-  margin-bottom: 0.75rem;
-}
-
-.global-resume-heading h4,
-.global-resume-heading span {
-  margin: 0;
-}
-
-.global-resume-heading span {
-  color: var(--muted);
-}
-
-.global-resume-select {
-  width: min(100%, 32rem);
-  min-height: 42px;
-  padding: 0.5rem 2.25rem 0.5rem 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 0.35rem;
-  background: var(--paper);
-  color: var(--ink);
-  font: inherit;
 }
 
 .manual-job-button,
@@ -395,6 +366,22 @@ main {
   color: #FFFFFF;
 }
 
+.lifecycle-delete-dialog {
+  width: min(28rem, calc(100% - 2rem));
+}
+
+.lifecycle-delete-dialog [data-cancel-lifecycle-delete] {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.lifecycle-delete-dialog [data-confirm-lifecycle-delete] {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #FFFFFF;
+}
+
 .manual-job-button:disabled,
 .manual-job-dialog button:disabled {
   cursor: wait;
@@ -420,8 +407,9 @@ main {
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.85rem;
+  align-items: start;
 }
 
 .job-card {
@@ -432,6 +420,332 @@ main {
   border-radius: 0.45rem;
   background: var(--surface);
   overflow: hidden;
+}
+
+.card-grid > .job-card {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 160px;
+  border-top: 1px solid var(--border);
+  border-left: 4px solid var(--action);
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.card-grid > .job-card[data-job-drag-source] {
+  cursor: grab;
+}
+
+.card-grid > .job-card.is-job-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+  transform: none;
+}
+
+.card-grid > .job-card:hover {
+  border-color: var(--action);
+  box-shadow: 0 0.7rem 1.5rem rgb(23 33 43 / 12%);
+  transform: translateY(-2px);
+}
+
+.card-grid > .job-card:focus-visible {
+  outline: 3px solid rgb(164 91 22 / 45%);
+  outline-offset: 3px;
+}
+
+.job-preview-status {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 0.55rem 0.7rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 0;
+  background: #E7EFEB;
+  font-size: 0.67rem;
+}
+
+.job-preview-status > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+  align-content: center;
+  padding: 0.35rem 0.2rem;
+  overflow: hidden;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.job-preview-status > span + span {
+  border-top: 1px solid var(--border);
+  border-left: 0;
+}
+
+.job-preview-status small {
+  overflow: hidden;
+  font-size: inherit;
+  text-overflow: ellipsis;
+}
+
+.job-preview-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 13.5rem;
+  grid-template-rows: auto auto;
+  gap: 0.55rem 1rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.job-preview-summary {
+  display: grid;
+  min-height: 0;
+  grid-row: 1 / -1;
+  gap: 0.45rem;
+  align-content: start;
+  padding-right: 1rem;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.job-preview-header {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: start;
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  background: #F9FBFA;
+}
+
+.job-preview-header > div {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.job-preview-header h3 {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font-size: 1.05rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.job-preview-header .score {
+  width: 3rem;
+  justify-self: end;
+}
+
+.job-preview-header .company,
+.job-preview-header .location {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-preview-location {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.job-preview-location > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-preview-posted,
+.job-preview-added {
+  flex: 0 0 auto;
+}
+
+.job-preview-salaries {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.job-preview-salaries > div {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 0.75rem;
+}
+
+.job-preview-salaries dt {
+  color: var(--muted);
+}
+
+.job-preview-salaries dd {
+  margin: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-preview-message {
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-preview-message.is-warning {
+  color: var(--warning);
+}
+
+.job-preview-message.is-danger {
+  color: var(--danger);
+}
+
+.job-preview-summary .labels {
+  max-height: 1.75rem;
+  flex-wrap: nowrap;
+  margin: 0;
+  overflow: hidden;
+}
+
+.job-preview-summary .labels li {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-preview-restored {
+  border-color: var(--action) !important;
+  color: var(--action);
+}
+
+.job-preview-status-form {
+  margin: 0;
+  align-self: start;
+}
+
+.job-preview-status-form label > span {
+  font-size: 0.7rem;
+}
+
+.job-preview-status-form select,
+.job-preview-status-form button {
+  min-height: 38px;
+  font-size: 0.78rem;
+}
+
+.job-preview-footer {
+  display: flex;
+  min-height: 1.8rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  color: var(--action);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.job-preview-footer .ats-job-selector {
+  margin: 0;
+  padding: 0;
+  border-top: 0;
+  font-size: 0.72rem;
+}
+
+.job-preview-open-label {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.job-detail-dialog {
+  width: min(46rem, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1.25rem 4rem rgb(23 33 43 / 24%);
+  cursor: default;
+}
+
+.job-detail-dialog::backdrop {
+  background: rgb(23 33 43 / 48%);
+}
+
+.job-detail-panel {
+  min-width: 0;
+}
+
+.status-rail.job-detail-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+  padding: 0.7rem 1.25rem;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+  background: #E7EFEB;
+  font-size: 0.72rem;
+}
+
+.job-detail-status .restored-label {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.card-body.job-detail-body {
+  padding: 1.25rem;
+}
+
+.job-detail-header {
+  align-items: start;
+}
+
+.job-detail-header > div:first-child {
+  min-width: 0;
+}
+
+.job-detail-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: start;
+  gap: 1rem;
+}
+
+.job-detail-close {
+  min-height: 38px;
+  padding-inline: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.job-detail-close:hover {
+  border-color: var(--action);
+  background: #F9FBFA;
 }
 
 .status-rail {
@@ -517,16 +831,9 @@ main {
 .reason,
 .source-error,
 .exclusions,
-.application-resume,
 .facts,
 .evidence {
   margin-top: 0.9rem;
-}
-
-.application-resume {
-  padding: 0.65rem 0.75rem;
-  border-left: 3px solid var(--action);
-  background: #F9FBFA;
 }
 
 .labels {
@@ -562,6 +869,28 @@ main {
   color: var(--warning);
 }
 
+.manual-import-errors {
+  margin-top: 0.9rem;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--warning);
+}
+
+.manual-import-errors summary {
+  width: fit-content;
+  color: var(--warning);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.manual-import-errors p,
+.manual-import-errors ul {
+  margin: 0.65rem 0 0;
+}
+
+.manual-import-errors ul {
+  padding-left: 1.2rem;
+}
+
 .exclusions ul,
 .evidence ul {
   margin: 0.35rem 0 0;
@@ -592,9 +921,11 @@ main {
 }
 
 .company-size-actions .btn {
-  --bs-btn-padding-y: 0.1rem;
+  --bs-btn-padding-y: 0;
   --bs-btn-padding-x: 0.4rem;
   --bs-btn-font-size: 0.68rem;
+  min-height: 1.2rem;
+  line-height: 1;
 }
 
 .company-size-search-error {
@@ -612,6 +943,69 @@ main {
   overflow-wrap: anywhere;
 }
 
+.manual-fact-trigger {
+  display: inline-grid;
+  min-height: 2rem;
+  width: fit-content;
+  padding: 0 0.35rem;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+
+.manual-fact-trigger:focus-visible {
+  outline: 3px solid var(--warning);
+  outline-offset: 2px;
+}
+
+.manual-fact-dialog {
+  width: min(24rem, calc(100% - 2rem));
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1.25rem 4rem rgb(23 33 43 / 24%);
+}
+
+.manual-fact-dialog::backdrop {
+  background: rgb(23 33 43 / 32%);
+}
+
+.manual-fact-form,
+.manual-fact-form label {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.manual-fact-form label > span {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.manual-fact-form input {
+  min-height: 44px;
+}
+
+.manual-fact-actions {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.manual-fact-error {
+  margin: 0;
+  color: var(--danger);
+}
+
+.manual-fact-error[hidden] {
+  display: none;
+}
+
 .evidence summary {
   min-height: 44px;
   cursor: pointer;
@@ -625,10 +1019,204 @@ main {
 
 .job-actions {
   display: grid;
-  gap: 0.65rem;
+  gap: 1rem;
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--border);
+}
+
+.job-action-group {
+  display: grid;
+  gap: 0.7rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+.job-action-group-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.job-action-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.job-action-group-danger {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+  background: color-mix(in srgb, var(--danger) 4%, var(--surface));
+}
+
+.job-salary-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.job-salary-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.65rem;
+}
+
+.job-salary-fields label {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.job-salary-value {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.job-salary-value input,
+.job-salary-value select,
+.job-salary-form button {
+  min-height: 44px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.job-salary-value input {
+  min-width: 0;
+  padding-inline: 0.65rem;
+  border-radius: 0.35rem 0 0 0.35rem;
+}
+
+.job-salary-value select {
+  padding-inline: 0.55rem;
+  border-left: 0;
+  border-radius: 0 0.35rem 0.35rem 0;
+}
+
+.job-salary-form button {
+  justify-self: start;
+  padding-inline: 0.85rem;
+  border-radius: 0.35rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.job-resume-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.job-resume-control [data-job-resume-name] {
+  margin-right: auto;
+  font-weight: 700;
+}
+
+.job-resume-control a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.job-resume-control form {
+  margin: 0;
+}
+
+.job-notes-heading,
+.job-note-list > li > footer,
+.job-note-actions {
+  display: flex;
+  align-items: center;
+}
+
+.job-notes-heading {
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.job-note-add {
+  width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.job-note-list {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.job-note-list > li {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--paper);
+}
+
+.job-note-content,
+.job-note-empty {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.job-note-empty,
+.job-note-list time {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.job-note-list > li > footer {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.job-note-actions {
+  gap: 0.45rem;
+}
+
+.job-note-actions .btn {
+  min-height: 2rem;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.job-note-dialog textarea {
+  width: 100%;
+  min-height: 8rem;
+  resize: vertical;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.job-note-delete-dialog {
+  width: min(28rem, calc(100% - 2rem));
+}
+
+.job-note-delete-dialog [data-job-note-delete-confirm] {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #FFFFFF;
 }
 
 .job-snapshot-control {
@@ -719,6 +1307,31 @@ main {
   padding-inline: 0.85rem;
   cursor: pointer;
   font-weight: 700;
+}
+
+.job-action button.is-saving,
+.job-salary-form button.is-saving {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: wait;
+}
+
+.job-action button.is-saving::before,
+.job-salary-form button.is-saving::before {
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid currentcolor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: job-save-spin 650ms linear infinite;
+  content: "";
+}
+
+@keyframes job-save-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .job-action[data-job-action="restore"] {
@@ -828,6 +1441,32 @@ main {
   color: inherit;
 }
 
+.lifecycle-date-editor {
+  position: relative;
+  display: inline-grid;
+  min-height: 2rem;
+  padding-inline: 0.35rem;
+  place-items: center;
+  width: fit-content;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+
+.lifecycle-date-editor input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.lifecycle-date-editor:focus-within {
+  outline: 3px solid var(--warning);
+  outline-offset: 2px;
+}
+
 .lifecycle-history {
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
@@ -872,6 +1511,17 @@ main {
   display: none !important;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .card-grid > .job-card {
+    transition: none;
+  }
+
+  .job-action button.is-saving::before,
+  .job-salary-form button.is-saving::before {
+    animation: none;
+  }
+}
+
 @media (max-width: 50rem) {
   .review-workspace {
     grid-template-columns: 12rem minmax(0, 1fr);
@@ -898,6 +1548,62 @@ main {
 
   .job-card {
     grid-template-columns: 1fr;
+  }
+
+  .card-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .card-grid > .job-card {
+    grid-template-columns: 1fr;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border-top: 4px solid var(--action);
+    border-left: 1px solid var(--border);
+  }
+
+  .job-preview-status {
+    min-height: 3.5rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .job-preview-status > span {
+    padding: 0.35rem 0.55rem;
+  }
+
+  .job-preview-status > span + span {
+    border-top: 0;
+    border-left: 1px solid var(--border);
+  }
+
+  .job-preview-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .job-preview-summary {
+    grid-row: auto;
+    padding-right: 0;
+    padding-bottom: 0.75rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .job-preview-salaries {
+    grid-template-columns: 1fr;
+  }
+
+  .job-detail-header,
+  .job-detail-header-actions {
+    display: grid;
+  }
+
+  .status-rail.job-detail-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-bottom: 1px solid var(--border);
   }
 
   .status-rail {

@@ -64,6 +64,7 @@ def ats_input(*jobs: JobRecord) -> AtsCheckInput:
     return AtsCheckInput(
         run_id="ats-1",
         search_run_id="search-1",
+        resume_id="sha256:" + "a" * 64,
         candidate_name="Ada",
         resume_filename="Ada CV.pdf",
         resume_bytes=b"PRIVATE RESUME FILE",
@@ -241,6 +242,67 @@ def test_common_check_finishes_before_any_job_request() -> None:
     assert invoker.kinds[0] == "resume"
     assert sorted(invoker.kinds[1:]) == ["job-1", "job-2"]
     assert [item.job_key for item in result.jobs] == ["job-1", "job-2"]
+
+
+def test_check_keeps_the_input_resume_hash() -> None:
+    service = AtsCheckService(
+        RecordingAtsInvoker(),
+        resume_extractor=fake_resume_extractor,
+    )
+
+    result = service.check(ats_input(job("job-1", "JD ONE")), config())
+
+    assert result.resume_id == "sha256:" + "a" * 64
+
+
+def test_existing_resume_check_is_reused_and_new_job_is_appended() -> None:
+    invoker = RecordingAtsInvoker()
+    service = AtsCheckService(invoker, resume_extractor=fake_resume_extractor)
+    existing = service.check(ats_input(job("job-a", "JD A")), config())
+    invoker.kinds.clear()
+
+    updated = service.check(
+        ats_input(job("job-c", "JD C")),
+        config(),
+        previous=existing,
+    )
+
+    assert invoker.kinds == ["job-c"]
+    assert updated.resume == existing.resume
+    assert [item.job_key for item in updated.jobs] == ["job-a", "job-c"]
+
+
+def test_existing_job_is_reused_when_its_jd_hash_is_unchanged() -> None:
+    invoker = RecordingAtsInvoker()
+    service = AtsCheckService(invoker, resume_extractor=fake_resume_extractor)
+    selected_job = job("job-a", "SAME JD")
+    existing = service.check(ats_input(selected_job), config())
+    invoker.kinds.clear()
+
+    updated = service.check(
+        ats_input(selected_job),
+        config(),
+        previous=existing,
+    )
+
+    assert invoker.kinds == []
+    assert updated.jobs == existing.jobs
+
+
+def test_existing_job_is_checked_again_when_its_jd_hash_changes() -> None:
+    invoker = RecordingAtsInvoker()
+    service = AtsCheckService(invoker, resume_extractor=fake_resume_extractor)
+    existing = service.check(ats_input(job("job-a", "OLD JD")), config())
+    invoker.kinds.clear()
+    changed = job("job-a", "NEW JD").model_copy(
+        update={"content_hash": "sha256:changed-job-a"}
+    )
+
+    updated = service.check(ats_input(changed), config(), previous=existing)
+
+    assert invoker.kinds == ["job-a"]
+    assert len(updated.jobs) == 1
+    assert updated.jobs[0].content_hash == "sha256:changed-job-a"
 
 
 def test_job_checks_use_at_most_three_parallel_workers() -> None:

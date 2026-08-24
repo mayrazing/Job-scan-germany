@@ -452,6 +452,27 @@ def read_resume_upload(stream: BinaryIO) -> bytes:
     return payload
 
 
+def read_stored_resume(paths: AppPaths, resume_id: str, filename: str) -> bytes:
+    """Read one content-addressed job resume and verify its hash."""
+    digest = resume_id.removeprefix("sha256:")
+    if resume_id != f"sha256:{digest}" or len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ResumeReadError("Stored resume has an invalid content hash.")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
+        raise UnsupportedResumeFormat(
+            f"Unsupported resume format {suffix or '(none)'}; use a .pdf or .docx file."
+        )
+    try:
+        payload = (paths.root / "resumes" / f"{digest}{suffix}").read_bytes()
+    except OSError:
+        raise ResumeReadError("Stored resume is unavailable.") from None
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise ResumeReadError("Stored resume does not match its content hash.")
+    return payload
+
+
 def _read_optional_bytes(path: Path) -> bytes | None:
     """Read one prior setup file while preserving its missing state."""
     try:

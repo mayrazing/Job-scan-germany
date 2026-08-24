@@ -1,4 +1,4 @@
-{% from "_review_queue.html" import global_resume_list, groups, manual_job_import, navigation %}
+{% from "_review_queue.html" import groups, manual_job_import, navigation %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -10,18 +10,28 @@
     <style>{{ dashboard_css | safe }}</style>
     <style>{{ console_css | safe }}</style>
   </head>
-  <body data-review-run-id="{{ selected_run_id or '' }}" data-selected-resume-id="{{ selected_resume_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">Local scan console</p>
-        <h1>Job scan</h1>
-        <p>Set preferences once. Run the search. Review the queue.</p>
-      </div>
-      <div class="console-header-actions">
-        <button class="btn btn-outline-secondary" type="button" data-open-ai-config data-bs-toggle="modal" data-bs-target="#ai-config-modal">AI configuration</button>
-        <p class="revision console-state">Status <strong id="header-status">Ready</strong></p>
-      </div>
-    </header>
+  <body data-review-run-id="{{ selected_run_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
+    <div class="console-sticky-header">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Local scan console</p>
+          <h1>Job scan</h1>
+        </div>
+        <div class="console-header-actions">
+          <button class="btn btn-outline-secondary" type="button" data-open-ai-config data-bs-toggle="modal" data-bs-target="#ai-config-modal">AI configuration</button>
+          <p class="revision console-state">Status <strong id="header-status">Ready</strong></p>
+        </div>
+      </header>
+
+      <nav class="group-nav flow-nav" aria-label="Workflow">
+        <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
+        <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
+        <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
+        <a class="btn btn-outline-secondary" href="#job-tracker" data-nav-step="job-tracker">Job Tracker <span>4</span></a>
+        <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
+        <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
+      </nav>
+    </div>
 
     <div class="modal fade" id="ai-config-modal" tabindex="-1" aria-labelledby="ai-config-modal-title" aria-hidden="true">
       <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -153,15 +163,6 @@
         </div>
       </div>
     </div>
-
-    <nav class="group-nav flow-nav" aria-label="Workflow">
-      <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
-      <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
-      <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
-      <a class="btn btn-outline-secondary" href="#job-tracker" data-nav-step="job-tracker">Job Tracker <span>4</span></a>
-      <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
-      <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
-    </nav>
 
     <main>
       <article class="job-card console-card card">
@@ -541,7 +542,7 @@
                 </header>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
                   {{ navigation(current_dashboard, 'Current history job groups') }}
-                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current', resume_catalog) }}</div>
+                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current') }}</div>
                 </div>
               </section>
             </div>
@@ -558,25 +559,18 @@
             </header>
             <div class="embedded-review">
               <section class="review-block" data-review-block="global">
-                <header class="review-block-heading review-block-heading-actions">
-                  <div>
-                    <p class="eyebrow">All searches</p>
-                    <h3>Tracked jobs</h3>
-                  </div>
-                  {{ manual_job_import() }}
-                </header>
-                {{ global_resume_list(resume_catalog, selected_resume_id, '/setup', selected_run_id, 'job-tracker', resume_latest_searches) }}
-                <div class="review-filters">
+                <div class="review-filters job-tracker-filters">
                   <div class="source-filter">
                     <label for="global-source-filter">
                       <span class="field-label">Search sources</span>
                       <select class="form-select" id="global-source-filter" name="global-source-filter" multiple aria-describedby="source-filter-help"></select>
                     </label>
                   </div>
+                  {{ manual_job_import() }}
                 </div>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Job Tracker groups') }}
-                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global', resume_catalog) }}</div>
+                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>
                 </div>
               </section>
             </div>
@@ -586,12 +580,7 @@
             <div class="review-ats-controls">
               <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
               <a class="btn btn-primary primary-button" href="#job-tracker" data-back-to-job-tracker data-review-only>Job Tracker</a>
-              <label class="ats-resume-picker" for="ats-resume" data-job-tracker-only>
-                <span class="field-label">ATS resume</span>
-                <input class="form-control" id="ats-resume" name="resume" type="file" accept=".pdf,.docx">
-                <small data-ats-default-resume>{% if ats_default_resume_filename %}Default: {{ ats_default_resume_filename }}{% if ats_default_resume_created_at %} ({{ ats_default_resume_created_at.strftime('%Y-%m-%d %H:%M') }}){% endif %}{% else %}Upload a PDF or DOCX resume{% endif %}</small>
-              </label>
-              <button class="btn btn-primary primary-button" type="button" data-open-ats data-job-tracker-only data-search-run-id="{{ ats_source_run_id or '' }}" disabled>Check 0 selected jobs</button>
+              <button class="btn btn-primary primary-button" type="button" data-open-ats data-job-tracker-only disabled>Check 0 selected jobs</button>
             </div>
           </footer>
 
@@ -621,7 +610,7 @@
 
               <ol class="run-log ats-run-log" aria-label="ATS check activity" data-ats-task-list></ol>
 
-              <p class="ats-running-note"><strong>Parallel job checks:</strong> each AI request contains the same resume and one complete job description.</p>
+              <p class="ats-running-note"><strong>Parallel job checks:</strong> each AI request contains that job's saved resume and one complete job description.</p>
             </section>
 
             <footer class="form-footer ats-running-footer">
@@ -654,8 +643,7 @@
                     <div class="ai-provider-copy">
                       <div class="ai-provider-title"><strong>{{ entry.resume_filename }}</strong></div>
                       <p>{{ entry.job_count }} jobs · {{ entry.readiness_score }} resume readiness{% if entry.failed_job_count %} · {{ entry.failed_job_count }} failed{% endif %}</p>
-                      {% set display_time = ats_history_latest_searches.get(entry.run_id, entry.finished_at) %}
-                      <small><time data-local-datetime datetime="{{ display_time.isoformat() }}">{{ display_time.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
                     </div>
                     <div class="ai-provider-actions scan-history-actions">
                       <a class="btn btn-outline-secondary" data-ats-history-view href="/setup?ats_run_id={{ entry.run_id }}#ats-check">👁 View</a>
@@ -669,8 +657,7 @@
             </details>
 
             {% if selected_ats %}
-              {% set display_time = ats_history_latest_searches.get(selected_ats.run_id, selected_ats.finished_at) %}
-              <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing {{ display_time.strftime('%Y-%m-%d %H:%M') }} UTC · {{ selected_ats.jobs | length }} jobs</p>
+              <p class="ats-history-context" id="ats-history-context" aria-live="polite">Viewing {{ selected_ats.resume_filename }} · {{ selected_ats.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC · {{ selected_ats.jobs | length }} jobs</p>
 
               <section class="form-section ats-readiness" id="resume-readiness" aria-labelledby="resume-readiness-title">
                 <div class="ats-readiness-score" aria-label="Resume readiness score {{ selected_ats.resume.readiness_score }} out of 100">

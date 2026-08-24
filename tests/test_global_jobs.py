@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from job_scan.domain import (
     AvailabilityStatus,
     JobRecord,
+    SalaryPeriod,
+    SalaryValue,
     Snapshot,
     SourceKind,
     SourceOccurrence,
     StoreMeta,
     UserStatus,
+    UserStatusHistoryEntry,
 )
 from job_scan.global_jobs import GlobalJobStore
 from job_scan.paths import AppPaths
@@ -138,6 +142,170 @@ def test_set_status_cannot_be_rolled_back_by_older_history(store: GlobalJobStore
     assert reimported.jobs[0].user_status_updated_at == NOW + timedelta(minutes=2)
 
 
+def test_status_date_can_be_changed_without_changing_status_or_time(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(days=2, hours=3))
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    updated = store.set_status_date(tracked, 1, date(2026, 8, 25))
+
+    assert updated.user_status is UserStatus.APPLIED
+    assert updated.user_status_history[-1].changed_at == datetime(
+        2026,
+        8,
+        25,
+        13,
+        0,
+        tzinfo=UTC,
+    )
+    assert updated.user_status_updated_at == updated.user_status_history[-1].changed_at
+    assert store.find("job-1") == updated
+
+
+@pytest.mark.parametrize(
+    "changed_on",
+    [date(2026, 8, 17), date(2026, 8, 23)],
+)
+def test_status_date_cannot_cross_adjacent_event_dates(
+    store: GlobalJobStore,
+    changed_on: date,
+) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(days=2))
+    store.set_status(job, UserStatus.INTERVIEWING, NOW + timedelta(days=4))
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    with pytest.raises(ValueError, match="adjacent lifecycle events"):
+        store.set_status_date(tracked, 1, changed_on)
+
+    assert store.find("job-1") == tracked
+
+
+@pytest.mark.parametrize(
+    "changed_on",
+    [date(2026, 8, 18), date(2026, 8, 22)],
+)
+def test_status_date_can_equal_an_adjacent_event_date(
+    store: GlobalJobStore,
+    changed_on: date,
+) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(days=2))
+    store.set_status(job, UserStatus.INTERVIEWING, NOW + timedelta(days=4))
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    updated = store.set_status_date(tracked, 1, changed_on)
+
+    assert len(updated.user_status_history) == 3
+    assert updated.user_status_history[1].changed_at.date() == changed_on
+    assert [entry.status for entry in updated.user_status_history] == [
+        UserStatus.SAVED,
+        UserStatus.APPLIED,
+        UserStatus.INTERVIEWING,
+    ]
+
+
+def test_status_event_can_be_deleted_without_changing_other_events(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(days=2))
+    store.set_status(job, UserStatus.INTERVIEWING, NOW + timedelta(days=4))
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    updated = store.delete_status_event(tracked, 1)
+
+    assert updated.user_status_history == [
+        tracked.user_status_history[0],
+        tracked.user_status_history[2],
+    ]
+    assert updated.user_status is UserStatus.INTERVIEWING
+    assert updated.user_status_updated_at == tracked.user_status_updated_at
+
+
+def test_deleting_current_status_event_makes_previous_event_current(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    store.set_status(job, UserStatus.APPLIED, NOW + timedelta(days=2))
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    updated = store.delete_status_event(tracked, 1)
+
+    assert [entry.status for entry in updated.user_status_history] == [
+        UserStatus.SAVED
+    ]
+    assert updated.user_status is UserStatus.SAVED
+    assert updated.user_status_updated_at == NOW
+
+
+def test_deleted_lifecycle_event_stays_deleted_after_snapshot_reimport(
+    store: GlobalJobStore,
+) -> None:
+    job = _job(
+        "job-1",
+        external_ids=("same",),
+        status=UserStatus.IGNORED,
+        status_at=NOW,
+    )
+    job.user_status_history = [
+        UserStatusHistoryEntry(status=UserStatus.IGNORED, changed_at=NOW),
+        UserStatusHistoryEntry(
+            status=UserStatus.IGNORED,
+            changed_at=NOW + timedelta(days=1),
+        ),
+        UserStatusHistoryEntry(
+            status=UserStatus.SAVED,
+            changed_at=NOW + timedelta(days=2),
+        ),
+        UserStatusHistoryEntry(status=UserStatus.IGNORED, changed_at=NOW),
+    ]
+    store.import_snapshots([_snapshot(job)])
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    deleted = store.delete_status_event(tracked, 0)
+    reimported = store.import_snapshots(
+        [_snapshot(_job("job-1", external_ids=("same",)))]
+    ).jobs[0]
+
+    expected_history = [
+        (UserStatus.IGNORED, NOW + timedelta(days=1)),
+        (UserStatus.SAVED, NOW + timedelta(days=2)),
+        (UserStatus.IGNORED, NOW),
+    ]
+    assert [
+        (entry.status, entry.changed_at) for entry in deleted.user_status_history
+    ] == expected_history
+    assert [
+        (entry.status, entry.changed_at) for entry in reimported.user_status_history
+    ] == expected_history
+
+
+def test_saved_status_event_cannot_be_deleted(store: GlobalJobStore) -> None:
+    job = _job("job-1", external_ids=("same",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+    tracked = store.find("job-1")
+    assert tracked is not None
+
+    with pytest.raises(ValueError, match="Saved lifecycle event cannot be deleted"):
+        store.delete_status_event(tracked, 0)
+
+    assert store.find("job-1") == tracked
+
+
 def test_later_imported_legacy_status_replaces_the_first_known_event(
     store: GlobalJobStore,
 ) -> None:
@@ -210,7 +378,7 @@ def test_first_direct_tracker_status_still_starts_the_lifecycle_at_saved(
     ]
 
 
-def test_first_application_status_records_resume_without_later_overwrite(
+def test_tracker_status_does_not_attach_a_search_resume(
     store: GlobalJobStore,
 ) -> None:
     job = _job("job-1", external_ids=("shared",))
@@ -240,32 +408,151 @@ def test_first_application_status_records_resume_without_later_overwrite(
     )
 
     assert saved.jobs[0].application_resume_id is None
-    assert applied.jobs[0].application_resume_id == resume_a
-    assert interviewing.jobs[0].application_resume_id == resume_a
+    assert applied.jobs[0].application_resume_id is None
+    assert interviewing.jobs[0].application_resume_id is None
 
 
-def test_application_resume_can_be_corrected_without_changing_progress(
+def test_review_transfer_saves_status_and_application_resume_together(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    resume_id = "sha256:" + "1" * 64
+
+    transferred = store.set_status(
+        job,
+        UserStatus.APPLIED,
+        NOW,
+        resume_id=resume_id,
+        profile_hash="sha256:" + "a" * 64,
+        application_resume_filename="candidate.pdf",
+    )
+
+    assert transferred.meta.data_revision == 1
+    assert transferred.jobs[0].user_status is UserStatus.APPLIED
+    assert transferred.jobs[0].application_resume_id == resume_id
+    assert transferred.jobs[0].application_resume_filename == "candidate.pdf"
+
+
+def test_tracker_resume_can_be_corrected_without_changing_status(
     store: GlobalJobStore,
 ) -> None:
     job = _job("job-1", external_ids=("shared",))
     resume_a = "sha256:" + "1" * 64
     resume_b = "sha256:" + "2" * 64
-    applied = store.set_status(
+    saved = store.set_status(
         job,
-        UserStatus.APPLIED,
+        UserStatus.SAVED,
         NOW,
         resume_id=resume_a,
         profile_hash="sha256:" + "a" * 64,
     )
 
-    corrected = store.set_application_resume(applied.jobs[0], resume_b)
+    corrected = store.set_application_resume(saved.jobs[0], resume_b)
 
     assert corrected.application_resume_id == resume_b
-    assert corrected.user_status is UserStatus.APPLIED
+    assert corrected.user_status is UserStatus.SAVED
     assert [entry.status for entry in corrected.user_status_history] == [
         UserStatus.SAVED,
-        UserStatus.APPLIED,
     ]
+
+
+def test_tracker_salaries_can_be_saved_and_modified(store: GlobalJobStore) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    tracked = store.set_status(job, UserStatus.SAVED, NOW).jobs[0]
+
+    store.set_salaries(
+        tracked,
+        expected_salary=SalaryValue(amount="5,500 EUR", period=SalaryPeriod.MONTH),
+        offer_salary=None,
+    )
+    updated = store.set_salaries(
+        tracked,
+        expected_salary=SalaryValue(amount="72,000 EUR", period=SalaryPeriod.YEAR),
+        offer_salary=SalaryValue(amount="68,000 EUR", period=SalaryPeriod.YEAR),
+    )
+
+    assert updated.expected_salary == SalaryValue(
+        amount="72,000 EUR",
+        period=SalaryPeriod.YEAR,
+    )
+    assert updated.offer_salary == SalaryValue(
+        amount="68,000 EUR",
+        period=SalaryPeriod.YEAR,
+    )
+    assert store.find("job-1") == updated
+
+
+def test_tracker_notes_can_be_added_edited_deleted_and_survive_import(
+    store: GlobalJobStore,
+) -> None:
+    note_id = UUID("11111111-1111-4111-8111-111111111111")
+    job = _job("job-1", external_ids=("shared",))
+    tracked = store.set_status(job, UserStatus.SAVED, NOW).jobs[0]
+
+    created = store.add_note(
+        tracked,
+        "  Follow up with recruiter.  ",
+        NOW,
+        note_id=note_id,
+    )
+    edited = store.edit_note(tracked, note_id, "Follow up on Tuesday.")
+    store.import_snapshots(
+        [
+            _snapshot(
+                _job(
+                    "new-key",
+                    external_ids=("shared",),
+                    status=UserStatus.SAVED,
+                    last_seen=NOW + timedelta(days=1),
+                )
+            )
+        ]
+    )
+
+    saved = store.find("new-key")
+    assert created.content == "Follow up with recruiter."
+    assert created.created_at == NOW
+    assert edited.id == note_id
+    assert edited.content == "Follow up on Tuesday."
+    assert edited.created_at == created.created_at
+    assert saved is not None
+    assert saved.notes == [edited]
+
+    store.delete_note(saved, note_id)
+    deleted = store.find("new-key")
+    assert deleted is not None
+    assert deleted.notes == []
+
+
+def test_tracker_manual_facts_survive_later_job_imports(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",)).model_copy(
+        update={"posted_at": None}
+    )
+    tracked = store.set_status(job, UserStatus.SAVED, NOW).jobs[0]
+
+    tracked = store.set_manual_fact(tracked, "posted_at", date(2026, 8, 12))
+    tracked = store.set_manual_fact(tracked, "company_size", 4200)
+    store.set_manual_fact(tracked, "company_industry", "Logistics")
+    store.import_snapshots(
+        [
+            _snapshot(
+                _job(
+                    "new-key",
+                    external_ids=("shared",),
+                    status=UserStatus.SAVED,
+                    last_seen=NOW + timedelta(days=1),
+                ).model_copy(update={"posted_at": None})
+            )
+        ]
+    )
+
+    saved = store.find("new-key")
+    assert saved is not None
+    assert saved.manual_posted_at == date(2026, 8, 12)
+    assert saved.manual_company_size == 4200
+    assert saved.manual_company_industry == "Logistics"
 
 
 def test_same_time_saved_and_applied_order_survives_import_and_duplicate_submit(
@@ -556,6 +843,9 @@ def test_mutate_details_rejects_application_resume_changes(
         resume_id=resume_a,
         profile_hash="sha256:" + "a" * 64,
     )
+    tracked = store.find("job-1")
+    assert tracked is not None
+    store.set_application_resume(tracked, resume_a, "resume-a.pdf")
 
     def replace_resume(snapshot: Snapshot) -> Snapshot:
         snapshot.jobs[0].application_resume_id = resume_b
@@ -613,6 +903,9 @@ def test_overlay_copies_application_resume_without_changing_input(
         resume_id=resume_id,
         profile_hash="sha256:" + "a" * 64,
     )
+    tracked = store.find("global-key")
+    assert tracked is not None
+    store.set_application_resume(tracked, resume_id, "resume.pdf")
     incoming = _snapshot(_job("local-key", external_ids=("shared",)))
 
     overlaid = store.overlay(incoming)
@@ -767,9 +1060,17 @@ def test_same_job_keeps_one_status_but_distinct_resume_matches(
         resume_id="sha256:" + "2" * 64,
         profile_hash="sha256:" + "b" * 64,
     )
+    tracked = store.find("from-b")
+    assert tracked is not None
+    store.set_application_resume(
+        tracked,
+        "sha256:" + "1" * 64,
+        "resume-a.pdf",
+    )
 
     shown_for_a = store.load_for_resume("sha256:" + "1" * 64)
     shown_for_b = store.load_for_resume("sha256:" + "2" * 64)
+    shown_in_tracker = store.load_for_tracker()
 
     assert len(store.load().jobs) == 1
     assert shown_for_a.jobs[0].user_status is UserStatus.APPLIED
@@ -778,43 +1079,5 @@ def test_same_job_keeps_one_status_but_distinct_resume_matches(
     assert shown_for_b.jobs[0].user_status is UserStatus.APPLIED
     assert shown_for_b.jobs[0].score == 63
     assert shown_for_b.jobs[0].reason == "Missing Kotlin experience"
-
-
-def test_existing_global_job_can_be_associated_by_profile_hash(
-    store: GlobalJobStore,
-) -> None:
-    existing = _job("job-1", external_ids=("shared",))
-    existing.score = 88
-    existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
-    store.set_status(existing, UserStatus.SAVED, NOW)
-
-    store.associate_profile(
-        resume_id="sha256:" + "1" * 64,
-        profile_hash="sha256:" + "a" * 64,
-    )
-
-    associated = store.load_for_resume("sha256:" + "1" * 64)
-    assert [job.canonical_job_key for job in associated.jobs] == ["job-1"]
-    assert associated.jobs[0].score == 88
-
-
-def test_reassociating_known_profiles_does_not_write_new_revisions(
-    store: GlobalJobStore,
-) -> None:
-    existing = _job("job-1", external_ids=("shared",))
-    existing.last_successful_review_profile_hash = "sha256:" + "a" * 64
-    existing.last_review_attempt_profile_hash = "sha256:" + "b" * 64
-    store.set_status(existing, UserStatus.SAVED, NOW)
-    associations = (
-        ("sha256:" + "1" * 64, "sha256:" + "a" * 64),
-        ("sha256:" + "2" * 64, "sha256:" + "b" * 64),
-    )
-    for resume_id, profile_hash in associations:
-        store.associate_profile(resume_id=resume_id, profile_hash=profile_hash)
-    first = store.load()
-
-    for resume_id, profile_hash in associations:
-        store.associate_profile(resume_id=resume_id, profile_hash=profile_hash)
-    second = store.load()
-
-    assert second.meta == first.meta
+    assert shown_in_tracker.jobs[0].score == 91
+    assert shown_in_tracker.jobs[0].reason == "Strong Java match"

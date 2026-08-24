@@ -9,6 +9,7 @@ from threading import Event, Lock, Thread
 import pytest
 from pydantic import HttpUrl
 
+import job_scan.ats_workflow as ats_workflow_module
 from job_scan.ats_history import AtsHistoryStore
 from job_scan.ats_models import (
     AtsCheckBundle,
@@ -28,6 +29,7 @@ from job_scan.ats_service import (
 from job_scan.ats_workflow import (
     AtsInputError,
     AtsInvalidJobSelection,
+    AtsResumeInput,
     AtsWorkflow,
     AtsWorkflowBusy,
     AtsWorkflowInput,
@@ -97,10 +99,15 @@ def ats_input(
     """Build caller-owned ATS input through its intended public API."""
     return AtsWorkflowInput(
         search_run_id=search_run_id,
-        candidate_name=candidate_name,
-        resume_filename=resume_filename,
-        resume_bytes=resume_bytes,
-        jobs=jobs,
+        resumes=(
+            AtsResumeInput(
+                resume_id="sha256:" + "a" * 64,
+                candidate_name=candidate_name,
+                resume_filename=resume_filename,
+                resume_bytes=resume_bytes,
+                jobs=jobs,
+            ),
+        ),
         config=config_value or config(),
     )
 
@@ -114,6 +121,7 @@ def successful_bundle(
     return AtsCheckBundle(
         run_id=inputs.run_id,
         search_run_id=inputs.search_run_id,
+        resume_id=inputs.resume_id,
         candidate_name=inputs.candidate_name,
         resume_filename=inputs.resume_filename,
         started_at=NOW,
@@ -192,6 +200,8 @@ class RecordingAtsService(AtsCheckService):
         inputs: AtsCheckInput,
         config_value: AppConfig,
         progress: Callable[[AtsProgressUpdate], None] | None = None,
+        *,
+        previous: AtsCheckBundle | None = None,
     ) -> AtsCheckBundle:
         with self._state_lock:
             self._progress = progress
@@ -261,6 +271,176 @@ def new_workflow(
     return AtsWorkflow(service, history), service, history
 
 
+class ImmediateGroupedAtsService(AtsCheckService):
+    def __init__(self) -> None:
+        self.previous: list[AtsCheckBundle | None] = []
+
+    def check(
+        self,
+        inputs: AtsCheckInput,
+        config_value: AppConfig,
+        progress: Callable[[AtsProgressUpdate], None] | None = None,
+        *,
+        previous: AtsCheckBundle | None = None,
+    ) -> AtsCheckBundle:
+        self.previous.append(previous)
+        fresh = successful_bundle(inputs, config_value)
+        if previous is not None:
+            fresh = fresh.model_copy(update={"jobs": [*previous.jobs, *fresh.jobs]})
+        if progress is not None:
+            progress(AtsProgressUpdate("resume", "complete", "Resume complete."))
+            for item in inputs.jobs:
+                progress(
+                    AtsProgressUpdate(
+                        item.canonical_job_key,
+                        "complete",
+                        "Job check complete.",
+                    )
+                )
+        return fresh
+
+
+def test_workflow_groups_selected_jobs_into_one_record_per_resume_hash(
+    tmp_path: Path,
+) -> None:
+    resume_input = ats_workflow_module.AtsResumeInput
+    service = ImmediateGroupedAtsService()
+    history = AtsHistoryStore(AppPaths.from_root(tmp_path / "home"))
+    workflow = AtsWorkflow(service, history)
+    resume_a = "sha256:" + "a" * 64
+    resume_b = "sha256:" + "b" * 64
+
+    state = workflow.start(
+        AtsWorkflowInput(
+            search_run_id="global",
+            resumes=(
+                resume_input(
+                    resume_id=resume_a,
+                    candidate_name="Ada",
+                    resume_filename="resume-a.pdf",
+                    resume_bytes=b"resume a",
+                    jobs=(job("job-a"), job("job-c")),
+                ),
+                resume_input(
+                    resume_id=resume_b,
+                    candidate_name="Ada",
+                    resume_filename="resume-b.pdf",
+                    resume_bytes=b"resume b",
+                    jobs=(job("job-b"),),
+                ),
+            ),
+            config=config(),
+        )
+    )
+    finished = wait_for_terminal(workflow, state.run_id)
+
+    assert finished.status == "complete"
+    entries = history.list()
+    assert {entry.resume_id for entry in entries} == {resume_a, resume_b}
+    assert sorted(entry.job_count for entry in entries) == [1, 2]
+    assert set(finished.result_ids) == {entry.run_id for entry in entries}
+
+
+def test_workflow_reuses_the_existing_record_when_same_resume_gets_a_new_job(
+    tmp_path: Path,
+) -> None:
+    resume_input = ats_workflow_module.AtsResumeInput
+    service = ImmediateGroupedAtsService()
+    history = AtsHistoryStore(AppPaths.from_root(tmp_path / "home"))
+    workflow = AtsWorkflow(service, history)
+    resume_id = "sha256:" + "a" * 64
+
+    first = workflow.start(
+        AtsWorkflowInput(
+            search_run_id="global",
+            resumes=(
+                resume_input(
+                    resume_id=resume_id,
+                    candidate_name="Ada",
+                    resume_filename="resume-a.pdf",
+                    resume_bytes=b"resume a",
+                    jobs=(job("job-a"),),
+                ),
+            ),
+            config=config(),
+        )
+    )
+    wait_for_terminal(workflow, first.run_id)
+    second = workflow.start(
+        AtsWorkflowInput(
+            search_run_id="global",
+            resumes=(
+                resume_input(
+                    resume_id=resume_id,
+                    candidate_name="Ada",
+                    resume_filename="resume-a.pdf",
+                    resume_bytes=b"resume a",
+                    jobs=(job("job-c"),),
+                ),
+            ),
+            config=config(),
+        )
+    )
+    wait_for_terminal(workflow, second.run_id)
+
+    assert service.previous[0] is None
+    assert service.previous[1] is not None
+    assert [entry.job_count for entry in history.list()] == [2]
+    assert [item.job_key for item in history.load_for_resume(resume_id).jobs] == [
+        "job-a",
+        "job-c",
+    ]
+
+
+def test_history_delete_and_run_start_share_one_exclusive_lock(
+    tmp_path: Path,
+) -> None:
+    class BlockingDeleteHistory(AtsHistoryStore):
+        def __init__(self, paths: AppPaths) -> None:
+            super().__init__(paths)
+            self.delete_entered = Event()
+            self.release_delete = Event()
+
+        def delete(self, run_id: str) -> None:
+            self.delete_entered.set()
+            assert self.release_delete.wait(timeout=1.5)
+            super().delete(run_id)
+
+    history = BlockingDeleteHistory(AppPaths.from_root(tmp_path / "home"))
+    history.archive(
+        successful_bundle(
+            AtsCheckInput(
+                run_id="ats-existing",
+                search_run_id="global",
+                resume_id="sha256:" + "a" * 64,
+                candidate_name="Ada",
+                resume_filename="resume-a.pdf",
+                resume_bytes=b"resume a",
+                jobs=(job("job-a"),),
+            ),
+            config(),
+        ),
+        b"resume a",
+    )
+    workflow = AtsWorkflow(RecordingAtsService(), history)
+
+    def delete_history() -> None:
+        workflow.delete_history("ats-existing")
+
+    worker = Thread(target=delete_history)
+    worker.start()
+    assert history.delete_entered.wait(timeout=1.5)
+
+    with pytest.raises(AtsWorkflowBusy, match="already running"):
+        workflow.start(ats_input(job("job-c")))
+
+    history.release_delete.set()
+    worker.join(timeout=1.5)
+    assert not worker.is_alive()
+    with pytest.raises(KeyError):
+        history.load("ats-existing")
+
+
 def test_start_uses_caller_input_and_archives_its_actual_resume(tmp_path: Path) -> None:
     workflow, service, history = new_workflow(tmp_path, block=True)
     current_config = config().model_copy(update={"ai_model": "current-model"})
@@ -279,7 +459,11 @@ def test_start_uses_caller_input_and_archives_its_actual_resume(tmp_path: Path) 
     finished = wait_for_terminal(workflow, state.run_id)
 
     assert state.search_run_id == "external-search"
-    assert [task.task_id for task in state.tasks] == ["resume", "native-job", "cross-source-job"]
+    assert [task.task_id for task in state.tasks] == [
+        "resume:sha256:" + "a" * 64,
+        "native-job",
+        "cross-source-job",
+    ]
     assert finished.status == "complete"
     assert service.received_inputs is not None
     assert service.received_inputs.candidate_name == "Grace Hopper"
@@ -290,8 +474,9 @@ def test_start_uses_caller_input_and_archives_its_actual_resume(tmp_path: Path) 
         "cross-source-job",
     ]
     assert service.received_config is current_config
-    assert history.load(state.run_id).search_run_id == "external-search"
-    assert history.read_resume(state.run_id) == ("grace-current.pdf", b"GRACE CURRENT RESUME")
+    result_id = finished.result_ids[0]
+    assert history.load(result_id).search_run_id == "external-search"
+    assert history.read_resume(result_id) == ("grace-current.pdf", b"GRACE CURRENT RESUME")
 
 
 @pytest.mark.parametrize(
@@ -356,7 +541,7 @@ def test_job_updates_settle_and_partial_failures_are_archived(tmp_path: Path) ->
     assert finished.progress_percent == 100
     assert [task.status for task in finished.tasks] == ["complete", "complete", "failed"]
     assert finished.message == "ATS check complete with 1 failed jobs."
-    assert history.load(state.run_id).failed_job_count == 1
+    assert history.load(finished.result_ids[0]).failed_job_count == 1
 
 
 def test_common_failure_marks_jobs_skipped_and_does_not_archive(tmp_path: Path) -> None:
@@ -420,12 +605,18 @@ def test_returned_states_cannot_mutate_published_run_state(tmp_path: Path) -> No
         state.tasks.clear()
         first_read = workflow.read_run(state.run_id)
         assert first_read is not None
-        assert [task.task_id for task in first_read.tasks] == ["resume", "job-1"]
+        assert [task.task_id for task in first_read.tasks] == [
+            "resume:sha256:" + "a" * 64,
+            "job-1",
+        ]
 
         first_read.tasks.clear()
         second_read = workflow.read_run(state.run_id)
         assert second_read is not None
-        assert [task.task_id for task in second_read.tasks] == ["resume", "job-1"]
+        assert [task.task_id for task in second_read.tasks] == [
+            "resume:sha256:" + "a" * 64,
+            "job-1",
+        ]
     finally:
         service.finish_with_bundle()
         wait_for_terminal(workflow, state.run_id)

@@ -1,8 +1,13 @@
 {
   "name": "job-scan-germany-ui",
   "private": true,
+  "scripts": {
+    "build:mock-ui": "vite build --config prototypes/web-app/vite.ui5.config.mjs"
+  },
   "dependencies": {
-    "bootstrap": "5.3.8",
-    "tom-select": "2.6.2"
+    "@ui5/webcomponents": "2.25.0"
+  },
+  "devDependencies": {
+    "vite": "8.2.2"
   }
 }
