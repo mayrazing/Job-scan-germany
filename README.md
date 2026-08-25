@@ -2,9 +2,9 @@
 
 **[中文](#中文)**
 
-## Product tour / 产品展示
+## Product tour
 
-AI configuration and the six-step workflow play automatically in order, with each screen shown for 2.5 seconds. AI 配置和完整 6 步流程按顺序自动播放, 每个界面展示 2.5 秒.
+AI configuration and the six-step workflow play automatically in order, with each screen shown for 2.5 seconds. 
 
 <p align="center">
   <a href="assets/product-tour/product-tour.gif"><img src="assets/product-tour/product-tour.gif" alt="Animated product tour" width="70%"></a>
