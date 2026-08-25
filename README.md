@@ -119,6 +119,10 @@ export JOB_SCAN_HOME=/path/to/job-scan-data
 job-scan review
 ```
 
+## License
+
+[MIT](LICENSE) 
+
 ---
 
 ## 中文
@@ -229,3 +233,7 @@ job-scan review --port 9123
 export JOB_SCAN_HOME=/path/to/job-scan-data
 job-scan review
 ```
+
+## 协议
+
+[MIT](LICENSE) 
