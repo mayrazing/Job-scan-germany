@@ -459,6 +459,10 @@ def setup_page() -> Iterator[object]:
                 "effort": "medium",
                 "thinking_enabled": True,
             },
+            "codex": {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+            },
             "locked": False,
         }
 
@@ -471,12 +475,48 @@ def setup_page() -> Iterator[object]:
                         {
                             "ai_runtime": update["ai_runtime"],
                             "claude": update["claude"],
+                            "codex": update["codex"],
                         }
                     )
                 route.fulfill(
                     status=200,
                     content_type="application/json",
                     body=json.dumps(ai_selection),
+                )
+                return
+            if request.url.endswith("/api/ai/codex-models"):
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        [
+                            {
+                                "id": "gpt-5.6-sol",
+                                "name": "GPT-5.6-Sol",
+                                "default_reasoning_effort": "low",
+                                "supported_reasoning_efforts": [
+                                    "low",
+                                    "medium",
+                                    "high",
+                                    "xhigh",
+                                    "max",
+                                    "ultra",
+                                ],
+                            },
+                            {
+                                "id": "gpt-5.6-luna",
+                                "name": "GPT-5.6-Luna",
+                                "default_reasoning_effort": "medium",
+                                "supported_reasoning_efforts": [
+                                    "low",
+                                    "medium",
+                                    "high",
+                                    "xhigh",
+                                    "max",
+                                ],
+                            },
+                        ]
+                    ),
                 )
                 return
             if request.url.endswith("/api/ai/providers"):
@@ -567,7 +607,7 @@ def test_ai_configuration_modal_saves_one_global_selection(setup_page: object) -
     modal.wait_for(state="visible")
     assert setup_page.locator("#ai-runtime option").evaluate_all(
         "options => options.map(option => option.value)"
-    ) == ["claude-code", "api:deepseek", "api:open-router"]
+    ) == ["claude-code", "codex-cli", "api:deepseek", "api:open-router"]
     assert setup_page.locator("[data-activate-ai-provider]").count() == 0
     assert setup_page.locator("[data-edit-selected-api]").count() == 0
 
@@ -593,8 +633,36 @@ def test_ai_configuration_modal_saves_one_global_selection(setup_page: object) -
                 "effort": "medium",
                 "thinking_enabled": True,
             },
+            "codex": {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+            },
         }
     ]
+
+
+def test_ai_configuration_loads_codex_models_and_supported_efforts(
+    setup_page: object,
+) -> None:
+    setup_page.locator("[data-open-ai-config]").click()
+    setup_page.locator("#ai-runtime").select_option("codex-cli")
+    setup_page.locator("#codex-model-feedback").get_by_text(
+        "2 Codex CLI models available."
+    ).wait_for()
+
+    assert setup_page.evaluate(
+        "Object.keys(document.querySelector('#codex-model').tomselect.options)"
+    ) == ["gpt-5.6-sol", "gpt-5.6-luna"]
+
+    setup_page.locator("#codex-effort").select_option("ultra")
+    setup_page.evaluate(
+        "document.querySelector('#codex-model').tomselect.setValue('gpt-5.6-luna')"
+    )
+
+    assert setup_page.locator("#codex-effort option").evaluate_all(
+        "options => options.map(option => option.value)"
+    ) == ["low", "medium", "high", "xhigh", "max"]
+    assert setup_page.locator("#codex-effort").input_value() == "medium"
 
 
 def test_ai_configuration_modal_is_read_only_while_ai_is_in_use(
@@ -1030,6 +1098,57 @@ def test_job_tracker_source_filter_filters_only_global_jobs(
         "document.querySelector('#global-source-filter').tomselect.setValue(['linkedin'])"
     )
     assert global_card.is_visible()
+
+
+def test_job_tracker_url_filter_matches_normalized_and_partial_urls(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    )
+    url_filter = setup_page.locator("#global-url-filter")
+
+    url_filter.fill(
+        "HTTPS://JOBS.EXAMPLE/global-saved/?utm_source=tracker#application"
+    )
+    assert global_card.is_visible()
+
+    url_filter.fill("global-saved")
+    assert global_card.is_visible()
+
+    url_filter.fill("different-job")
+    assert global_card.is_hidden()
+
+    url_filter.fill("")
+    assert global_card.is_visible()
+
+
+def test_job_tracker_selects_a_new_manual_source_after_cards_refresh(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+
+    setup_page.evaluate(
+        """() => {
+          const original = document.querySelector(
+            '[data-review-block="global"] article[data-job-key="global-saved"]',
+          );
+          const manual = original.cloneNode(true);
+          manual.dataset.jobKey = "manual-saved";
+          manual.dataset.sources = "manual";
+          manual.dataset.jobUrl = "https://careers.example/jobs/manual-saved";
+          original.parentElement.append(manual);
+          document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+        }"""
+    )
+
+    assert setup_page.evaluate(
+        "document.querySelector('#global-source-filter').tomselect.items"
+    ) == ["linkedin", "manual"]
+    assert setup_page.locator('[data-job-key="manual-saved"]').is_visible()
 
 
 def test_review_group_counts_follow_active_filters(setup_page: object) -> None:

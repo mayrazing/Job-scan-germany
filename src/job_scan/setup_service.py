@@ -69,7 +69,7 @@ class SetupAnswers(BaseModel):
     candidate_name: str = Field(default="", max_length=200)
     ai_runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     search_terms: list[str] = Field(min_length=1)
     locations: list[str]
@@ -184,7 +184,7 @@ class SetupService:
                 profile_bytes = profile_markdown.encode("utf-8")
             except UnicodeEncodeError:
                 raise SetupOutputError(
-                    "Claude profile contained invalid Unicode; retry setup."
+                    "AI profile contained invalid Unicode; retry setup."
                 ) from None
             ai_model = _api_model_from_invocation(invocation)
         else:
@@ -334,30 +334,30 @@ class SetupService:
 
 
 def _validated_profile(invocation: ClaudeInvocation) -> str:
-    """Return one strict profile string from bounded successful Claude JSON."""
+    """Return one strict profile string from bounded successful AI JSON."""
     if invocation.exit_code != 0:
-        raise SetupOutputError(_safe_claude_failure(invocation))
+        raise SetupOutputError(_safe_ai_failure(invocation))
     try:
         result = json.loads(invocation.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise SetupOutputError(
-            "Claude returned invalid profile JSON; retry setup."
+            "AI returned invalid profile JSON; retry setup."
         ) from None
     if not isinstance(result, dict):
-        raise SetupOutputError("Claude profile result was not a JSON object; retry setup.")
+        raise SetupOutputError("AI profile result was not a JSON object; retry setup.")
     structured = result.get("structured_output")
     if not isinstance(structured, dict):
         raise SetupOutputError(
-            "Claude profile result lacked structured output; retry setup."
+            "AI profile result lacked structured output; retry setup."
         )
     if set(structured) != {"profile_markdown"}:
         raise SetupOutputError(
-            "Claude profile output had unexpected fields; retry setup."
+            "AI profile output had unexpected fields; retry setup."
         )
     profile = structured["profile_markdown"]
     if not isinstance(profile, str) or not profile.strip():
         raise SetupOutputError(
-            "Claude profile output was empty or invalid; retry setup."
+            "AI profile output was empty or invalid; retry setup."
         )
     _validate_required_sections(profile)
     return profile
@@ -370,22 +370,22 @@ def _api_model_from_invocation(invocation: ClaudeInvocation) -> str | None:
     return None
 
 
-def _safe_claude_failure(invocation: ClaudeInvocation) -> str:
-    """Describe a known Claude CLI failure without echoing private process output."""
+def _safe_ai_failure(invocation: ClaudeInvocation) -> str:
+    """Describe a known AI runtime failure without echoing private process output."""
     stderr = invocation.stderr.decode("utf-8", errors="replace").lower()
     if "model" in stderr and any(
         marker in stderr for marker in ("not available", "unavailable", "invalid")
     ):
-        reason = "the configured Claude model is unavailable"
+        reason = "the configured AI model is unavailable"
     elif any(marker in stderr for marker in ("not logged in", "authentication")):
-        reason = "Claude authentication failed"
+        reason = "AI authentication failed"
     elif any(marker in stderr for marker in ("rate limit", "usage limit")):
-        reason = "the Claude usage limit was reached"
+        reason = "the AI usage limit was reached"
     elif "overloaded" in stderr:
-        reason = "the Claude service is overloaded"
+        reason = "the AI service is overloaded"
     else:
-        reason = "Claude returned an unclassified CLI error"
-    return f"Claude profile generation failed: {reason} (exit code {invocation.exit_code})."
+        reason = "AI returned an unclassified runtime error"
+    return f"AI profile generation failed: {reason} (exit code {invocation.exit_code})."
 
 
 def _validate_required_sections(profile: str) -> None:
@@ -403,7 +403,7 @@ def _validate_required_sections(profile: str) -> None:
     ]
     if missing_or_empty:
         raise SetupOutputError(
-            "Claude profile omitted required non-empty Markdown sections; retry setup."
+            "AI profile omitted required non-empty Markdown sections; retry setup."
         )
 
 

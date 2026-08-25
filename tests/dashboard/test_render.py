@@ -102,26 +102,19 @@ def test_render_contains_review_groups_without_availability_history() -> None:
         ],
     )
 
-    html = render_dashboard(snapshot, snapshot)
+    html = render_dashboard(snapshot)
     soup = BeautifulSoup(html, "html.parser")
 
     assert soup.select_one('meta[name="job-scan-revision"][content="42"]') is not None
     for group_id in (
         "recommended",
-        "saved",
         "pending",
         "excluded",
-        "applied",
-        "interviewing",
-        "offer",
-        "withdrawn",
-        "rejected",
-        "ignored",
     ):
         assert soup.select_one(f"section#{group_id}.job-group") is not None
     assert soup.select_one("#history") is None
     assert soup.select("[data-history-filter], [data-history-kind]") == []
-    assert soup.select_one('#applied [data-job-key="closed-applied"]') is not None
+    assert soup.select_one('[data-job-key="closed-applied"]') is None
     assert soup.select_one('[data-job-key="stale"]') is None
     assert "linkedin" in soup.get_text(" ", strip=True)
     assert "Evidence" in soup.get_text(" ", strip=True)

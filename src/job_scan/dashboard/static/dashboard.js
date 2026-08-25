@@ -143,6 +143,39 @@
     return ["none", "optional"].includes(card.dataset.germanRequirement);
   };
 
+  const trackingQueryKeys = new Set([
+    "fbclid",
+    "gclid",
+    "ref",
+    "referrer",
+    "source",
+  ]);
+
+  const normalizedJobUrl = (value) => {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "") return "";
+    try {
+      const url = new URL(normalized);
+      url.hash = "";
+      [...url.searchParams.keys()].forEach((key) => {
+        if (key.startsWith("utm_") || trackingQueryKeys.has(key)) {
+          url.searchParams.delete(key);
+        }
+      });
+      url.searchParams.sort();
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+      return url.toString();
+    } catch (_error) {
+      return normalized;
+    }
+  };
+
+  const matchesJobUrl = (card, query) => {
+    const normalizedQuery = normalizedJobUrl(query);
+    if (normalizedQuery === "") return true;
+    return normalizedJobUrl(card.dataset.jobUrl || "").includes(normalizedQuery);
+  };
+
   const updateReviewGroupCounts = () => {
     document.querySelectorAll("[data-review-workspace]").forEach((workspace) => {
       workspace.querySelectorAll(".review-groups > .job-group").forEach((group) => {
@@ -166,6 +199,7 @@
     companySizeMinimum,
     companyIndustry,
     languageRequirement,
+    jobUrl = "",
   ) => {
     const selected = new Set(values);
     cards.forEach((card) => {
@@ -176,7 +210,8 @@
         !matchesMinimumScore(card, minimumScore) ||
         !matchesCompanySize(card, companySizeMinimum) ||
         !matchesCompanyIndustry(card, companyIndustry) ||
-        !matchesLanguageRequirement(card, languageRequirement);
+        !matchesLanguageRequirement(card, languageRequirement) ||
+        !matchesJobUrl(card, jobUrl);
     });
     updateReviewGroupCounts();
   };
@@ -307,17 +342,15 @@
   const initializeGlobalSourceFilter = () => {
     const select = document.querySelector("#global-source-filter");
     if (!select) return;
+    const sourceFilter = select.closest(".source-filter");
+    const urlFilter = document.querySelector("#global-url-filter");
     const globalCards = () => [
       ...document.querySelectorAll(
         '[data-review-block="global"] .review-groups [data-sources]',
       ),
     ];
-    const cards = globalCards();
-    const sources = [...new Set(cards.flatMap(cardSources))].sort();
-    if (sources.length === 0) {
-      select.closest(".source-filter").hidden = true;
-      return;
-    }
+    let sources = [...new Set(globalCards().flatMap(cardSources))].sort();
+    sourceFilter.hidden = sources.length === 0;
 
     const selectedSources = new Set(
       restoredSourceFilter(sources, globalSourceFilterKey),
@@ -330,7 +363,35 @@
       select.append(option);
     });
 
+    let control = null;
+    const updateSourceSummary = () => {
+      if (!control) return;
+      const count = control.items.length;
+      control.control.dataset.summary = `${count} source${count === 1 ? "" : "s"} selected`;
+    };
+    const syncSourceOptions = () => {
+      const nextSources = [...new Set(globalCards().flatMap(cardSources))].sort();
+      const nextSourceSet = new Set(nextSources);
+      sources
+        .filter((source) => !nextSourceSet.has(source))
+        .forEach((source) => {
+          control.removeItem(source, true);
+          control.removeOption(source);
+        });
+      const existingSourceSet = new Set(sources);
+      nextSources
+        .filter((source) => !existingSourceSet.has(source))
+        .forEach((source) => {
+          control.addOption({ value: source, text: sourceLabels[source] || source });
+          control.addItem(source, true);
+        });
+      sources = nextSources;
+      sourceFilter.hidden = sources.length === 0;
+      saveSourceFilter(sources, control.items, globalSourceFilterKey);
+      updateSourceSummary();
+    };
     const applyGlobalFilters = () => {
+      syncSourceOptions();
       applyReviewFilters(
         globalCards(),
         control.items,
@@ -339,9 +400,10 @@
         "0",
         "",
         "",
+        urlFilter?.value ?? "",
       );
     };
-    const control = new TomSelect(select, {
+    control = new TomSelect(select, {
       plugins: {
         checkbox_options: {},
       },
@@ -354,10 +416,6 @@
         applyGlobalFilters();
       },
     });
-    const updateSourceSummary = () => {
-      const count = control.items.length;
-      control.control.dataset.summary = `${count} source${count === 1 ? "" : "s"} selected`;
-    };
     control.on("change", updateSourceSummary);
     control.control.addEventListener(
       "click",
@@ -372,6 +430,7 @@
     );
     updateSourceSummary();
     applyGlobalFilters();
+    urlFilter?.addEventListener("input", applyGlobalFilters);
     document.addEventListener("job-scan:review-updated", applyGlobalFilters);
   };
 

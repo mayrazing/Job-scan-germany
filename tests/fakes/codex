@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def write_record(name: str, payload: bytes) -> None:
+    path = os.environ.get(name)
+    if path is not None:
+        Path(path).write_bytes(payload)
+
+
+mode = os.environ.get("FAKE_CODEX_MODE", "success")
+write_record("FAKE_CODEX_ARGV_PATH", json.dumps(sys.argv).encode("utf-8"))
+write_record("FAKE_CODEX_CWD_PATH", os.getcwd().encode("utf-8"))
+
+if "--output-schema" in sys.argv:
+    schema_path = Path(sys.argv[sys.argv.index("--output-schema") + 1])
+    write_record("FAKE_CODEX_SCHEMA_PATH", str(schema_path).encode("utf-8"))
+    write_record("FAKE_CODEX_SCHEMA_CONTENT_PATH", schema_path.read_bytes())
+
+stdin = sys.stdin.buffer.read()
+write_record("FAKE_CODEX_STDIN_PATH", stdin)
+
+if mode == "version":
+    sys.stdout.write("codex-cli 0.149.1\n")
+elif mode == "auth":
+    sys.stdout.write("Logged in using ChatGPT\n")
+elif mode == "models":
+    sys.stdout.write(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.6-sol",
+                        "display_name": "GPT-5.6-Sol",
+                        "default_reasoning_level": "low",
+                        "supported_reasoning_levels": [
+                            {"effort": "low", "description": "Fast"},
+                            {"effort": "high", "description": "Deep"},
+                            {"effort": "ultra", "description": "Maximum"},
+                        ],
+                        "visibility": "list",
+                    },
+                    {
+                        "slug": "hidden-model",
+                        "display_name": "Hidden model",
+                        "default_reasoning_level": "medium",
+                        "supported_reasoning_levels": [
+                            {"effort": "medium", "description": "Balanced"}
+                        ],
+                        "visibility": "hide",
+                    },
+                ]
+            }
+        )
+    )
+elif mode == "success":
+    sys.stdout.write('{"result":"ok"}')
+    sys.stderr.write("fake codex progress")
+elif mode == "nonzero":
+    sys.stderr.write("fake codex failure")
+    raise SystemExit(17)
+elif mode == "invalid-json":
+    sys.stdout.write("{not-json")
+elif mode == "oversized":
+    stream = sys.stderr.buffer if os.environ.get("FAKE_CODEX_STREAM") == "stderr" else sys.stdout.buffer
+    stream.write(b"x" * int(os.environ.get("FAKE_CODEX_OUTPUT_BYTES", "70000")))
+    stream.flush()
+elif mode == "timeout":
+    time.sleep(30)
+else:
+    raise SystemExit(f"unsupported fake mode: {mode}")

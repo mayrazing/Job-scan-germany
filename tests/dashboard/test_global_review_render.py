@@ -163,7 +163,10 @@ def test_job_tracker_card_shows_actual_status_lifecycle_and_expandable_history()
     tracked = JobRecord.model_validate(tracked_data)
 
     page = BeautifulSoup(
-        render_dashboard(_snapshot(_job("recommended")), _snapshot(tracked)),
+        render_console(
+            _snapshot(_job("recommended")),
+            global_snapshot=_snapshot(tracked),
+        ),
         "html.parser",
     )
 
@@ -284,6 +287,22 @@ def test_console_job_tracker_has_manual_job_url_dialog() -> None:
     assert form.select_one('[data-manual-job-error][role="alert"]') is not None
 
 
+def test_console_job_tracker_has_url_filter_and_card_url() -> None:
+    tracked = _snapshot(_job("saved", user=UserStatus.SAVED))
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+
+    global_block = page.select_one('[data-review-block="global"]')
+    assert global_block is not None
+    url_filter = global_block.select_one(
+        'input#global-url-filter[name="global-url-filter"][type="search"]'
+    )
+    assert url_filter is not None
+    assert url_filter.get("placeholder") == "Paste job URL"
+    card = global_block.select_one('[data-job-key="saved"]')
+    assert card is not None
+    assert card.get("data-job-url") == "https://jobs.example/saved"
+
+
 def test_console_job_tracker_omits_resume_block_and_requires_a_new_upload() -> None:
     page = BeautifulSoup(
         render_console(_snapshot(_job("recommended"))),
@@ -306,19 +325,12 @@ def test_console_job_tracker_omits_resume_block_and_requires_a_new_upload() -> N
     assert page.body.get("data-selected-resume-id") is None
 
 
-def test_standalone_job_tracker_omits_resume_selector() -> None:
-    page = BeautifulSoup(
-        render_dashboard(
-            _snapshot(_job("recommended")),
-            _snapshot(_job("saved", user=UserStatus.SAVED)),
-        ),
-        "html.parser",
-    )
+def test_standalone_dashboard_omits_job_tracker() -> None:
+    page = BeautifulSoup(render_dashboard(_snapshot(_job("recommended"))), "html.parser")
 
-    global_block = page.select_one('[data-review-block="global"]')
-    assert global_block is not None
-    assert global_block.select_one(".global-resume-section") is None
-    assert global_block.select_one("[data-global-resume-select]") is None
+    assert page.select_one('[data-review-block="global"]') is None
+    assert page.select_one("[data-open-manual-job]") is None
+    assert page.select_one('[data-review-block="current"]') is not None
 
 
 def test_job_tracker_saved_job_shows_download_and_resume_replacement() -> None:
@@ -559,22 +571,3 @@ def test_job_tracker_preview_omits_unset_salaries() -> None:
         "Expected salary: 5,500 EUR /month"
     )
     assert page.select_one('[data-job-key="empty"] [data-job-preview-salaries]') is None
-
-
-def test_standalone_review_has_manual_job_url_dialog() -> None:
-    page = BeautifulSoup(
-        render_dashboard(
-            _snapshot(_job("recommended")),
-            _snapshot(_job("saved", user=UserStatus.SAVED)),
-        ),
-        "html.parser",
-    )
-
-    global_block = page.select_one('[data-review-block="global"]')
-    assert global_block is not None
-    assert global_block.get("id") == "review"
-    assert global_block.select_one("[data-open-manual-job]") is not None
-    assert global_block.select_one("#manual-job-dialog [data-manual-job-form]") is not None
-    assert global_block.select_one("[data-submit-manual-job]").get_text(
-        " ", strip=True
-    ) == "Import to Saved"

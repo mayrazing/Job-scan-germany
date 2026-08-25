@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from bs4 import BeautifulSoup
 
 from job_scan.ai_config import AiProviderView
+from job_scan.ai_selection import AiRuntimeSelection, CodexRuntimeSelection
 from job_scan.ats_models import (
     AtsCheckBundle,
     AtsFailure,
@@ -768,12 +769,47 @@ def test_console_renders_real_ai_configuration_controls() -> None:
     runtime = modal.select_one("#ai-runtime")
     assert runtime is not None
     assert [option.get("value") for option in runtime.select("option")] == [
-        "claude-code"
+        "claude-code",
+        "codex-cli",
     ]
     assert modal.select_one("[data-save-ai-selection]") is not None
     assert page.select_one("#setup-form > #ai-config") is None
     assert page.select_one("#advanced-settings #ai-runtime") is None
     assert page.select_one("#advanced-settings #claude-batch-size") is not None
+
+
+def test_console_renders_codex_cli_model_and_effort_controls() -> None:
+    page = BeautifulSoup(
+        render_console(
+            ai_selection=AiRuntimeSelection(
+                ai_runtime="codex-cli",
+                codex=CodexRuntimeSelection(
+                    model="gpt-5.6-sol",
+                    effort="high",
+                ),
+            )
+        ),
+        "html.parser",
+    )
+
+    runtime = page.select_one("#ai-runtime option[value='codex-cli'][selected]")
+    settings = page.select_one("#codex-cli-settings")
+    assert runtime is not None
+    assert runtime.get_text(" ", strip=True) == "Codex CLI · gpt-5.6-sol"
+    assert settings is not None and not settings.has_attr("hidden")
+    assert settings.select_one("#codex-model option[selected]").get("value") == (
+        "gpt-5.6-sol"
+    )
+    assert len(settings.select("#codex-model option")) == 1
+    assert [option.get("value") for option in settings.select("#codex-effort option")] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert settings.select_one("#codex-effort option[selected]").get("value") == "high"
 
 
 def test_console_places_enabled_thinking_switch_below_claude_model() -> None:
@@ -853,6 +889,7 @@ def test_console_lists_all_saved_api_providers_as_runtimes_without_activation() 
     }
     assert options == {
         "claude-code": "Claude Code CLI · sonnet",
+        "codex-cli": "Codex CLI · gpt-5.6-sol",
         "api:deepseek": "DeepSeek API · deepseek-chat",
         "api:open-router": "Open Router API · claude-sonnet-4",
     }

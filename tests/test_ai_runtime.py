@@ -49,6 +49,21 @@ def test_runtime_delegates_default_request_to_claude_cli(tmp_path: Path) -> None
     assert cli.requests[0].runtime == "claude-code"
 
 
+def test_runtime_delegates_codex_request_to_codex_cli(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    codex = RecordingInvoker("codex")
+    runtime = AiRuntimeInvoker(
+        paths,
+        claude=RecordingInvoker("claude"),
+        codex=codex,
+    )
+
+    result = runtime.invoke(request("codex-cli"))
+
+    assert result.argv == ["codex"]
+    assert codex.requests[0].runtime == "codex-cli"
+
+
 def test_runtime_loads_selected_provider_for_api_request(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     store = AiProviderStore(paths.ai_config_toml)

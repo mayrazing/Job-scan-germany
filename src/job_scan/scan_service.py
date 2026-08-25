@@ -44,6 +44,7 @@ from job_scan.domain import (
     Snapshot,
     SourceOccurrence,
 )
+from job_scan.global_jobs import GlobalJobStore, filter_untracked_job_records
 from job_scan.http_client import PublicHttpClient
 from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock, LockUnavailable
@@ -161,6 +162,7 @@ class ScanService:
         *,
         repository: JsonlRepository | None = None,
         reviewer: Reviewer | None = None,
+        global_job_store: GlobalJobStore | None = None,
         company_size_service: CompanySizeService | None = None,
         company_industry_service: CompanyIndustryService | None = None,
         source_factory: SourceFactory | None = None,
@@ -176,6 +178,7 @@ class ScanService:
         )
         self._ai_runtime = AiRuntimeInvoker(paths)
         self._reviewer = reviewer or ClaudeReviewer(self._ai_runtime)
+        self._global_jobs = global_job_store or GlobalJobStore(paths)
         self._company_size_service = company_size_service
         self._company_industry_service = company_industry_service
         self._source_factory = source_factory
@@ -346,6 +349,15 @@ class ScanService:
             started_at,
             force=force_review,
         )
+        try:
+            tracker_snapshot = self._global_jobs.load_read_only()
+        except (OSError, UnicodeError, ValueError):
+            pass
+        else:
+            review_jobs = filter_untracked_job_records(
+                review_jobs,
+                tracker_snapshot,
+            )
 
         if progress is not None:
             total_jobs = len(review_jobs)

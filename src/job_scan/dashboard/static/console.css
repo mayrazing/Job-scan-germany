@@ -554,6 +554,10 @@ label > small {
   color: var(--danger);
 }
 
+#codex-model-feedback[data-state="error"] {
+  color: var(--danger);
+}
+
 .ai-editor-actions {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
@@ -765,17 +769,19 @@ label > small {
 }
 
 .job-tracker-filters {
-  grid-template-columns: minmax(0, 16rem) max-content;
+  grid-template-columns: minmax(0, 16rem) minmax(16rem, 1fr) max-content;
   column-gap: clamp(1rem, 3vw, 2rem);
   align-items: end;
 }
 
-.source-filter label {
+.source-filter label,
+.url-filter label {
   display: grid;
   gap: 0.35rem;
 }
 
 .source-filter,
+.url-filter,
 .source-filter .ts-wrapper,
 .source-filter .ts-control {
   min-width: 0;

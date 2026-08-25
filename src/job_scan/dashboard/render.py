@@ -9,7 +9,9 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from job_scan.ai_config import AiProviderView
 from job_scan.ai_selection import (
     AiRuntimeSelection,
+    CodexRuntimeSelection,
     apply_ai_selection_to_claude,
+    claude_runtime_selection_from_settings,
 )
 from job_scan.ats_models import AtsCheckBundle, AtsHistoryEntry
 from job_scan.config import ClaudeSettings, SchedulerSettings
@@ -41,16 +43,12 @@ def _asset_text(name: str) -> str:
 
 def render_dashboard(
     snapshot: Snapshot,
-    global_snapshot: Snapshot | None = None,
 ) -> str:
     """Render one self-contained HTML page derived from a snapshot."""
     template = _environment().get_template("index.html")
     return template.render(
         revision=snapshot.meta.data_revision,
         current_dashboard=build_current_dashboard(snapshot),
-        global_dashboard=build_global_dashboard(
-            global_snapshot or Snapshot(meta=StoreMeta(data_revision=0))
-        ),
         dashboard_css=_asset_text("dashboard.css"),
         dashboard_js=_asset_text("dashboard.js"),
     )
@@ -70,17 +68,28 @@ def render_console(
     """Render the packaged setup page served by the local review server."""
     snapshot = snapshot or Snapshot(meta=StoreMeta(data_revision=0))
     setup_answers = setup_answers or _default_setup_answers()
-    if ai_selection is not None:
-        setup_answers = setup_answers.model_copy(
-            update={
-                "ai_runtime": ai_selection.ai_runtime,
-                "claude": apply_ai_selection_to_claude(
-                    setup_answers.claude,
-                    ai_selection,
-                ),
-            },
-            deep=True,
-        )
+    if ai_selection is None:
+        selection_values: dict[str, object] = {"ai_runtime": setup_answers.ai_runtime}
+        if setup_answers.ai_runtime == "codex-cli":
+            selection_values["codex"] = CodexRuntimeSelection(
+                model=setup_answers.claude.model,
+                effort=setup_answers.claude.effort,
+            )
+        else:
+            selection_values["claude"] = claude_runtime_selection_from_settings(
+                setup_answers.claude
+            )
+        ai_selection = AiRuntimeSelection.model_validate(selection_values)
+    setup_answers = setup_answers.model_copy(
+        update={
+            "ai_runtime": ai_selection.ai_runtime,
+            "claude": apply_ai_selection_to_claude(
+                setup_answers.claude,
+                ai_selection,
+            ),
+        },
+        deep=True,
+    )
     ai_providers = ai_providers or []
     scan_history = scan_history or []
     ats_history = ats_history or []
@@ -93,6 +102,7 @@ def render_console(
         current_dashboard=current_dashboard,
         global_dashboard=global_dashboard,
         setup=setup_answers,
+        ai_selection=ai_selection,
         ai_providers=ai_providers,
         scan_history=scan_history,
         selected_run_id=selected_run_id,

@@ -48,7 +48,7 @@ def migrate_legacy_opencli_settings(value: Any) -> Any:
 
 class ClaudeSettings(BaseModel):
     model: str = Field(min_length=1)
-    effort: Literal["low", "medium", "high"]
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"]
     thinking_enabled: bool = True
     batch_size: int = Field(default=10, gt=0)
     timeout_seconds: int = Field(default=180, gt=0)
@@ -66,7 +66,7 @@ class AppConfig(BaseModel):
     candidate_name: str = Field(default="", max_length=200)
     ai_runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     ai_model: str | None = Field(default=None, min_length=1)
     resume_path: Path
@@ -103,7 +103,7 @@ class AppConfig(BaseModel):
 
     @property
     def selected_model(self) -> str:
-        """Return the actual persisted API model or the legacy Claude CLI model."""
+        """Return the actual persisted API or selected local CLI model."""
         return self.ai_model or self.claude.model
 
 

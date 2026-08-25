@@ -67,7 +67,7 @@ class WebRunState(BaseModel):
     progress_percent: float = Field(ge=0, le=100)
     ai_runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     source_progress: SourceProgress | None = None
     review_progress: ReviewBatchProgress | None = None

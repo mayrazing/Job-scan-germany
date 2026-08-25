@@ -64,13 +64,13 @@ class ClaudeInputError(ClaudeProcessError):
 class ClaudeRequest(BaseModel):
     runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     prompt: str
     json_schema: dict[str, Any]
     model: str
     runtime_model: str | None = Field(default=None, min_length=1, max_length=200)
-    effort: Literal["low", "medium", "high"]
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"]
     thinking_enabled: bool = True
     timeout_seconds: int = Field(gt=0)
     max_output_bytes: int = Field(gt=0)
@@ -235,6 +235,7 @@ class ClaudeProcess:
         timeout_seconds: float,
         max_output_bytes: int,
         env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> _ProcessResult:
         """Start one process, bound both pipes concurrently, and always reap it."""
         started_at = time.monotonic()
@@ -258,6 +259,7 @@ class ClaudeProcess:
                 start_new_session=True,
                 bufsize=0,
                 env=env,
+                cwd=cwd,
             )
             process_group = process.pid
             terminate_group = True

@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from job_scan.ai_config import AiConfigError, AiProviderStore
 from job_scan.config import AppConfig, ClaudeSettings
 
+ClaudeReasoningEffort = Literal["low", "medium", "high"]
+
 
 class AiSelectionError(RuntimeError):
     """Report one safe global AI-selection persistence failure."""
@@ -24,8 +26,17 @@ class ClaudeRuntimeSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(default="sonnet", min_length=1, max_length=200)
-    effort: Literal["low", "medium", "high"] = "medium"
+    effort: ClaudeReasoningEffort = "medium"
     thinking_enabled: bool = True
+
+
+class CodexRuntimeSelection(BaseModel):
+    """Store the global Codex CLI controls shown in AI configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(default="gpt-5.6-sol", min_length=1, max_length=200)
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] = "high"
 
 
 class AiRuntimeSelection(BaseModel):
@@ -35,9 +46,26 @@ class AiRuntimeSelection(BaseModel):
 
     ai_runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     claude: ClaudeRuntimeSelection = Field(default_factory=ClaudeRuntimeSelection)
+    codex: CodexRuntimeSelection = Field(default_factory=CodexRuntimeSelection)
+
+
+def claude_runtime_selection_from_settings(
+    settings: ClaudeSettings,
+) -> ClaudeRuntimeSelection:
+    """Build Claude controls without carrying Codex-only effort values across."""
+    effort: ClaudeReasoningEffort = "medium"
+    if settings.effort == "low":
+        effort = "low"
+    elif settings.effort == "high":
+        effort = "high"
+    return ClaudeRuntimeSelection(
+        model=settings.model,
+        effort=effort,
+        thinking_enabled=settings.thinking_enabled,
+    )
 
 
 class AiSelectionStore:
@@ -95,11 +123,16 @@ def apply_ai_selection_to_claude(
     selection: AiRuntimeSelection,
 ) -> ClaudeSettings:
     """Overlay global model controls while retaining non-model scan limits."""
+    selected = selection.codex if selection.ai_runtime == "codex-cli" else selection.claude
+    update: dict[str, object] = {
+        "model": selected.model,
+        "effort": selected.effort,
+    }
+    if isinstance(selected, ClaudeRuntimeSelection):
+        update["thinking_enabled"] = selected.thinking_enabled
     return current.model_copy(
         update={
-            "model": selection.claude.model,
-            "effort": selection.claude.effort,
-            "thinking_enabled": selection.claude.thinking_enabled,
+            **update,
         }
     )
 
@@ -123,17 +156,15 @@ def ai_selection_from_config(
     providers: AiProviderStore,
 ) -> AiRuntimeSelection:
     """Migrate the current valid setup model into the global selection shape."""
-    return resolve_ai_selection(
-        AiRuntimeSelection(
-            ai_runtime=current.ai_runtime,
-            claude=ClaudeRuntimeSelection(
-                model=current.claude.model,
-                effort=current.claude.effort,
-                thinking_enabled=current.claude.thinking_enabled,
-            ),
-        ),
-        providers,
-    )
+    values: dict[str, object] = {"ai_runtime": current.ai_runtime}
+    if current.ai_runtime == "codex-cli":
+        values["codex"] = CodexRuntimeSelection(
+            model=current.claude.model,
+            effort=current.claude.effort,
+        )
+    else:
+        values["claude"] = claude_runtime_selection_from_settings(current.claude)
+    return resolve_ai_selection(AiRuntimeSelection.model_validate(values), providers)
 
 
 def apply_ai_selection_to_config(

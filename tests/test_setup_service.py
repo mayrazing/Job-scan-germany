@@ -528,9 +528,25 @@ def test_nonzero_claude_result_reports_known_safe_failure_reason(tmp_path: Path)
     with pytest.raises(SetupError) as captured:
         SetupService(paths, fake).run(RESUME, valid_answers())
 
-    assert "configured Claude model is unavailable" in str(captured.value)
+    assert "configured AI model is unavailable" in str(captured.value)
     assert not paths.profile_md.exists()
     assert not paths.config_toml.exists()
+
+
+def test_nonzero_codex_result_uses_runtime_neutral_safe_failure(tmp_path: Path) -> None:
+    paths = paths_at(tmp_path)
+    fake = FakeClaude(
+        argv=["codex", "exec"],
+        exit_code=1,
+        stderr=b"Error: configured model is not available for this account",
+    )
+    answers = valid_answers().model_copy(update={"ai_runtime": "codex-cli"})
+
+    with pytest.raises(SetupError) as captured:
+        SetupService(paths, fake).run(RESUME, answers)
+
+    assert "configured AI model is unavailable" in str(captured.value)
+    assert "Claude" not in str(captured.value)
 
 
 @pytest.mark.parametrize(

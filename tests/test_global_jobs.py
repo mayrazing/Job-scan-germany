@@ -18,7 +18,7 @@ from job_scan.domain import (
     UserStatus,
     UserStatusHistoryEntry,
 )
-from job_scan.global_jobs import GlobalJobStore
+from job_scan.global_jobs import GlobalJobStore, filter_untracked_jobs
 from job_scan.paths import AppPaths
 from job_scan.repository import parse_snapshot, serialize_snapshot
 
@@ -706,6 +706,21 @@ def test_loading_old_active_job_persists_its_first_known_status_event(
     )
 
 
+def test_read_only_load_does_not_persist_legacy_migration(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    old_job = _job("job-1", status=UserStatus.INTERVIEWING, status_at=NOW)
+    original = serialize_snapshot(_snapshot(old_job))
+    paths.global_jobs_jsonl.write_bytes(original)
+
+    loaded = store.load_read_only()
+
+    assert [entry.status for entry in loaded.jobs[0].user_status_history] == [
+        UserStatus.INTERVIEWING
+    ]
+    assert paths.global_jobs_jsonl.read_bytes() == original
+
+
 def test_tracker_timestamps_are_timezone_aware_and_normalized_to_utc(
     store: GlobalJobStore,
 ) -> None:
@@ -872,46 +887,27 @@ def test_mutate_details_rejects_global_job_removal(store: GlobalJobStore) -> Non
     assert [job.canonical_job_key for job in store.load().jobs] == ["job-1"]
 
 
-def test_overlay_copies_global_status_without_changing_input(store: GlobalJobStore) -> None:
-    global_job = _job(
-        "global-key",
-        external_ids=("shared",),
-        status=UserStatus.REJECTED,
-        status_at=NOW + timedelta(minutes=1),
+def test_filter_untracked_jobs_returns_copy_without_changing_inputs() -> None:
+    tracked_review = _job("review-tracked", external_ids=("shared",))
+    untracked_review = _job("review-untracked", external_ids=("untracked",))
+    review = _snapshot(tracked_review, untracked_review)
+    tracker = _snapshot(
+        _job(
+            "tracker",
+            external_ids=("shared",),
+            status=UserStatus.SAVED,
+        )
     )
-    store.import_snapshots([_snapshot(global_job)])
-    incoming = _snapshot(_job("local-key", external_ids=("shared",)))
+    review_before = review.model_copy(deep=True)
+    tracker_before = tracker.model_copy(deep=True)
 
-    overlaid = store.overlay(incoming)
+    filtered = filter_untracked_jobs(review, tracker)
 
-    assert overlaid is not incoming
-    assert overlaid.jobs[0] is not incoming.jobs[0]
-    assert overlaid.jobs[0].user_status is UserStatus.REJECTED
-    assert overlaid.jobs[0].user_status_updated_at == NOW + timedelta(minutes=1)
-    assert incoming.jobs[0].user_status is UserStatus.NEW
-
-
-def test_overlay_copies_application_resume_without_changing_input(
-    store: GlobalJobStore,
-) -> None:
-    job = _job("global-key", external_ids=("shared",))
-    resume_id = "sha256:" + "1" * 64
-    store.set_status(
-        job,
-        UserStatus.APPLIED,
-        NOW,
-        resume_id=resume_id,
-        profile_hash="sha256:" + "a" * 64,
-    )
-    tracked = store.find("global-key")
-    assert tracked is not None
-    store.set_application_resume(tracked, resume_id, "resume.pdf")
-    incoming = _snapshot(_job("local-key", external_ids=("shared",)))
-
-    overlaid = store.overlay(incoming)
-
-    assert overlaid.jobs[0].application_resume_id == resume_id
-    assert incoming.jobs[0].application_resume_id is None
+    assert [job.canonical_job_key for job in filtered.jobs] == ["review-untracked"]
+    assert filtered is not review
+    assert filtered.jobs[0] is not review.jobs[1]
+    assert review == review_before
+    assert tracker == tracker_before
 
 
 def test_set_status_rejects_new(store: GlobalJobStore) -> None:

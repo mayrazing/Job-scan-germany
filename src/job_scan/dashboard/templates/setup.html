@@ -52,7 +52,8 @@
                 <label class="field-wide runtime-picker">
                   <span class="field-label">AI runtime and model</span>
                   <select class="form-select" id="ai-runtime" name="ai-runtime" data-ai-config-control>
-                    <option value="claude-code"{% if setup.ai_runtime == 'claude-code' %} selected{% endif %}>Claude Code CLI · {{ setup.claude.model }}</option>
+                    <option value="claude-code"{% if setup.ai_runtime == 'claude-code' %} selected{% endif %}>Claude Code CLI · {{ ai_selection.claude.model }}</option>
+                    <option value="codex-cli"{% if setup.ai_runtime == 'codex-cli' %} selected{% endif %}>Codex CLI · {{ ai_selection.codex.model }}</option>
                     {% for provider in ai_providers %}
                     <option value="api:{{ provider.id }}"{% if setup.ai_runtime == 'api:' ~ provider.id %} selected{% endif %}>{{ provider.display_name }} API · {{ provider.model }}</option>
                     {% endfor %}
@@ -65,12 +66,12 @@
                       <span class="field-label">Claude Code model</span>
                       {% set claude_models = ['sonnet', 'opus', 'haiku'] %}
                       <select class="form-select" id="claude-model" name="claude-model" data-search-select data-create="true" data-ai-config-control required>
-                        {% if setup.claude.model not in claude_models %}<option selected>{{ setup.claude.model }}</option>{% endif %}
-                        {% for option in claude_models %}<option{% if option == setup.claude.model %} selected{% endif %}>{{ option }}</option>{% endfor %}
+                        {% if ai_selection.claude.model not in claude_models %}<option selected>{{ ai_selection.claude.model }}</option>{% endif %}
+                        {% for option in claude_models %}<option{% if option == ai_selection.claude.model %} selected{% endif %}>{{ option }}</option>{% endfor %}
                       </select>
                     </label>
                     <div class="form-check form-switch mt-3">
-                      <input class="form-check-input" id="claude-thinking-enabled" name="claude-thinking-enabled" type="checkbox" role="switch" data-ai-config-control{% if setup.claude.thinking_enabled %} checked{% endif %}>
+                      <input class="form-check-input" id="claude-thinking-enabled" name="claude-thinking-enabled" type="checkbox" role="switch" data-ai-config-control{% if ai_selection.claude.thinking_enabled %} checked{% endif %}>
                       <label class="form-check-label" for="claude-thinking-enabled">Claude Code thinking</label>
                       <span class="form-text d-block">Allow Claude to think before answering.</span>
                     </div>
@@ -78,9 +79,26 @@
                   <label>
                     <span class="field-label">Claude Code effort</span>
                     <select class="form-select" id="claude-effort" name="claude-effort" data-ai-config-control>
-                      <option{% if setup.claude.effort == 'low' %} selected{% endif %}>low</option>
-                      <option{% if setup.claude.effort == 'medium' %} selected{% endif %}>medium</option>
-                      <option{% if setup.claude.effort == 'high' %} selected{% endif %}>high</option>
+                      <option{% if ai_selection.claude.effort == 'low' %} selected{% endif %}>low</option>
+                      <option{% if ai_selection.claude.effort == 'medium' %} selected{% endif %}>medium</option>
+                      <option{% if ai_selection.claude.effort == 'high' %} selected{% endif %}>high</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-wide runtime-settings field-grid" id="codex-cli-settings"{% if setup.ai_runtime != 'codex-cli' %} hidden{% endif %}>
+                  <label>
+                    <span class="field-label">Codex CLI model</span>
+                    <select class="form-select" id="codex-model" name="codex-model" data-search-select data-create="true" data-ai-config-control required>
+                      <option value="{{ ai_selection.codex.model }}" selected>{{ ai_selection.codex.model }}</option>
+                    </select>
+                    <span class="form-text d-block" id="codex-model-feedback" role="status" aria-live="polite">Uses the account already connected by codex login.</span>
+                  </label>
+                  <label>
+                    <span class="field-label">Codex CLI reasoning effort</span>
+                    <select class="form-select" id="codex-effort" name="codex-effort" data-ai-config-control>
+                      {% for effort in ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] %}
+                      <option value="{{ effort }}"{% if ai_selection.codex.effort == effort %} selected{% endif %}>{{ effort }}</option>
+                      {% endfor %}
                     </select>
                   </label>
                 </div>
@@ -564,6 +582,12 @@
                     <label for="global-source-filter">
                       <span class="field-label">Search sources</span>
                       <select class="form-select" id="global-source-filter" name="global-source-filter" multiple aria-describedby="source-filter-help"></select>
+                    </label>
+                  </div>
+                  <div class="url-filter">
+                    <label for="global-url-filter">
+                      <span class="field-label">Job URL</span>
+                      <input class="form-control" id="global-url-filter" name="global-url-filter" type="search" inputmode="url" autocomplete="off" placeholder="Paste job URL">
                     </label>
                   </div>
                   {{ manual_job_import() }}

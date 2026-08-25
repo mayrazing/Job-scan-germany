@@ -2,6 +2,14 @@
 
 **[中文](#中文)**
 
+## Product tour / 产品展示
+
+AI configuration and the six-step workflow play automatically in order, with each screen shown for 2.5 seconds. AI 配置和完整 6 步流程按顺序自动播放, 每个界面展示 2.5 秒.
+
+<p align="center">
+  <a href="assets/product-tour/product-tour.gif"><img src="assets/product-tour/product-tour.gif" alt="Animated product tour" width="70%"></a>
+</p>
+
 ## English
 
 `job-scan` is a local job discovery and review tool for Germany. It searches for jobs based on your resume, target roles, and preferred locations, removes duplicate listings, uses AI to review complete job descriptions, and presents eligible, uncertain, and excluded jobs in a browser.
@@ -12,7 +20,7 @@ The project searches only for jobs in Germany and assumes that the candidate nee
 
 - Searches Bundesagentur für Arbeit, LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, and Simplify.
 - Builds a candidate profile from a PDF or DOCX resume.
-- Uses Claude Code or an Anthropic-compatible API to compare jobs with the resume.
+- Uses Claude Code, Codex CLI, or an Anthropic-compatible API to compare jobs with the resume.
 - Lets you review, filter, and track jobs in a local web interface.
 - Keeps a separate history record for each web search.
 - Optionally runs a daily scan.
@@ -24,6 +32,7 @@ The project searches only for jobs in Germany and assumes that the candidate nee
 - A text-based PDF or DOCX resume. OCR for scanned PDFs is not supported.
 - One AI runtime:
   - Claude Code CLI, installed and authenticated.
+  - Codex CLI, installed and authenticated with ChatGPT or an API key.
   - An Anthropic-compatible API endpoint, model, and API key.
 - To search LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland, or Simplify:
   - OpenCLI and its Browser Bridge extension.
@@ -54,6 +63,15 @@ claude --version
 claude auth status
 ```
 
+If you use Codex CLI, confirm that it is installed and authenticated:
+
+```bash
+codex --version
+codex login status
+```
+
+`job-scan` reuses the login managed by Codex CLI. It does not copy the Codex authentication file. AI requests run through `codex exec` with shell access disabled and a read-only sandbox.
+
 ### Start the app
 
 Keep the Python virtual environment active, then run:
@@ -70,7 +88,7 @@ The terminal prints the Setup URL. Open it in a browser:
 On first use:
 
 1. Upload a PDF or DOCX resume.
-2. Select Claude Code or configure an Anthropic-compatible API.
+2. Select Claude Code, Codex CLI, or configure an Anthropic-compatible API.
 3. Enter job titles, locations, German level, and job sources.
 4. Optionally set a daily scan time.
 5. Submit the setup and wait for the scan to finish.
@@ -113,7 +131,7 @@ job-scan review
 
 - 搜索德国联邦就业局, LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland 和 Simplify 的职位.
 - 从 PDF 或 DOCX 简历生成求职画像.
-- 使用 Claude Code 或 Anthropic-compatible API 分析职位与简历的匹配情况.
+- 使用 Claude Code, Codex CLI 或 Anthropic-compatible API 分析职位与简历的匹配情况.
 - 在本地网页中查看, 筛选和跟踪职位.
 - 保存每次网页搜索的独立历史记录.
 - 可选配置每日自动扫描.
@@ -125,6 +143,7 @@ job-scan review
 - 文本型 PDF 或 DOCX 简历. 扫描图片型 PDF 不支持 OCR.
 - 以下 AI 运行方式任选一种:
   - 已安装并登录的 Claude Code CLI.
+  - 已安装并通过 ChatGPT 或 API key 登录的 Codex CLI.
   - 可用的 Anthropic-compatible API 地址, 模型和 API key.
 - 搜索 LinkedIn, Indeed Deutschland, StepStone, Glassdoor Deutschland 或 Simplify 时, 还需要:
   - 已安装 OpenCLI 及其 Browser Bridge 扩展.
@@ -155,6 +174,15 @@ claude --version
 claude auth status
 ```
 
+如果使用 Codex CLI, 启动前确认它已安装并登录:
+
+```bash
+codex --version
+codex login status
+```
+
+`job-scan` 直接复用 Codex CLI 管理的登录状态, 不会复制 Codex 登录文件. AI 请求通过 `codex exec` 执行, 命令执行能力被关闭, 沙箱为只读模式.
+
 ### 启动
 
 保持 Python 虚拟环境已激活, 然后运行:
@@ -171,7 +199,7 @@ job-scan review
 首次使用时:
 
 1. 上传 PDF 或 DOCX 简历.
-2. 选择 Claude Code 或配置 Anthropic-compatible API.
+2. 选择 Claude Code, Codex CLI 或配置 Anthropic-compatible API.
 3. 填写职位关键词, 地点, 德语水平和职位来源.
 4. 可选设置每日扫描时间.
 5. 提交设置并等待扫描完成.

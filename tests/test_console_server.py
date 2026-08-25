@@ -32,6 +32,7 @@ from job_scan.ats_workflow import (
     AtsWorkflowBusy,
     AtsWorkflowInput,
 )
+from job_scan.codex_process import CodexModelOption
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings, save_config
 from job_scan.dashboard.render import render_dashboard
 from job_scan.domain import AvailabilityStatus, JobRecord, MachineStatus, UserStatus
@@ -755,6 +756,22 @@ class RecordingDiscovery:
         ]
 
 
+CODEX_MODELS = [
+    CodexModelOption(
+        id="gpt-5.6-sol",
+        name="GPT-5.6-Sol",
+        default_reasoning_effort="low",
+        supported_reasoning_efforts=["low", "medium", "high", "ultra"],
+    ),
+    CodexModelOption(
+        id="gpt-5.6-luna",
+        name="GPT-5.6-Luna",
+        default_reasoning_effort="medium",
+        supported_reasoning_efforts=["low", "medium", "high", "xhigh", "max"],
+    ),
+]
+
+
 @pytest.fixture
 def ai_console_client(
     tmp_path: Path,
@@ -772,6 +789,7 @@ def ai_console_client(
         workflow=workflow,  # type: ignore[arg-type]
         ai_store=store,
         ai_model_discovery=discovery,  # type: ignore[arg-type]
+        codex_model_discovery=lambda: CODEX_MODELS,
     )
     with TestClient(app, base_url=ORIGIN) as client:
         yield client, store, discovery
@@ -846,7 +864,54 @@ def test_ai_configuration_api_persists_the_selected_runtime_and_cli_model(
             "effort": "high",
             "thinking_enabled": False,
         },
+        "codex": {
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+        },
         "locked": False,
+    }
+    assert client.get("/api/ai/config").json() == response.json()
+
+
+def test_ai_configuration_api_lists_codex_cli_models(
+    ai_console_client: tuple[TestClient, AiProviderStore, RecordingDiscovery],
+) -> None:
+    client, _store, _discovery = ai_console_client
+
+    response = client.get("/api/ai/codex-models")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == [model.model_dump(mode="json") for model in CODEX_MODELS]
+
+
+def test_ai_configuration_api_persists_codex_cli_selection(
+    ai_console_client: tuple[TestClient, AiProviderStore, RecordingDiscovery],
+) -> None:
+    client, _store, _discovery = ai_console_client
+    open_console(client)
+
+    response = client.put(
+        "/api/ai/config",
+        json={
+            "ai_runtime": "codex-cli",
+            "claude": {
+                "model": "opus",
+                "effort": "medium",
+                "thinking_enabled": True,
+            },
+            "codex": {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+            },
+        },
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ai_runtime"] == "codex-cli"
+    assert response.json()["codex"] == {
+        "model": "gpt-5.6-sol",
+        "effort": "high",
     }
     assert client.get("/api/ai/config").json() == response.json()
 
@@ -884,6 +949,10 @@ def test_ai_configuration_api_falls_back_when_selected_provider_is_missing(
             "model": "haiku",
             "effort": "low",
             "thinking_enabled": False,
+        },
+        "codex": {
+            "model": "gpt-5.6-sol",
+            "effort": "high",
         },
         "locked": False,
     }

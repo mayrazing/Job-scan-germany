@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from job_scan.ai_config import AiConfigError, AiProviderStore
 from job_scan.claude_process import ClaudeProcess, ClaudeProcessError
+from job_scan.codex_process import CodexProcess
 from job_scan.config import AppConfig, load_config
 from job_scan.http_client import PublicHttpClient
 from job_scan.paths import AppPaths
@@ -222,6 +223,16 @@ def _check_ai_runtime(paths: AppPaths, config: AppConfig | None) -> DoctorCheck:
             status="ok",
             message=f"API runtime is configured: {provider.display_name} / {provider.model}.",
         )
+    if config is not None and config.ai_runtime == "codex-cli":
+        try:
+            version = CodexProcess().version()
+        except ClaudeProcessError as error:
+            return DoctorCheck(name="claude_version", status="error", message=str(error))
+        return DoctorCheck(
+            name="claude_version",
+            status="ok",
+            message=f"Codex CLI version is available: {version}.",
+        )
     try:
         version = ClaudeProcess().version()
     except ClaudeProcessError as error:
@@ -246,6 +257,16 @@ def _check_ai_credentials(paths: AppPaths, config: AppConfig | None) -> DoctorCh
             name="claude_auth",
             status="ok",
             message="Selected API runtime has a saved API key.",
+        )
+    if config is not None and config.ai_runtime == "codex-cli":
+        try:
+            CodexProcess().auth_status()
+        except ClaudeProcessError as error:
+            return DoctorCheck(name="claude_auth", status="error", message=str(error))
+        return DoctorCheck(
+            name="claude_auth",
+            status="ok",
+            message="Codex CLI is authenticated.",
         )
     try:
         ClaudeProcess().auth_status()

@@ -30,7 +30,7 @@ class ResumeSuggestionSettings(BaseModel):
 
     ai_runtime: str = Field(
         default="claude-code",
-        pattern=r"^(?:claude-code|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
+        pattern=r"^(?:claude-code|codex-cli|api:[a-z0-9]+(?:-[a-z0-9]+)*)$",
     )
     claude: ClaudeSettings
 

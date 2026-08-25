@@ -56,6 +56,10 @@
   const aiSelectionFeedback = document.querySelector("#ai-selection-feedback");
   const saveAiSelectionButton = document.querySelector("[data-save-ai-selection]");
   const claudeCodeSettings = document.querySelector("#claude-code-settings");
+  const codexCliSettings = document.querySelector("#codex-cli-settings");
+  const codexModelSelect = document.querySelector("#codex-model");
+  const codexEffortSelect = document.querySelector("#codex-effort");
+  const codexModelFeedback = document.querySelector("#codex-model-feedback");
   const apiModelSettings = document.querySelector("#api-model-settings");
   const apiModelSummary = document.querySelector("#api-model-summary");
   const apiModelEffort = document.querySelector("#api-model-effort");
@@ -107,6 +111,7 @@
   let scheduledTime = "";
   let reviewNeedsRefresh = false;
   let aiProviders = [];
+  let codexModels = [];
   let editingProviderId = null;
   let resumeSuggestionRequest = null;
   let atsStartInFlight = false;
@@ -124,8 +129,21 @@
     "search-terms": "Search or add a role",
     locations: "Search German cities",
     "claude-model": "Search or type a model",
+    "codex-model": "Search or type a model",
     "ai-provider-model": "Fetch or type a model",
   };
+
+  const selectedCliSettings = () => aiRuntime.value === "codex-cli"
+    ? {
+      model: codexModelSelect.tomselect.getValue(),
+      effort: codexEffortSelect.value,
+      thinking_enabled: true,
+    }
+    : {
+      model: document.querySelector("#claude-model").tomselect.getValue(),
+      effort: document.querySelector("#claude-effort").value,
+      thinking_enabled: document.querySelector("#claude-thinking-enabled").checked,
+    };
 
   const resumeSuggestionContainers = {
     "search-terms": "#search-term-suggestions",
@@ -227,9 +245,7 @@
     payload.append("settings", JSON.stringify({
       ai_runtime: aiRuntime.value,
       claude: {
-        model: document.querySelector("#claude-model").tomselect.getValue(),
-        effort: document.querySelector("#claude-effort").value,
-        thinking_enabled: document.querySelector("#claude-thinking-enabled").checked,
+        ...selectedCliSettings(),
         batch_size: Number(document.querySelector("#claude-batch-size").value),
       },
     }));
@@ -285,7 +301,7 @@
     if (aiProviders.length === 0) {
       const empty = document.createElement("p");
       empty.className = "ai-provider-empty";
-      empty.textContent = "No API models configured. Claude Code CLI remains available.";
+      empty.textContent = "No API models configured. Claude Code and Codex CLI remain available.";
       aiProviderList.append(empty);
       return;
     }
@@ -341,7 +357,9 @@
     const optionName = runtimeOption?.textContent?.split(" · ")[0];
     return selected
       ? `${selected.display_name} API`
-      : runtime === "claude-code" ? "Claude Code" : optionName || "AI";
+      : runtime === "claude-code"
+        ? "Claude Code"
+        : runtime === "codex-cli" ? "Codex CLI" : optionName || "AI";
   };
 
   const syncRunReviewLabel = () => {
@@ -364,7 +382,8 @@
     ) ? previousValue : "claude-code";
     const selected = selectedAiProvider();
     const useApi = selected !== null;
-    claudeCodeSettings.hidden = Boolean(useApi);
+    claudeCodeSettings.hidden = aiRuntime.value !== "claude-code";
+    codexCliSettings.hidden = aiRuntime.value !== "codex-cli";
     apiModelSettings.hidden = !useApi;
     if (selected) {
       apiModelSummary.textContent = `${selected.display_name} · ${selected.model}`;
@@ -382,6 +401,57 @@
     });
     control.refreshOptions(false);
     control.setValue(selected, true);
+  };
+
+  const setCodexEfforts = (modelId, preferredEffort = codexEffortSelect.value) => {
+    const model = codexModels.find((option) => option.id === modelId);
+    if (!model) return;
+    const supported = model.supported_reasoning_efforts;
+    codexEffortSelect.replaceChildren(...supported.map((effort) => {
+      const option = document.createElement("option");
+      option.value = effort;
+      option.textContent = effort;
+      return option;
+    }));
+    codexEffortSelect.value = supported.includes(preferredEffort)
+      ? preferredEffort
+      : supported.includes(model.default_reasoning_effort)
+        ? model.default_reasoning_effort
+        : supported[0];
+  };
+
+  const setCodexModels = (models) => {
+    codexModels = models;
+    const control = codexModelSelect.tomselect;
+    const selected = control.getValue();
+    const selectedEffort = codexEffortSelect.value;
+    control.clearOptions();
+    models.forEach((model) => {
+      const text = model.name === model.id ? model.id : `${model.name} · ${model.id}`;
+      control.addOption({ value: model.id, text });
+    });
+    if (selected && !control.options[selected]) {
+      control.addOption({ value: selected, text: selected });
+    }
+    control.refreshOptions(false);
+    control.setValue(selected || models[0]?.id || "", true);
+    setCodexEfforts(control.getValue(), selectedEffort);
+    codexModelFeedback.textContent = `${models.length} Codex CLI models available.`;
+    codexModelFeedback.removeAttribute("data-state");
+  };
+
+  const loadCodexModels = async () => {
+    try {
+      const response = await fetch("/api/ai/codex-models", {
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      setCodexModels(await response.json());
+    } catch (_error) {
+      codexModelFeedback.textContent =
+        "Could not load Codex CLI models. The saved model is still available.";
+      codexModelFeedback.dataset.state = "error";
+    }
   };
 
   const openAiEditor = (provider = null) => {
@@ -441,6 +511,15 @@
     document.querySelector("#claude-effort").value = state.claude.effort;
     document.querySelector("#claude-thinking-enabled").checked =
       state.claude.thinking_enabled;
+    const codexModel = codexModelSelect.tomselect;
+    if (!codexModel.options[state.codex.model]) {
+      codexModel.addOption({ value: state.codex.model, text: state.codex.model });
+    }
+    codexModel.setValue(state.codex.model, true);
+    setCodexEfforts(state.codex.model, state.codex.effort);
+    if (!codexModels.some((model) => model.id === state.codex.model)) {
+      codexEffortSelect.value = state.codex.effort;
+    }
     aiRuntime.value = state.ai_runtime;
     syncAiRuntime();
     setAiConfigurationLocked(state.locked);
@@ -470,6 +549,10 @@
             model: document.querySelector("#claude-model").tomselect.getValue(),
             effort: document.querySelector("#claude-effort").value,
             thinking_enabled: document.querySelector("#claude-thinking-enabled").checked,
+          },
+          codex: {
+            model: codexModelSelect.tomselect.getValue(),
+            effort: codexEffortSelect.value,
           },
         }),
       });
@@ -701,9 +784,7 @@
     minimum_company_size: document.querySelector("#minimum-company-size").value,
     german_level: document.querySelector("#german-level").tomselect.getValue(),
     claude: {
-      model: document.querySelector("#claude-model").tomselect.getValue(),
-      effort: document.querySelector("#claude-effort").value,
-      thinking_enabled: document.querySelector("#claude-thinking-enabled").checked,
+      ...selectedCliSettings(),
       batch_size: document.querySelector("#claude-batch-size").value,
     },
     scheduler: { local_time: scanTime.value },
@@ -1129,7 +1210,7 @@
   aiConfigModal.addEventListener("show.bs.modal", () => {
     aiSelectionFeedback.textContent = "";
     setAiConfigurationControlsDisabled(true);
-    loadAiConfiguration().catch((error) => {
+    loadAiConfiguration().then(loadCodexModels).catch((error) => {
       aiSelectionFeedback.textContent =
         error.message || "Could not load AI configuration.";
       setAiConfigurationControlsDisabled(true);
@@ -1147,6 +1228,11 @@
   document.querySelector("#claude-model").tomselect.on("change", (model) => {
     const option = aiRuntime.querySelector("option[value='claude-code']");
     option.textContent = `Claude Code CLI · ${model}`;
+  });
+  codexModelSelect.tomselect.on("change", (model) => {
+    setCodexEfforts(model);
+    const option = aiRuntime.querySelector("option[value='codex-cli']");
+    option.textContent = `Codex CLI · ${model}`;
   });
 
   document.querySelector("[data-add-ai-provider]").addEventListener("click", () => {

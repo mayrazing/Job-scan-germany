@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from job_scan import cli
 from job_scan.ai_config import AiProviderDraft, AiProviderStore
 from job_scan.claude_process import ClaudeAuthStatus, ClaudeProcessError
+from job_scan.codex_process import CodexAuthStatus
 from job_scan.config import (
     AppConfig,
     ClaudeSettings,
@@ -31,6 +32,14 @@ class HealthyClaude:
 
     def auth_status(self) -> ClaudeAuthStatus:
         return ClaudeAuthStatus(authenticated=True, account_label="test")
+
+
+class HealthyCodex:
+    def version(self) -> str:
+        return "codex-cli 0.149.1"
+
+    def auth_status(self) -> CodexAuthStatus:
+        return CodexAuthStatus(authenticated=True)
 
 
 def _config(resume_path: Path) -> AppConfig:
@@ -195,6 +204,29 @@ def test_doctor_checks_saved_api_runtime_without_calling_claude(
 
     assert checks["claude_version"].status == "ok"
     assert checks["claude_auth"].status == "ok"
+
+
+def test_doctor_checks_codex_cli_version_and_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from job_scan import doctor
+
+    paths = _ready_paths(tmp_path)
+    current = load_config(paths.config_toml).model_copy(
+        update={"ai_runtime": "codex-cli"}
+    )
+    save_config(paths.config_toml, current)
+    monkeypatch.setattr(doctor, "CodexProcess", HealthyCodex)
+
+    checks = _checks_by_name(doctor.run_doctor(paths))
+
+    assert checks["claude_version"].status == "ok"
+    assert checks["claude_version"].message == (
+        "Codex CLI version is available: codex-cli 0.149.1."
+    )
+    assert checks["claude_auth"].status == "ok"
+    assert checks["claude_auth"].message == "Codex CLI is authenticated."
 
 
 def test_unsupported_scheduler_error(

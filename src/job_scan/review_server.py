@@ -43,9 +43,11 @@ from job_scan.ai_selection import (
     AiSelectionError,
     AiSelectionStore,
     ClaudeRuntimeSelection,
+    CodexRuntimeSelection,
     ai_selection_from_config,
     apply_ai_selection_to_claude,
     apply_ai_selection_to_config,
+    claude_runtime_selection_from_settings,
     resolve_ai_selection,
 )
 from job_scan.anthropic_api import (
@@ -63,6 +65,7 @@ from job_scan.ats_workflow import (
     AtsWorkflowBusy,
     AtsWorkflowInput,
 )
+from job_scan.codex_process import CodexModelOption, CodexProcess, CodexProcessError
 from job_scan.company_size import (
     AiCompanySizeLookup,
     CompanySizeEvidence,
@@ -83,7 +86,11 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
-from job_scan.global_jobs import GLOBAL_USER_STATUSES, GlobalJobStore
+from job_scan.global_jobs import (
+    GLOBAL_USER_STATUSES,
+    GlobalJobStore,
+    filter_untracked_jobs,
+)
 from job_scan.http_client import InvalidResponse
 from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock, LockUnavailable
@@ -219,6 +226,7 @@ class _AiConfigurationState(BaseModel):
 
     ai_runtime: str
     claude: ClaudeRuntimeSelection
+    codex: CodexRuntimeSelection
     locked: bool
 
 
@@ -238,6 +246,7 @@ def create_review_app(
     workflow: WebWorkflow | None = None,
     ai_store: AiProviderStore | None = None,
     ai_model_discovery: AiModelDiscovery | None = None,
+    codex_model_discovery: Callable[[], list[CodexModelOption]] | None = None,
     history_store: SearchHistoryStore | None = None,
     resume_suggestion_service: ResumeSuggestionService | None = None,
     ats_workflow: AtsWorkflow | None = None,
@@ -629,6 +638,7 @@ def create_review_app(
         return _AiConfigurationState(
             ai_runtime=selection.ai_runtime,
             claude=selection.claude,
+            codex=selection.codex,
             locked=locked,
         )
 
@@ -1006,6 +1016,7 @@ def create_review_app(
 
     if ai_store is not None:
         discovery = ai_model_discovery or AiModelDiscovery()
+        discover_codex_models = codex_model_discovery or CodexProcess().models
 
         @app.get("/api/ai/config", response_model=_AiConfigurationState)
         def get_ai_configuration() -> _AiConfigurationState:
@@ -1038,8 +1049,19 @@ def create_review_app(
                 return _AiConfigurationState(
                     ai_runtime=saved.ai_runtime,
                     claude=saved.claude,
+                    codex=saved.codex,
                     locked=False,
                 )
+
+        @app.get("/api/ai/codex-models")
+        def list_codex_models() -> list[CodexModelOption]:
+            try:
+                return discover_codex_models()
+            except CodexProcessError as error:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    str(error),
+                ) from None
 
         @app.get("/api/ai/providers")
         def list_ai_providers() -> list[AiProviderView]:
@@ -1291,8 +1313,16 @@ def create_review_app(
                     history.load(run_id) if run_id is not None else repository.load()
                 )
                 entries = history.list()
-                global_snapshot = global_jobs.load_for_tracker()
-                snapshot = raw_snapshot
+                try:
+                    global_snapshot = global_jobs.load_for_tracker()
+                except (OSError, UnicodeError, ValueError):
+                    global_snapshot = Snapshot(meta=StoreMeta(data_revision=0))
+                    snapshot = raw_snapshot
+                else:
+                    snapshot = filter_untracked_jobs(
+                        raw_snapshot,
+                        global_snapshot,
+                    )
                 ats_entries = ats_history_store.list() if ats_history_store is not None else []
                 if ats_run_id is not None:
                     if ats_history_store is None:
@@ -1311,14 +1341,19 @@ def create_review_app(
                 and not repository.paths.ai_selection_toml.exists()
                 and not repository.paths.config_toml.exists()
             ):
-                selection = AiRuntimeSelection(
-                    ai_runtime=setup_answers.ai_runtime,
-                    claude=ClaudeRuntimeSelection(
+                selection_values: dict[str, object] = {
+                    "ai_runtime": setup_answers.ai_runtime
+                }
+                if setup_answers.ai_runtime == "codex-cli":
+                    selection_values["codex"] = CodexRuntimeSelection(
                         model=setup_answers.claude.model,
                         effort=setup_answers.claude.effort,
-                        thinking_enabled=setup_answers.claude.thinking_enabled,
-                    ),
-                )
+                    )
+                else:
+                    selection_values["claude"] = (
+                        claude_runtime_selection_from_settings(setup_answers.claude)
+                    )
+                selection = AiRuntimeSelection.model_validate(selection_values)
             response = HTMLResponse(
                 render_console(
                     snapshot=snapshot,

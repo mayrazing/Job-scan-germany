@@ -1,4 +1,4 @@
-{% from "_review_queue.html" import groups, manual_job_import, navigation %}
+{% from "_review_queue.html" import groups, navigation %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -24,16 +24,6 @@
         <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
           {{ navigation(current_dashboard, 'Current history job groups') }}
           <div class="review-groups">{{ groups(current_dashboard, false, false, 'current') }}</div>
-        </div>
-      </section>
-      <section class="review-block" id="review" data-review-block="global">
-        <header class="review-block-heading review-block-heading-actions">
-          <div><p class="eyebrow">All searches</p><h2>Job Tracker</h2></div>
-          {{ manual_job_import() }}
-        </header>
-        <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
-          {{ navigation(global_dashboard, 'Job Tracker groups') }}
-          <div class="review-groups">{{ groups(global_dashboard, false, false, 'global') }}</div>
         </div>
       </section>
     </main>

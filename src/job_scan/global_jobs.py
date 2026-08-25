@@ -51,6 +51,12 @@ class GlobalJobStore:
                 current = self._load_and_migrate_unlocked()
         return _visible_snapshot(current)
 
+    def load_read_only(self) -> Snapshot:
+        """Load visible global jobs without persisting legacy migrations."""
+        with self._lock.shared():
+            current, _migration_needed = self._read_unlocked()
+        return _visible_snapshot(current)
+
     def load_for_resume(self, resume_id: str) -> Snapshot:
         """Load global jobs associated with one resume and show its match result."""
         current = self.load()
@@ -138,29 +144,6 @@ class GlobalJobStore:
             return _visible_snapshot(
                 self._persist_unlocked(current, jobs, deletions=deletions)
             )
-
-    def overlay(self, snapshot: Snapshot) -> Snapshot:
-        """Return a copy whose matching jobs carry their persisted user state."""
-        current = self.load()
-        result = snapshot.model_copy(deep=True)
-        for job in result.jobs:
-            matches = _matching_jobs(current.jobs, job)
-            if not matches:
-                continue
-            status_job = _newest_status_job(matches)
-            if status_job is None:
-                continue
-            job.user_status = status_job.user_status
-            job.user_status_updated_at = status_job.user_status_updated_at
-            job.user_status_history = [
-                entry.model_copy(deep=True)
-                for entry in status_job.user_status_history
-            ]
-            job.application_resume_id = status_job.application_resume_id
-            job.application_resume_filename = (
-                status_job.application_resume_filename
-            )
-        return result
 
     def set_status(
         self,
@@ -750,6 +733,28 @@ def _matching_indices(jobs: Sequence[JobRecord], incoming: JobRecord) -> list[in
 
 def _matching_jobs(jobs: Sequence[JobRecord], incoming: JobRecord) -> list[JobRecord]:
     return [job for job in jobs if _same_job(job, incoming)]
+
+
+def filter_untracked_jobs(
+    review_snapshot: Snapshot,
+    tracker_snapshot: Snapshot,
+) -> Snapshot:
+    """Return a review copy without jobs already present in Job Tracker."""
+    result = review_snapshot.model_copy(deep=True)
+    result.jobs = filter_untracked_job_records(result.jobs, tracker_snapshot)
+    return result
+
+
+def filter_untracked_job_records(
+    review_jobs: Sequence[JobRecord],
+    tracker_snapshot: Snapshot,
+) -> list[JobRecord]:
+    """Return Review job records that do not exist in Job Tracker."""
+    return [
+        job
+        for job in review_jobs
+        if not _matching_jobs(tracker_snapshot.jobs, job)
+    ]
 
 
 def _same_job(left: JobRecord, right: JobRecord) -> bool:

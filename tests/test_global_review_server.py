@@ -904,7 +904,9 @@ def test_global_job_notes_can_be_added_edited_and_deleted(tmp_path: Path) -> Non
     assert deleted.notes == []
 
 
-def test_history_status_is_copied_without_changing_another_review(tmp_path: Path) -> None:
+def test_history_status_hides_matching_review_without_changing_history(
+    tmp_path: Path,
+) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     repository = _repository(paths)
     history = SearchHistoryStore(paths)
@@ -934,7 +936,9 @@ def test_history_status_is_copied_without_changing_another_review(tmp_path: Path
     assert response.status_code == 204
     assert page_response.status_code == 200
     assert page.select_one('[data-review-block="global"] #applied [data-job-key]')
-    assert page.select_one('[data-review-block="current"] [data-job-key="b"]')
+    assert page.select_one(
+        '[data-review-block="current"] [data-job-key="b"]'
+    ) is None
     assert history.load("run-a").jobs[0].user_status is UserStatus.NEW
     assert history.load("run-b").jobs[0].user_status is UserStatus.NEW
 
@@ -1086,6 +1090,77 @@ def test_same_global_job_uses_the_latest_visible_review_in_tracker(
     assert card_b.get("data-score") == "63"
     assert "Missing Kotlin experience" in card_b.get_text(" ", strip=True)
     assert "applied" in card_a.get_text(" ", strip=True).lower()
+
+
+def test_setup_filters_only_tracked_jobs_from_review_without_changing_stored_data(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    current = _job("current", external_id="shared")
+    untracked = _job("untracked", external_id="untracked")
+    repository = _repository(paths, current, untracked)
+    tracked = _job("tracked", external_id="shared")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(tracked, UserStatus.SAVED, NOW)
+    review_before = repository.load()
+    tracker_before = global_jobs.load()
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        page = BeautifulSoup(client.get("/setup#review").text, "html.parser")
+
+    assert page.select_one(
+        '[data-review-block="current"] [data-job-key="current"]'
+    ) is None
+    assert page.select_one(
+        '[data-review-block="current"] [data-job-key="untracked"]'
+    ) is not None
+    assert page.select_one(
+        '[data-review-block="global"] [data-job-key="tracked"]'
+    ) is not None
+    assert repository.load() == review_before
+    assert global_jobs.load() == tracker_before
+
+
+def test_setup_keeps_review_available_when_job_tracker_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = _repository(paths, _job("current", external_id="current"))
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=SimpleNamespace(load_setup_answers=lambda: None),
+        global_job_store=global_jobs,
+    )
+
+    def fail_tracker_read() -> Snapshot:
+        raise OSError("injected Job Tracker read failure")
+
+    monkeypatch.setattr(global_jobs, "load_for_tracker", fail_tracker_read)
+
+    with TestClient(
+        app,
+        base_url=ORIGIN,
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.get("/setup#review")
+
+    page = BeautifulSoup(response.text, "html.parser")
+    assert response.status_code == 200
+    assert page.select_one(
+        '[data-review-block="current"] [data-job-key="current"]'
+    ) is not None
+    assert page.select('[data-review-block="global"] [data-job-key]') == []
 
 
 def test_job_tracker_aggregates_all_saved_jobs(tmp_path: Path) -> None:

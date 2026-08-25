@@ -46,6 +46,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
+from job_scan.global_jobs import GlobalJobStore
 from job_scan.http_client import BlockedResponse
 from job_scan.job_snapshot import JobSnapshotReference, JobSnapshotStore
 from job_scan.locking import FileRWLock
@@ -291,6 +292,74 @@ class RecordingReviewer:
         del progress
         self.reviewed_titles.extend(job.title for job in jobs)
         return ReviewBatchOutcome(accepted={}, failed={}, invocations=[])
+
+
+def test_scan_filters_tracked_job_before_forced_ai_review(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    config(paths)
+    tracked = fetched("TRACKED", "Tracked Role", "Complete tracked role.")
+    untracked = fetched("UNTRACKED", "Untracked Role", "Complete new role.")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        stored_job("tracker-job", tracked),
+        UserStatus.SAVED,
+        NOW,
+    )
+    tracker_before = global_jobs.load()
+    reviewer = RecordingReviewer()
+    repo = repository(paths)
+    service = ScanService(
+        paths,
+        repository=repo,
+        reviewer=reviewer,
+        company_size_service=NoopCompanySizeService(),  # type: ignore[arg-type]
+        source_factory=lambda _config: [
+            FakeAdapter(SourceKind.LINKEDIN, "acme/jobs", [tracked, untracked])
+        ],
+        global_job_store=global_jobs,
+        clock=lambda: NOW,
+    )
+
+    service.run(force_review=True)
+
+    assert reviewer.reviewed_titles == ["Untracked Role"]
+    assert {job.title for job in repo.load().jobs} == {
+        "Tracked Role",
+        "Untracked Role",
+    }
+    assert global_jobs.load() == tracker_before
+
+
+def test_scan_continues_ai_review_when_job_tracker_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    config(paths)
+    occurrence = fetched("CURRENT", "Current Role", "Complete current role.")
+    global_jobs = GlobalJobStore(paths)
+    reviewer = RecordingReviewer()
+    service = ScanService(
+        paths,
+        reviewer=reviewer,
+        company_size_service=NoopCompanySizeService(),  # type: ignore[arg-type]
+        source_factory=lambda _config: [
+            FakeAdapter(SourceKind.LINKEDIN, "acme/jobs", [occurrence])
+        ],
+        global_job_store=global_jobs,
+        clock=lambda: NOW,
+    )
+
+    def fail_tracker_read() -> Snapshot:
+        raise OSError("injected Job Tracker read failure")
+
+    monkeypatch.setattr(global_jobs, "load_read_only", fail_tracker_read)
+
+    service.run()
+
+    assert reviewer.reviewed_titles == ["Current Role"]
 
 
 def test_each_scan_replaces_old_search_instead_of_reviewing_it(

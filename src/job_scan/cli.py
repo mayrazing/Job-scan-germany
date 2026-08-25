@@ -19,9 +19,9 @@ from job_scan.ai_selection import (
     AiRuntimeSelection,
     AiSelectionError,
     AiSelectionStore,
-    ClaudeRuntimeSelection,
     ai_selection_from_config,
     apply_ai_selection_to_claude,
+    claude_runtime_selection_from_settings,
     resolve_ai_selection,
 )
 from job_scan.anthropic_api import AiModelDiscovery
@@ -211,11 +211,7 @@ def setup(
             providers = AiProviderStore(paths.ai_config_toml)
             fallback = AiRuntimeSelection(
                 ai_runtime=answers.ai_runtime,
-                claude=ClaudeRuntimeSelection(
-                    model=answers.claude.model,
-                    effort=answers.claude.effort,
-                    thinking_enabled=answers.claude.thinking_enabled,
-                ),
+                claude=claude_runtime_selection_from_settings(answers.claude),
             )
             try:
                 fallback = ai_selection_from_config(

@@ -15,6 +15,7 @@ from job_scan.claude_process import (
     ClaudeProcessError,
     ClaudeRequest,
 )
+from job_scan.codex_process import CodexProcess
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
 
@@ -28,17 +29,19 @@ class AiInvoker(Protocol):
 
 
 class AiRuntimeInvoker:
-    """Route one model request to Claude Code or a saved Anthropic-compatible API."""
+    """Route one model request to a selected local CLI or saved API."""
 
     def __init__(
         self,
         paths: AppPaths,
         *,
         claude: AiInvoker | None = None,
+        codex: AiInvoker | None = None,
         store: AiProviderStore | None = None,
         api_factory: Callable[[StoredAiProvider], AiInvoker] | None = None,
     ) -> None:
         self._claude = claude if claude is not None else ClaudeProcess()
+        self._codex = codex if codex is not None else CodexProcess()
         self._store = store if store is not None else AiProviderStore(paths.ai_config_toml)
         self._api_factory = api_factory or (lambda provider: AnthropicApiInvoker(provider))
         self._usage_lock = FileRWLock(paths.ai_usage_lock_file)
@@ -48,6 +51,8 @@ class AiRuntimeInvoker:
         with self._usage_lock.shared():
             if request.runtime == "claude-code":
                 return self._claude.invoke(request)
+            if request.runtime == "codex-cli":
+                return self._codex.invoke(request)
             provider_id = request.runtime.removeprefix("api:")
             try:
                 provider = self._store.require(provider_id)

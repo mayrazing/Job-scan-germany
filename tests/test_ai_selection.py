@@ -8,7 +8,9 @@ from job_scan.ai_selection import (
     AiRuntimeSelection,
     AiSelectionStore,
     ClaudeRuntimeSelection,
+    CodexRuntimeSelection,
     ai_selection_from_config,
+    apply_ai_selection_to_claude,
 )
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.paths import AppPaths
@@ -86,3 +88,46 @@ def test_config_migration_keeps_valid_api_and_falls_back_from_missing_provider(
     assert valid.claude.model == "opus"
     assert missing.ai_runtime == "claude-code"
     assert missing.claude.model == "opus"
+
+
+def test_codex_selection_keeps_its_model_separate_and_applies_it_to_work(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    selection = AiRuntimeSelection(
+        ai_runtime="codex-cli",
+        claude=ClaudeRuntimeSelection(model="opus", effort="medium"),
+        codex=CodexRuntimeSelection(model="gpt-5.6-sol", effort="ultra"),
+    )
+
+    saved = AiSelectionStore(paths.ai_selection_toml).save(selection)
+    applied = apply_ai_selection_to_claude(
+        ClaudeSettings(model="sonnet", effort="low"),
+        saved,
+    )
+
+    assert saved.claude.model == "opus"
+    assert saved.codex.model == "gpt-5.6-sol"
+    assert applied.model == "gpt-5.6-sol"
+    assert applied.effort == "ultra"
+
+
+def test_config_migration_restores_codex_model_into_codex_selection(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    current = config(paths, ai_runtime="codex-cli").model_copy(
+        update={
+            "claude": ClaudeSettings(
+                model="gpt-5.6-sol",
+                effort="high",
+            )
+        }
+    )
+
+    selection = ai_selection_from_config(current, AiProviderStore(paths.ai_config_toml))
+
+    assert selection.ai_runtime == "codex-cli"
+    assert selection.codex.model == "gpt-5.6-sol"
+    assert selection.codex.effort == "high"
+    assert selection.claude.model == "sonnet"
