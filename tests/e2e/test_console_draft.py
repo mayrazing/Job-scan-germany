@@ -519,6 +519,23 @@ def setup_page() -> Iterator[object]:
                     ),
                 )
                 return
+            if request.url.endswith("/api/ai/codex-auth"):
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "authenticated": True,
+                            "login": {
+                                "state": "idle",
+                                "verification_url": None,
+                                "user_code": None,
+                                "error": None,
+                            },
+                        }
+                    ),
+                )
+                return
             if request.url.endswith("/api/ai/providers"):
                 route.fulfill(
                     status=200,
@@ -663,6 +680,63 @@ def test_ai_configuration_loads_codex_models_and_supported_efforts(
         "options => options.map(option => option.value)"
     ) == ["low", "medium", "high", "xhigh", "max"]
     assert setup_page.locator("#codex-effort").input_value() == "medium"
+
+
+def test_selecting_logged_out_codex_opens_device_login_dialog(
+    setup_page: object,
+) -> None:
+    login = {
+        "state": "idle",
+        "verification_url": None,
+        "user_code": None,
+        "error": None,
+    }
+    authenticated = False
+
+    def auth_status(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"authenticated": authenticated, "login": login}
+            ),
+        )
+
+    def start_login(route: object) -> None:
+        login.update(
+            {
+                "state": "pending",
+                "verification_url": "https://auth.openai.com/codex/device",
+                "user_code": "TEST-9YWCE",
+                "error": None,
+            }
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(login))
+
+    setup_page.route("**/api/ai/codex-auth", auth_status)
+    setup_page.route("**/api/ai/codex-login", start_login)
+    setup_page.locator("[data-open-ai-config]").click()
+    setup_page.locator("#ai-runtime").select_option("codex-cli")
+
+    dialog = setup_page.locator("#codex-login-dialog")
+    dialog.wait_for(state="visible")
+    assert dialog.locator("[data-codex-login-code]").text_content() == "TEST-9YWCE"
+    assert dialog.locator("[data-open-codex-login]").get_attribute("data-url") == (
+        "https://auth.openai.com/codex/device"
+    )
+
+    authenticated = True
+    login.update(
+        {
+            "state": "succeeded",
+            "verification_url": None,
+            "user_code": None,
+        }
+    )
+    dialog.wait_for(state="hidden")
+    setup_page.locator("#codex-model-feedback").get_by_text(
+        "2 Codex CLI models available."
+    ).wait_for()
 
 
 def test_ai_configuration_modal_is_read_only_while_ai_is_in_use(
@@ -2619,6 +2693,104 @@ def test_manual_job_dialog_uploads_a_new_resume(setup_page: object) -> None:
     assert "backend.pdf" in posted[0][1]
     assert urlparse(setup_page.url).fragment == "job-tracker"
     assert setup_page.locator("#job-tracker-view").is_visible()
+
+
+def test_manual_job_import_shows_company_size_check_then_updates_automatically(
+    setup_page: object,
+) -> None:
+    import_id = "manual-import-company-size"
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    completed_snapshot = GLOBAL_STATUS_SNAPSHOT.model_copy(deep=True)
+    completed_snapshot.jobs[0].company_size = reported_company_size(
+        "501-1,000 employees",
+        501,
+        1000,
+    )
+    refresh_count = 0
+
+    def start_import(route: object) -> None:
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "running",
+                    "step": "queued",
+                    "message": "Manual import started.",
+                    "progress_percent": 2,
+                    "job_key": None,
+                    "result_status": None,
+                    "resume_id": None,
+                    "error": None,
+                }
+            ),
+        )
+
+    def complete_import(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "complete",
+                    "step": "complete",
+                    "message": "Manual import complete.",
+                    "progress_percent": 100,
+                    "job_key": "global-saved",
+                    "result_status": "saved",
+                    "resume_id": ATS_RESUME_ID,
+                    "error": None,
+                }
+            ),
+        )
+
+    def refresh_tracker(route: object) -> None:
+        nonlocal refresh_count
+        refresh_count += 1
+        snapshot = (
+            GLOBAL_STATUS_SNAPSHOT
+            if refresh_count == 1
+            else completed_snapshot
+        )
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=snapshot,
+                ai_providers=AI_PROVIDERS,
+                ats_history=ATS_HISTORY,
+                selected_ats=SELECTED_ATS,
+            ),
+        )
+
+    setup_page.route("**/api/global-jobs/import-with-resume", start_import)
+    setup_page.route(f"**/api/manual-job-imports/{import_id}", complete_import)
+    setup_page.route("**/setup?global-status=1", refresh_tracker)
+    setup_page.locator("[data-open-manual-job]").click()
+    dialog = setup_page.locator("#manual-job-dialog")
+    dialog.locator("#manual-job-url").fill("https://careers.example/jobs/42")
+    dialog.locator("#manual-job-resume").set_input_files(
+        {
+            "name": "backend.pdf",
+            "mimeType": "application/pdf",
+            "buffer": b"PDF resume",
+        }
+    )
+
+    dialog.locator("[data-submit-manual-job]").click()
+    dialog.wait_for(state="hidden")
+    company_size = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"] '
+        '.company-size [data-manual-fact-value]'
+    )
+
+    assert company_size.text_content().strip() == "Checking..."
+    playwright.expect(company_size).to_have_text("501-1,000 employees")
+    assert refresh_count >= 2
 
 
 def test_manual_job_dialog_keeps_url_and_shows_import_failure(

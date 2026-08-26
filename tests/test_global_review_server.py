@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from httpx import Response
 from pydantic import HttpUrl
 
 from job_scan.ai_config import AiProviderDraft, AiProviderStore
+from job_scan.ai_runtime import AiRuntimeInvoker
 from job_scan.ai_selection import (
     AiRuntimeSelection,
     AiSelectionStore,
@@ -28,6 +30,7 @@ from job_scan.ats_models import (
     AtsRunState,
 )
 from job_scan.ats_workflow import AtsWorkflowInput
+from job_scan.claude_process import ClaudeInvocation, ClaudeRequest
 from job_scan.company_size import (
     CompanySizeEvidence,
     CompanySizeLookupError,
@@ -47,6 +50,8 @@ from job_scan.domain import (
     AvailabilityStatus,
     JobRecord,
     MachineStatus,
+    SalaryPeriod,
+    SalaryValue,
     Snapshot,
     SourceKind,
     SourceOccurrence,
@@ -100,6 +105,30 @@ class UnavailableCompanySizeLookup:
     ) -> CompanySizeEvidence:
         del location
         raise CompanySizeLookupError("No reliable employee-count source was found.")
+
+
+class BlockingCompanySizeLookup(ReliableCompanySizeLookup):
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+
+    def lookup(
+        self,
+        company: str,
+        config: AppConfig,
+        checked_at: datetime,
+        *,
+        location: str | None = None,
+    ) -> CompanySizeEvidence:
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise AssertionError("test did not release company-size lookup")
+        return super().lookup(
+            company,
+            config,
+            checked_at,
+            location=location,
+        )
 
 
 def _wait_manual_import_completion(
@@ -2034,6 +2063,75 @@ def test_manual_job_import_persists_card_as_saved(tmp_path: Path) -> None:
     assert saved.user_status is UserStatus.SAVED
 
 
+def test_manual_job_import_reuses_profile_for_the_same_uploaded_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    _save_config(paths)
+    profile = """# Target roles
+Backend Engineer
+
+# Technical skills
+Python
+
+# Experience
+Backend delivery
+
+# Languages
+English
+
+# Work authorization and visa
+Unknown
+
+# Preferences
+Berlin
+"""
+    profile_requests: list[ClaudeRequest] = []
+
+    def invoke_profile(
+        _self: AiRuntimeInvoker,
+        request: ClaudeRequest,
+    ) -> ClaudeInvocation:
+        profile_requests.append(request)
+        return ClaudeInvocation(
+            argv=["fake-ai"],
+            stdout=json.dumps(
+                {"structured_output": {"profile_markdown": profile}}
+            ).encode(),
+            stderr=b"",
+            exit_code=0,
+            duration_seconds=0.01,
+        )
+
+    monkeypatch.setattr(AiRuntimeInvoker, "invoke", invoke_profile)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        for _ in range(2):
+            response = _post_job_with_resume(client)
+            assert response.status_code == 202
+            state = _wait_manual_import_completion(
+                client,
+                response.json()["import_id"],
+            )
+            assert state["status"] == "complete"
+
+    assert len(profile_requests) == 1
+
+
 def test_manual_job_import_does_not_read_selected_history_profile_or_config(
     tmp_path: Path,
 ) -> None:
@@ -2315,7 +2413,7 @@ def test_legacy_job_import_without_resume_is_gone(tmp_path: Path) -> None:
     }
 
 
-def test_manual_job_import_persists_company_size_before_saving(
+def test_manual_job_import_saves_before_company_size_lookup_finishes(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -2323,16 +2421,31 @@ def test_manual_job_import_persists_company_size_before_saving(
     global_jobs = GlobalJobStore(paths)
     _save_config(paths)
     paths.profile_md.write_text("# Current candidate profile", encoding="utf-8")
+    lookup = BlockingCompanySizeLookup()
     company_sizes = CompanySizeService(
         CompanySizeStore(paths.cache_dir / "company-sizes.json"),
-        ReliableCompanySizeLookup(),
+        lookup,
     )
+
+    def import_job(
+        _url: str,
+        _config: AppConfig,
+        _profile: str,
+        _imported_at: datetime,
+        on_progress: Callable[[str, str], None] | None = None,
+        on_job_extracted: Callable[[JobRecord], None] | None = None,
+    ) -> JobRecord:
+        del on_progress
+        assert on_job_extracted is not None
+        on_job_extracted(imported)
+        return imported
+
     app = create_review_app(
         _repository(paths),
         TOKEN,
         frozenset({ORIGIN}),
         global_job_store=global_jobs,
-        manual_job_importer=lambda *_inputs: imported,
+        manual_job_importer=import_job,
         manual_resume_preparer=_prepare_uploaded_resume(paths),
         company_size_service=company_sizes,
     )
@@ -2340,16 +2453,45 @@ def test_manual_job_import_persists_company_size_before_saving(
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
         response = _post_job_with_resume(client)
+        assert response.status_code == 202
+        started = response.json()
+        assert started["status"] == "running"
+        try:
+            state = _wait_manual_import_completion(client, started["import_id"])
+            assert state["status"] == "complete"
+            assert lookup.started.wait(timeout=1)
+            saved = global_jobs.find("manual")
+            assert saved is not None
+            assert saved.company_size is None
+            attached_resume = saved.application_resume_id
+            global_jobs.set_status(saved, UserStatus.APPLIED)
+            global_jobs.set_salaries(
+                saved,
+                expected_salary=SalaryValue(amount="75000", period=SalaryPeriod.YEAR),
+                offer_salary=None,
+            )
+            global_jobs.add_note(saved, "Keep this note")
+        finally:
+            lookup.release.set()
 
-    assert response.status_code == 202
-    started = response.json()
-    assert started["status"] == "running"
-    _wait_manual_import_completion(client, started["import_id"])
+        for _ in range(100):
+            saved = global_jobs.find("manual")
+            if saved is not None and saved.company_size is not None:
+                break
+            time.sleep(0.01)
+
     saved = global_jobs.find("manual")
     assert saved is not None
     assert saved.company_size is not None
     assert saved.company_size.employee_count == 4200
     assert saved.company_size.source_title == "Acme company facts"
+    assert saved.user_status is UserStatus.APPLIED
+    assert saved.expected_salary == SalaryValue(
+        amount="75000",
+        period=SalaryPeriod.YEAR,
+    )
+    assert [note.content for note in saved.notes] == ["Keep this note"]
+    assert saved.application_resume_id == attached_resume
 
 
 def test_manual_job_import_stays_saved_when_company_size_is_unknown(

@@ -35,6 +35,9 @@ class HealthyClaude:
 
 
 class HealthyCodex:
+    def __init__(self, *, home: Path) -> None:
+        self.home = home
+
     def version(self) -> str:
         return "codex-cli 0.149.1"
 

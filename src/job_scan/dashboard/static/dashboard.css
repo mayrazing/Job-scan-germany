@@ -362,8 +362,37 @@ main {
 }
 
 .manual-job-dialog [data-submit-manual-job] {
-  background: var(--action);
-  color: #FFFFFF;
+    background: var(--action);
+    color: #FFFFFF;
+}
+
+.codex-device-code {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--action);
+  border-radius: 0.35rem;
+  background: #F9FBFA;
+  text-align: center;
+}
+
+.codex-device-code[hidden] {
+  display: none;
+}
+
+.codex-device-code span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.codex-device-code code {
+  font-size: clamp(1.4rem, 5vw, 2rem);
+  font-weight: 750;
+  letter-spacing: 0.16em;
 }
 
 .lifecycle-delete-dialog {

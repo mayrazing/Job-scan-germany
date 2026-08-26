@@ -32,7 +32,7 @@ from job_scan.ats_workflow import (
     AtsWorkflowBusy,
     AtsWorkflowInput,
 )
-from job_scan.codex_process import CodexModelOption
+from job_scan.codex_process import CodexAuthStatus, CodexModelOption, CodexNotAuthenticated
 from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings, save_config
 from job_scan.dashboard.render import render_dashboard
 from job_scan.domain import AvailabilityStatus, JobRecord, MachineStatus, UserStatus
@@ -882,6 +882,94 @@ def test_ai_configuration_api_lists_codex_cli_models(
 
     assert response.status_code == 200, response.text
     assert response.json() == [model.model_dump(mode="json") for model in CODEX_MODELS]
+
+
+def test_ai_configuration_api_runs_isolated_codex_device_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from job_scan import review_server
+
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
+    repository.mutate(lambda snapshot: snapshot)
+
+    class LoggedOutCodex:
+        def __init__(self, *, home: Path) -> None:
+            assert home == paths.codex_home
+
+        def auth_status(self) -> CodexAuthStatus:
+            raise CodexNotAuthenticated("not logged in")
+
+    class RecordingLogin:
+        def __init__(self, home: Path) -> None:
+            assert home == paths.codex_home
+            self.state = "idle"
+            self.closed = False
+
+        def snapshot(self) -> dict[str, object | None]:
+            return {
+                "state": self.state,
+                "verification_url": (
+                    "https://auth.openai.com/codex/device"
+                    if self.state == "pending"
+                    else None
+                ),
+                "user_code": "TEST-9YWCE" if self.state == "pending" else None,
+                "error": None,
+            }
+
+        def start(self) -> dict[str, object | None]:
+            self.state = "pending"
+            return self.snapshot()
+
+        def cancel(self) -> dict[str, object | None]:
+            self.state = "cancelled"
+            return self.snapshot()
+
+        def close(self) -> None:
+            self.closed = True
+
+    login = RecordingLogin(paths.codex_home)
+    monkeypatch.setattr(review_server, "CodexProcess", LoggedOutCodex)
+    monkeypatch.setattr(
+        review_server,
+        "CodexLoginWorkflow",
+        lambda home: login,
+        raising=False,
+    )
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=RecordingWorkflow(paths),  # type: ignore[arg-type]
+        ai_store=AiProviderStore(paths.ai_config_toml),
+        ai_model_discovery=RecordingDiscovery(),  # type: ignore[arg-type]
+        codex_model_discovery=lambda: CODEX_MODELS,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        open_console(client)
+        status_response = client.get("/api/ai/codex-auth")
+        start_response = client.post("/api/ai/codex-login", headers=HEADERS)
+        cancel_response = client.delete("/api/ai/codex-login", headers=HEADERS)
+
+    assert status_response.status_code == 200
+    assert status_response.json() == {
+        "authenticated": False,
+        "login": {
+            "state": "idle",
+            "verification_url": None,
+            "user_code": None,
+            "error": None,
+        },
+    }
+    assert start_response.status_code == 200
+    assert start_response.json()["state"] == "pending"
+    assert start_response.json()["user_code"] == "TEST-9YWCE"
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["state"] == "cancelled"
+    assert login.closed is True
 
 
 def test_ai_configuration_api_persists_codex_cli_selection(

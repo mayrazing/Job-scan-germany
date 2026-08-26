@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
+import shlex
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -25,6 +28,7 @@ _HEALTH_TIMEOUT_SECONDS = 10.0
 _HEALTH_MAX_OUTPUT_BYTES = 64 * 1024
 _MODEL_CATALOG_TIMEOUT_SECONDS = 15.0
 _MODEL_CATALOG_MAX_OUTPUT_BYTES = 1024 * 1024
+CODEX_FILE_CREDENTIAL_STORE_CONFIG = 'cli_auth_credentials_store="file"'
 
 CodexReasoningEffort = Literal[
     "low",
@@ -118,8 +122,9 @@ class _CodexModelCatalog(BaseModel):
 class CodexProcess:
     """Run bounded Codex CLI requests with project and shell access disabled."""
 
-    def __init__(self, binary: str = "codex") -> None:
+    def __init__(self, binary: str = "codex", *, home: Path) -> None:
         self._binary = binary
+        self._home = home
         self._supervisor = ClaudeProcess(binary)
 
     def version(self) -> str:
@@ -144,21 +149,38 @@ class CodexProcess:
     def auth_status(self) -> CodexAuthStatus:
         """Verify that the saved Codex CLI login can be reused."""
         result = self._execute_codex(
-            [self._binary, "login", "status"],
+            [
+                self._binary,
+                "-c",
+                CODEX_FILE_CREDENTIAL_STORE_CONFIG,
+                "login",
+                "status",
+            ],
             stdin_bytes=None,
             timeout_seconds=_HEALTH_TIMEOUT_SECONDS,
             max_output_bytes=_HEALTH_MAX_OUTPUT_BYTES,
         )
-        if result.exit_code != 0 or not result.stdout.strip():
+        if result.exit_code != 0 or not (result.stdout.strip() or result.stderr.strip()):
+            login_command = (
+                f"CODEX_HOME={shlex.quote(str(self._home))} codex -c "
+                f"{shlex.quote(CODEX_FILE_CREDENTIAL_STORE_CONFIG)} login --device-auth"
+            )
             raise CodexNotAuthenticated(
-                "Codex CLI is not authenticated; run `codex login` and retry."
+                "Codex CLI is not authenticated for Job Scan; "
+                f"run `{login_command}` and retry."
             )
         return CodexAuthStatus(authenticated=True)
 
     def models(self) -> list[CodexModelOption]:
         """Return the visible model catalog reported by the installed Codex CLI."""
         result = self._execute_codex(
-            [self._binary, "debug", "models"],
+            [
+                self._binary,
+                "-c",
+                CODEX_FILE_CREDENTIAL_STORE_CONFIG,
+                "debug",
+                "models",
+            ],
             stdin_bytes=None,
             timeout_seconds=_MODEL_CATALOG_TIMEOUT_SECONDS,
             max_output_bytes=_MODEL_CATALOG_MAX_OUTPUT_BYTES,
@@ -199,7 +221,10 @@ class CodexProcess:
             with tempfile.TemporaryDirectory(prefix="job-scan-codex-") as directory:
                 schema_path = Path(directory) / "schema.json"
                 schema_path.write_text(
-                    json.dumps(request.json_schema, separators=(",", ":")),
+                    json.dumps(
+                        _codex_output_schema(request.json_schema),
+                        separators=(",", ":"),
+                    ),
                     encoding="utf-8",
                 )
                 argv = self._invocation_argv(request, schema_path)
@@ -241,6 +266,8 @@ class CodexProcess:
             f'web_search="{web_search}"',
             "-c",
             f'model_reasoning_effort="{request.effort}"',
+            "-c",
+            CODEX_FILE_CREDENTIAL_STORE_CONFIG,
             "exec",
             "--ephemeral",
             "--ignore-user-config",
@@ -265,12 +292,14 @@ class CodexProcess:
         cwd: str | None = None,
     ) -> _ProcessResult:
         """Run the shared bounded supervisor and translate its public errors."""
+        environment = codex_environment(self._home)
         try:
             return self._supervisor._execute(
                 argv,
                 stdin_bytes=stdin_bytes,
                 timeout_seconds=timeout_seconds,
                 max_output_bytes=max_output_bytes,
+                env=environment,
                 cwd=cwd,
             )
         except ClaudeNotInstalled:
@@ -309,3 +338,39 @@ def _structured_stdout(stdout: bytes, exit_code: int) -> bytes:
         {"structured_output": payload},
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def codex_environment(home: Path) -> dict[str, str]:
+    """Return one child environment rooted in private Job Scan Codex storage."""
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            home.chmod(0o700)
+    except OSError:
+        raise CodexSpawnError(
+            "Codex CLI data directory could not be prepared; check Job Scan storage."
+        ) from None
+    environment = os.environ.copy()
+    environment["CODEX_HOME"] = str(home)
+    return environment
+
+
+def _codex_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a Codex-compatible schema without changing the shared request."""
+    normalized = copy.deepcopy(schema)
+    _make_object_schemas_strict(normalized)
+    return normalized
+
+
+def _make_object_schemas_strict(value: Any) -> None:
+    """Require every object property and reject unspecified properties."""
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            value["required"] = list(properties)
+            value["additionalProperties"] = False
+        for child in value.values():
+            _make_object_schemas_strict(child)
+    elif isinstance(value, list):
+        for child in value:
+            _make_object_schemas_strict(child)

@@ -17,6 +17,7 @@ def write_record(name: str, payload: bytes) -> None:
 mode = os.environ.get("FAKE_CODEX_MODE", "success")
 write_record("FAKE_CODEX_ARGV_PATH", json.dumps(sys.argv).encode("utf-8"))
 write_record("FAKE_CODEX_CWD_PATH", os.getcwd().encode("utf-8"))
+write_record("FAKE_CODEX_HOME_PATH", os.environ.get("CODEX_HOME", "").encode("utf-8"))
 
 if "--output-schema" in sys.argv:
     schema_path = Path(sys.argv[sys.argv.index("--output-schema") + 1])
@@ -30,6 +31,8 @@ if mode == "version":
     sys.stdout.write("codex-cli 0.149.1\n")
 elif mode == "auth":
     sys.stdout.write("Logged in using ChatGPT\n")
+elif mode == "auth-stderr":
+    sys.stderr.write("Logged in using ChatGPT\n")
 elif mode == "models":
     sys.stdout.write(
         json.dumps(
@@ -62,6 +65,20 @@ elif mode == "models":
 elif mode == "success":
     sys.stdout.write('{"result":"ok"}')
     sys.stderr.write("fake codex progress")
+elif mode == "device-login":
+    sys.stdout.write(
+        "Follow these steps to sign in with ChatGPT using device code authorization:\n"
+        "1. Open this link in your browser and sign in to your account\n"
+        "   https://auth.openai.com/codex/device\n"
+        "2. Enter this one-time code (expires in 15 minutes)\n"
+        "   TEST-9YWCE\n"
+    )
+    sys.stdout.flush()
+    release_path = os.environ.get("FAKE_CODEX_LOGIN_RELEASE_PATH")
+    while release_path and not Path(release_path).exists():
+        time.sleep(0.01)
+    sys.stdout.write("Successfully logged in\n")
+    sys.stdout.flush()
 elif mode == "nonzero":
     sys.stderr.write("fake codex failure")
     raise SystemExit(17)

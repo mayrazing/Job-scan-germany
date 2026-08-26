@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 from job_scan.paths import AppPaths
@@ -10,6 +12,7 @@ def test_job_scan_home_overrides_default(tmp_path: Path) -> None:
     assert paths.config_toml == tmp_path / "config.toml"
     assert paths.job_tracker_config_toml == tmp_path / "job-tracker-config.toml"
     assert paths.profile_md == tmp_path / "profile.md"
+    assert paths.codex_home == tmp_path / "codex-home"
     assert paths.jobs_jsonl == tmp_path / "output" / "jobs.jsonl"
     assert paths.dashboard_html == tmp_path / "output" / "index.html"
     assert paths.lock_file == tmp_path / "output" / ".data.lock"
@@ -45,7 +48,10 @@ def test_ensure_directories_creates_only_data_directories(tmp_path: Path) -> Non
     assert {entry.relative_to(paths.root) for entry in paths.root.rglob("*")} == {
         Path("output"),
         Path("cache"),
+        Path("codex-home"),
         Path("logs"),
         Path("history"),
         Path("ats-history"),
     }
+    if os.name != "nt":
+        assert stat.S_IMODE(paths.codex_home.stat().st_mode) == 0o700

@@ -105,6 +105,7 @@ _MAX_PAGE_CHARS = 200_000
 _MAX_COMMAND_OUTPUT_BYTES = 512_000
 _MAX_SNAPSHOT_COMMAND_OUTPUT_BYTES = 8_000_000
 _MANUAL_IMPORT_ERROR_PREVIEW_CHARS = 500
+_DNS_RESOLUTION_ATTEMPTS = 3
 _LAYOUT_ONLY_CHARACTER_TRANSLATION = str.maketrans("", "", "\u00ad\u200b\u2060\ufeff")
 
 
@@ -591,10 +592,13 @@ class ManualJobImportService:
         profile: str,
         imported_at: datetime,
         on_progress: Callable[[str, str], None] | None = None,
+        on_job_extracted: Callable[[JobRecord], None] | None = None,
     ) -> JobRecord:
         """Return one reviewed JobRecord built from a public job-detail URL."""
         if on_progress is None:
             on_progress = lambda _step, _message: None
+        if on_job_extracted is None:
+            on_job_extracted = lambda _job: None
         safe_url = require_public_job_url(source_url)
         on_progress("validate", "Validating the provided job URL.")
         page = self._page_reader.read(safe_url)
@@ -643,6 +647,7 @@ class ManualJobImportService:
             user_status_updated_at=imported_at,
             manual_import_errors=list(facts.source_validation_errors),
         )
+        on_job_extracted(job.model_copy(deep=True))
         on_progress("review", "Reviewing and scoring job with the saved candidate profile.")
         outcome = self._reviewer.review([job], profile, config)
         review = outcome.accepted.get(job.canonical_job_key)
@@ -795,10 +800,16 @@ def _parse_ip_literal(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Addres
 
 def _resolve_host_addresses(host: str) -> Sequence[str]:
     """Resolve every network address a browser could use for one hostname."""
-    try:
-        records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        raise ManualJobImportError("This job page address could not be resolved.") from None
+    for attempt in range(_DNS_RESOLUTION_ATTEMPTS):
+        try:
+            records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            break
+        except socket.gaierror as error:
+            if error.errno == socket.EAI_AGAIN and attempt + 1 < _DNS_RESOLUTION_ATTEMPTS:
+                continue
+            raise ManualJobImportError(
+                f"This job page address could not be resolved: {host}."
+            ) from None
     return tuple({str(record[4][0]) for record in records})
 
 
@@ -836,6 +847,7 @@ def _validate_network_capture(
         raise ManualJobImportError("OpenCLI network safety capture was unavailable.")
     if count != len(entries):
         raise ManualJobImportError("OpenCLI returned an invalid network safety capture.")
+    validated_hosts: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             raise ManualJobImportError("OpenCLI returned an invalid network safety capture.")
@@ -848,7 +860,16 @@ def _validate_network_capture(
         if parsed.scheme.casefold() == "wss":
             request_url = parsed._replace(scheme="https").geturl()
         safe_request_url = require_public_job_url(request_url)
+        if entry.get("status") == 0:
+            continue
+        host = urlsplit(safe_request_url).hostname
+        if host is None:
+            raise ManualJobImportError("Use a public HTTPS job URL without credentials.")
+        host_key = host.rstrip(".").casefold()
+        if host_key in validated_hosts:
+            continue
         _require_public_host_addresses(safe_request_url, resolver)
+        validated_hosts.add(host_key)
 
 
 _NUMERIC_DATE = re.compile(

@@ -1054,10 +1054,65 @@
       }
     };
 
-    const finalizeManualImport = async () => {
+    const companySizeCheckFinished = (root, jobKey) => {
+      const card = reviewCardForJob(root, jobKey);
+      const provenance = card?.querySelector(
+        ".company-size [data-manual-fact-provenance]",
+      );
+      return provenance?.textContent.includes("Checked ") || false;
+    };
+
+    const markCompanySizeChecking = (jobKey) => {
+      const globalBlock = document.querySelector('[data-review-block="global"]');
+      const card = reviewCardForJob(globalBlock || document, jobKey);
+      const value = card?.querySelector(
+        ".company-size [data-manual-fact-value]",
+      );
+      if (!value || value.textContent.trim() !== "Unknown") return false;
+      value.replaceChildren(document.createTextNode("Checking..."));
+      const provenance = card.querySelector(
+        ".company-size [data-manual-fact-provenance]",
+      );
+      if (provenance) provenance.textContent = "";
+      const search = card.querySelector("[data-company-size-search]");
+      if (search) search.disabled = true;
+      return true;
+    };
+
+    const pollImportedCompanySize = async (jobKey) => {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+        try {
+          const refreshedDocument = await fetchReviewDocument(window.location.href);
+          const refreshedBlock = refreshedDocument.querySelector(
+            '[data-review-block="global"]',
+          );
+          if (!companySizeCheckFinished(refreshedBlock || refreshedDocument, jobKey)) {
+            continue;
+          }
+          reconcileGlobalJobs(refreshedDocument);
+          return;
+        } catch (_error) {
+          return;
+        }
+      }
+    };
+
+    const finalizeManualImport = async (state) => {
       const destination = new URL(window.location.href);
       const refreshedDocument = await fetchReviewDocument(destination.href);
       reconcileGlobalJobs(refreshedDocument);
+      const jobKey = typeof state?.job_key === "string" ? state.job_key : "";
+      const refreshedBlock = refreshedDocument.querySelector(
+        '[data-review-block="global"]',
+      );
+      if (
+        jobKey
+        && !companySizeCheckFinished(refreshedBlock || refreshedDocument, jobKey)
+        && markCompanySizeChecking(jobKey)
+      ) {
+        void pollImportedCompanySize(jobKey);
+      }
       resetManualImportButton();
       dialog.close();
     };
@@ -1090,7 +1145,7 @@
         const state = await response.json();
         renderManualImportState(state);
         if (state.status === "complete") {
-          await finalizeManualImport();
+          await finalizeManualImport(state);
           return;
         }
         if (state.status === "failed") {
@@ -1150,7 +1205,7 @@
         }
         renderManualImportState(state);
         if (state.status === "complete") {
-          await finalizeManualImport();
+          await finalizeManualImport(state);
           return;
         }
         if (state.status === "failed") {

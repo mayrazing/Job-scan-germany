@@ -6,7 +6,12 @@ import os
 import re
 import tempfile
 from collections.abc import Callable
+from os import fchmod as _cache_fchmod
+from os import fdopen as _cache_fdopen
+from os import fsync as _cache_fsync
+from os import replace as _cache_replace
 from pathlib import Path
+from tempfile import mkstemp as _cache_mkstemp
 from typing import Any, Protocol
 
 from pydantic import (
@@ -28,7 +33,6 @@ from job_scan.config import (
     PostedWithinDays,
     SchedulerSettings,
     TargetCompany,
-    load_config,
     migrate_legacy_opencli_settings,
     serialize_config,
 )
@@ -44,6 +48,7 @@ _PROFILE_SCHEMA: dict[str, Any] = {
     "required": ["profile_markdown"],
     "additionalProperties": False,
 }
+_PROFILE_CACHE_VERSION = 1
 _MARKDOWN_HEADING = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
 
 
@@ -161,13 +166,14 @@ class SetupService:
     ) -> SetupPreparation:
         """Build a profile/config pair without replacing the current setup."""
         extracted = self._extract_resume(resume_path)
+        prompt = build_profile_prompt(extracted.text, answers)
+        cache_path = self._profile_cache_path(extracted.sha256, prompt, answers)
         reusable = (
-            self._read_reusable_profile(extracted.sha256, answers.ai_runtime)
+            self._read_cached_profile(cache_path)
             if reuse_current_profile
             else None
         )
         if reusable is None:
-            prompt = build_profile_prompt(extracted.text, answers)
             request = ClaudeRequest(
                 runtime=answers.ai_runtime,
                 prompt=prompt,
@@ -187,6 +193,7 @@ class SetupService:
                     "AI profile contained invalid Unicode; retry setup."
                 ) from None
             ai_model = _api_model_from_invocation(invocation)
+            self._write_cached_profile(cache_path, profile_bytes, ai_model)
         else:
             profile_bytes, ai_model = reusable
         profile_hash = f"sha256:{hashlib.sha256(profile_bytes).hexdigest()}"
@@ -216,27 +223,104 @@ class SetupService:
             profile_hash=profile_hash,
         )
 
-    def _read_reusable_profile(
+    def _profile_cache_path(
         self,
         resume_sha256: str,
-        ai_runtime: str,
+        prompt: str,
+        answers: SetupAnswers,
+    ) -> Path:
+        """Return the cache file for one exact resume and profile-generation input."""
+        identity = json.dumps(
+            {
+                "version": _PROFILE_CACHE_VERSION,
+                "resume_sha256": resume_sha256,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "schema_sha256": hashlib.sha256(
+                    json.dumps(
+                        _PROFILE_SCHEMA,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "runtime": answers.ai_runtime,
+                "model": answers.claude.model,
+                "effort": answers.claude.effort,
+                "thinking_enabled": answers.claude.thinking_enabled,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cache_key = hashlib.sha256(identity).hexdigest()
+        return self._paths.cache_dir / "resume-profiles" / f"{cache_key}.json"
+
+    def _read_cached_profile(
+        self,
+        cache_path: Path,
     ) -> tuple[bytes, str | None] | None:
-        """Return the current profile when it belongs to the same resume and is intact."""
+        """Return one intact cached profile without touching the active setup."""
         try:
-            config = load_config(self._paths.config_toml)
-            profile_bytes = self._paths.profile_md.read_bytes()
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("version") != _PROFILE_CACHE_VERSION:
+                return None
+            profile_markdown = payload.get("profile_markdown")
+            profile_hash = payload.get("profile_sha256")
+            ai_model = payload.get("ai_model")
+            if not isinstance(profile_markdown, str) or not isinstance(profile_hash, str):
+                return None
+            if ai_model is not None and not isinstance(ai_model, str):
+                return None
+            profile_bytes = profile_markdown.encode("utf-8")
             profile = profile_bytes.decode("utf-8")
-        except (OSError, UnicodeError, ValueError, ValidationError):
+        except (OSError, UnicodeError, TypeError, ValueError):
             return None
         actual_hash = f"sha256:{hashlib.sha256(profile_bytes).hexdigest()}"
-        if config.resume_sha256 != resume_sha256 or config.profile_sha256 != actual_hash:
+        if profile_hash != actual_hash:
             return None
         try:
             _validate_required_sections(profile)
         except SetupOutputError:
             return None
-        ai_model = config.ai_model if config.ai_runtime == ai_runtime else None
         return profile_bytes, ai_model
+
+    def _write_cached_profile(
+        self,
+        cache_path: Path,
+        profile_bytes: bytes,
+        ai_model: str | None,
+    ) -> None:
+        """Best-effort persist one private profile for later manual imports."""
+        temporary: Path | None = None
+        try:
+            payload = json.dumps(
+                {
+                    "version": _PROFILE_CACHE_VERSION,
+                    "profile_markdown": profile_bytes.decode("utf-8"),
+                    "profile_sha256": (
+                        "sha256:" + hashlib.sha256(profile_bytes).hexdigest()
+                    ),
+                    "ai_model": ai_model,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = _cache_mkstemp(
+                dir=cache_path.parent,
+                prefix=f".{cache_path.name}.",
+                suffix=".tmp",
+            )
+            temporary = Path(temporary_name)
+            _cache_fchmod(descriptor, 0o600)
+            with _cache_fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(payload)
+                output.flush()
+                _cache_fsync(output.fileno())
+            _cache_replace(temporary, cache_path)
+        except (OSError, UnicodeError, TypeError, ValueError):
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _publish_pair(self, profile_bytes: bytes, config_bytes: bytes) -> None:
         """Stage and publish profile/config together, restoring the prior pair on failure."""

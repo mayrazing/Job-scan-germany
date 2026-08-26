@@ -242,6 +242,50 @@ def test_setup_reuses_profile_for_same_resume_while_updating_config(
     assert load_config(paths.config_toml).posted_within_days == 14
 
 
+def test_prepare_reuses_profile_cache_without_publishing_current_setup(
+    tmp_path: Path,
+) -> None:
+    paths = paths_at(tmp_path)
+    fake = FakeClaude()
+    renamed_resume = tmp_path / "renamed.docx"
+    renamed_resume.write_bytes(RESUME.read_bytes())
+
+    first = SetupService(paths, fake).prepare(RESUME, valid_answers())
+    second = SetupService(paths, fake).prepare(renamed_resume, valid_answers())
+
+    assert len(fake.requests) == 1
+    assert first.profile_bytes == PROFILE.encode("utf-8")
+    assert second.profile_bytes == first.profile_bytes
+    assert not paths.profile_md.exists()
+    assert not paths.config_toml.exists()
+    cache_files = list((paths.cache_dir / "resume-profiles").glob("*.json"))
+    assert len(cache_files) == 1
+    assert cache_files[0].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("change", ["preferences", "model"])
+def test_prepare_invalidates_profile_cache_when_profile_inputs_change(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    paths = paths_at(tmp_path)
+    fake = FakeClaude()
+    answers = valid_answers()
+    if change == "preferences":
+        changed = answers.model_copy(update={"search_terms": ["data engineer"]})
+    else:
+        changed = answers.model_copy(
+            update={
+                "claude": answers.claude.model_copy(update={"model": "new-model"})
+            }
+        )
+
+    SetupService(paths, fake).prepare(RESUME, answers)
+    SetupService(paths, fake).prepare(RESUME, changed)
+
+    assert len(fake.requests) == 2
+
+
 def test_prepare_can_skip_the_current_review_profile(tmp_path: Path) -> None:
     paths = paths_at(tmp_path)
     fake = FakeClaude()

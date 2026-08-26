@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -847,6 +848,96 @@ def test_opencli_page_reader_rejects_hostname_resolving_to_private_address() -> 
     assert runner.commands == []
 
 
+def test_network_capture_resolves_each_hostname_once() -> None:
+    resolved_hosts: list[str] = []
+
+    def resolver(host: str) -> list[str]:
+        resolved_hosts.append(host)
+        return ["93.184.216.34"]
+
+    manual_job_import._validate_network_capture(
+        {
+            "count": 3,
+            "entries": [
+                {"url": "https://cdn.example/app.js"},
+                {"url": "https://cdn.example/styles.css"},
+                {"url": "https://analytics.example/event"},
+            ],
+        },
+        resolver,
+    )
+
+    assert resolved_hosts == ["cdn.example", "analytics.example"]
+
+
+def test_network_capture_does_not_resolve_a_failed_subresource() -> None:
+    resolved_hosts: list[str] = []
+
+    def resolver(host: str) -> list[str]:
+        resolved_hosts.append(host)
+        return ["93.184.216.34"]
+
+    manual_job_import._validate_network_capture(
+        {
+            "count": 2,
+            "entries": [
+                {"status": 200, "url": "https://careers.example/jobs/42"},
+                {"status": 0, "url": "https://broken-tracker.example/event"},
+            ],
+        },
+        resolver,
+    )
+
+    assert resolved_hosts == ["careers.example"]
+
+
+def test_host_resolution_retries_a_temporary_dns_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def flaky_getaddrinfo(
+        _host: str,
+        _port: int,
+        *,
+        type: socket.SocketKind,
+    ) -> list[tuple[object, object, object, str, tuple[str, int]]]:
+        nonlocal attempts
+        attempts += 1
+        assert type == socket.SOCK_STREAM
+        if attempts < 3:
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(manual_job_import.socket, "getaddrinfo", flaky_getaddrinfo)
+
+    assert manual_job_import._resolve_host_addresses("cdn.example") == (
+        "93.184.216.34",
+    )
+    assert attempts == 3
+
+
+def test_host_resolution_error_identifies_the_failed_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_getaddrinfo(
+        _host: str,
+        _port: int,
+        *,
+        type: socket.SocketKind,
+    ) -> list[tuple[object, object, object, str, tuple[str, int]]]:
+        assert type == socket.SOCK_STREAM
+        raise socket.gaierror(socket.EAI_NONAME, "Name not known")
+
+    monkeypatch.setattr(manual_job_import.socket, "getaddrinfo", failed_getaddrinfo)
+
+    with pytest.raises(
+        manual_job_import.ManualJobImportError,
+        match=r"cdn\.example",
+    ):
+        manual_job_import._resolve_host_addresses("cdn.example")
+
+
 def test_opencli_page_reader_rejects_private_network_request_before_extract() -> None:
     runner = RecordingRunner(
         [
@@ -948,6 +1039,7 @@ def test_manual_job_import_service_builds_job_and_keeps_source_validation_errors
     )
     facts._source_validation_errors.append(source_validation_error)
     extracted_titles: list[str] = []
+    import_events: list[str] = []
 
     class PageReader:
         def read(self, _url: str) -> manual_job_import.RenderedJobPage:
@@ -971,6 +1063,7 @@ def test_manual_job_import_service_builds_job_and_keeps_source_validation_errors
             _profile: str,
             _settings: AppConfig,
         ) -> ReviewBatchOutcome:
+            import_events.append("review")
             key = jobs[0].canonical_job_key
             review = AIReview(
                 job_key=key,
@@ -1003,6 +1096,7 @@ def test_manual_job_import_service_builds_job_and_keeps_source_validation_errors
         _config(tmp_path),
         "# Candidate profile",
         imported_at,
+        on_job_extracted=lambda _job: import_events.append("extracted"),
     )
     second = service.import_url(
         "https://careers.example/jobs/42",
@@ -1028,6 +1122,7 @@ def test_manual_job_import_service_builds_job_and_keeps_source_validation_errors
     assert snapshot_reference.captured_at == imported_at
     assert snapshot_store.read(snapshot_reference.snapshot_id) == page.snapshot_html.encode("utf-8")
     assert extracted_titles == ["Backend Engineer", "Backend Engineer"]
+    assert import_events == ["extracted", "review", "review"]
 
 
 def test_manual_job_import_service_keeps_failed_review_as_pending_card(

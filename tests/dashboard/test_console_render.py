@@ -812,6 +812,16 @@ def test_console_renders_codex_cli_model_and_effort_controls() -> None:
     assert settings.select_one("#codex-effort option[selected]").get("value") == "high"
 
 
+def test_console_renders_codex_device_login_dialog() -> None:
+    page = BeautifulSoup(render_console(), "html.parser")
+
+    dialog = page.select_one("#codex-login-dialog")
+    assert dialog is not None
+    assert dialog.select_one("[data-codex-login-code]") is not None
+    assert dialog.select_one("[data-open-codex-login]") is not None
+    assert dialog.select_one("[data-cancel-codex-login]") is not None
+
+
 def test_console_places_enabled_thinking_switch_below_claude_model() -> None:
     page = BeautifulSoup(render_console(), "html.parser")
 

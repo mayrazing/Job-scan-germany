@@ -60,6 +60,14 @@
   const codexModelSelect = document.querySelector("#codex-model");
   const codexEffortSelect = document.querySelector("#codex-effort");
   const codexModelFeedback = document.querySelector("#codex-model-feedback");
+  const codexLoginDialog = document.querySelector("#codex-login-dialog");
+  const codexLoginStatus = codexLoginDialog.querySelector("[data-codex-login-status]");
+  const codexLoginDevice = codexLoginDialog.querySelector("[data-codex-login-device]");
+  const codexLoginCode = codexLoginDialog.querySelector("[data-codex-login-code]");
+  const codexLoginError = codexLoginDialog.querySelector("[data-codex-login-error]");
+  const openCodexLoginButton = codexLoginDialog.querySelector("[data-open-codex-login]");
+  const startCodexLoginButton = codexLoginDialog.querySelector("[data-start-codex-login]");
+  const cancelCodexLoginButton = codexLoginDialog.querySelector("[data-cancel-codex-login]");
   const apiModelSettings = document.querySelector("#api-model-settings");
   const apiModelSummary = document.querySelector("#api-model-summary");
   const apiModelEffort = document.querySelector("#api-model-effort");
@@ -123,6 +131,8 @@
   let runAiRuntimeName = null;
   let aiConfigurationLocked = false;
   let aiConfigurationPoll = null;
+  let codexLoginPolling = false;
+  let codexLoginBusy = false;
 
   const placeholders = {
     "german-level": "Search or type a level",
@@ -450,6 +460,135 @@
     } catch (_error) {
       codexModelFeedback.textContent =
         "Could not load Codex CLI models. The saved model is still available.";
+      codexModelFeedback.dataset.state = "error";
+    }
+  };
+
+  const renderCodexLogin = (login) => {
+    const state = login?.state || "failed";
+    const pending = state === "pending";
+    const failed = state === "failed";
+    const messages = {
+      starting: "Preparing secure Codex login...",
+      pending: "Open the login page, enter the code, then return here.",
+      succeeded: "Login complete. Checking the account...",
+      failed: "Codex login failed or expired.",
+      cancelled: "Codex login was cancelled.",
+      idle: "Codex is not connected to Job Scan.",
+    };
+    codexLoginStatus.textContent = messages[state] || messages.failed;
+    codexLoginDevice.hidden = !pending;
+    codexLoginCode.textContent = pending ? login.user_code || "" : "";
+    const safeUrl = pending
+      && typeof login.verification_url === "string"
+      && login.verification_url.startsWith("https://auth.openai.com/")
+      ? login.verification_url
+      : "";
+    openCodexLoginButton.hidden = safeUrl === "";
+    openCodexLoginButton.dataset.url = safeUrl;
+    startCodexLoginButton.hidden = !failed;
+    codexLoginError.hidden = !failed;
+    codexLoginError.textContent = failed
+      ? login.error || "Codex login failed or expired."
+      : "";
+    if (!codexLoginDialog.open) codexLoginDialog.showModal();
+  };
+
+  const loadCodexAuth = async () => {
+    const response = await fetch("/api/ai/codex-auth", {
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    return response.json();
+  };
+
+  const pollCodexLogin = async () => {
+    if (codexLoginPolling) return;
+    codexLoginPolling = true;
+    try {
+      while (codexLoginPolling) {
+        await wait(750);
+        const state = await loadCodexAuth();
+        if (state.authenticated) {
+          codexLoginPolling = false;
+          if (codexLoginDialog.open) codexLoginDialog.close();
+          codexModelFeedback.textContent = "Codex CLI connected. Loading models...";
+          codexModelFeedback.removeAttribute("data-state");
+          await loadCodexModels();
+          return;
+        }
+        renderCodexLogin(state.login);
+        if (["failed", "cancelled"].includes(state.login.state)) {
+          codexLoginPolling = false;
+        }
+      }
+    } catch (error) {
+      codexLoginPolling = false;
+      renderCodexLogin({
+        state: "failed",
+        error: error.message || "Could not check Codex login.",
+      });
+    }
+  };
+
+  const startCodexLogin = async () => {
+    if (codexLoginBusy) return;
+    codexLoginBusy = true;
+    try {
+      const response = await fetch("/api/ai/codex-login", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const login = await response.json();
+      renderCodexLogin(login);
+      pollCodexLogin();
+    } catch (error) {
+      renderCodexLogin({
+        state: "failed",
+        error: error.message || "Could not start Codex login.",
+      });
+    } finally {
+      codexLoginBusy = false;
+    }
+  };
+
+  const ensureCodexAuthenticated = async () => {
+    if (aiRuntime.value !== "codex-cli" || codexLoginBusy) return;
+    codexLoginBusy = true;
+    try {
+      const state = await loadCodexAuth();
+      if (state.authenticated) {
+        await loadCodexModels();
+        return;
+      }
+      if (["starting", "pending", "succeeded"].includes(state.login.state)) {
+        renderCodexLogin(state.login);
+        pollCodexLogin();
+        return;
+      }
+    } catch (error) {
+      renderCodexLogin({
+        state: "failed",
+        error: error.message || "Could not check Codex login.",
+      });
+      return;
+    } finally {
+      codexLoginBusy = false;
+    }
+    await startCodexLogin();
+  };
+
+  const cancelCodexLogin = async () => {
+    codexLoginPolling = false;
+    try {
+      await fetch("/api/ai/codex-login", {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+    } finally {
+      if (codexLoginDialog.open) codexLoginDialog.close();
+      codexModelFeedback.textContent = "Codex CLI login cancelled.";
       codexModelFeedback.dataset.state = "error";
     }
   };
@@ -1193,7 +1332,7 @@
   if (restoredSetupDraft) saveSetupDraft();
   renderSchedule();
   loadSchedule(restoredSetupDraft);
-  loadAiProviders().then(loadAiConfiguration).catch((error) => {
+  loadAiProviders().then(loadAiConfiguration).then(ensureCodexAuthenticated).catch((error) => {
     formError.textContent = error.message || "Could not load AI configurations.";
     formError.hidden = false;
   });
@@ -1205,12 +1344,15 @@
       syncOpenCliSource(source);
     });
   });
-  aiRuntime.addEventListener("change", syncAiRuntime);
+  aiRuntime.addEventListener("change", () => {
+    syncAiRuntime();
+    ensureCodexAuthenticated();
+  });
   saveAiSelectionButton.addEventListener("click", saveAiSelection);
   aiConfigModal.addEventListener("show.bs.modal", () => {
     aiSelectionFeedback.textContent = "";
     setAiConfigurationControlsDisabled(true);
-    loadAiConfiguration().then(loadCodexModels).catch((error) => {
+    loadAiConfiguration().then(ensureCodexAuthenticated).catch((error) => {
       aiSelectionFeedback.textContent =
         error.message || "Could not load AI configuration.";
       setAiConfigurationControlsDisabled(true);
@@ -1223,6 +1365,18 @@
   aiConfigModal.addEventListener("hidden.bs.modal", () => {
     window.clearInterval(aiConfigurationPoll);
     aiConfigurationPoll = null;
+  });
+  openCodexLoginButton.addEventListener("click", () => {
+    const url = openCodexLoginButton.dataset.url || "";
+    if (url.startsWith("https://auth.openai.com/")) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  });
+  startCodexLoginButton.addEventListener("click", startCodexLogin);
+  cancelCodexLoginButton.addEventListener("click", cancelCodexLogin);
+  codexLoginDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    cancelCodexLogin();
   });
 
   document.querySelector("#claude-model").tomselect.on("change", (model) => {

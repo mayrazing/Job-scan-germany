@@ -41,7 +41,9 @@ class AiRuntimeInvoker:
         api_factory: Callable[[StoredAiProvider], AiInvoker] | None = None,
     ) -> None:
         self._claude = claude if claude is not None else ClaudeProcess()
-        self._codex = codex if codex is not None else CodexProcess()
+        self._codex = (
+            codex if codex is not None else CodexProcess(home=paths.codex_home)
+        )
         self._store = store if store is not None else AiProviderStore(paths.ai_config_toml)
         self._api_factory = api_factory or (lambda provider: AnthropicApiInvoker(provider))
         self._usage_lock = FileRWLock(paths.ai_usage_lock_file)

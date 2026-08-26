@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ class AppPaths:
     ai_config_toml: Path
     ai_selection_toml: Path
     profile_md: Path
+    codex_home: Path
     jobs_jsonl: Path
     dashboard_html: Path
     lock_file: Path
@@ -39,6 +41,7 @@ class AppPaths:
             ai_config_toml=root / "ai-config.toml",
             ai_selection_toml=root / "ai-selection.toml",
             profile_md=root / "profile.md",
+            codex_home=root / "codex-home",
             jobs_jsonl=output_dir / "jobs.jsonl",
             dashboard_html=output_dir / "index.html",
             lock_file=output_dir / ".data.lock",
@@ -70,8 +73,11 @@ class AppPaths:
             self.ats_history_dir,
             self.cache_dir,
             self.logs_dir,
+            self.codex_home,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            self.codex_home.chmod(0o700)
 
     def run_cache_dir(self, run_id: str) -> Path:
         """Return the cache directory owned by one scan run."""

@@ -7,10 +7,12 @@ import secrets
 import shutil
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from inspect import Parameter, signature
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Annotated, Self
 from urllib.parse import quote, urlsplit
 
@@ -65,7 +67,13 @@ from job_scan.ats_workflow import (
     AtsWorkflowBusy,
     AtsWorkflowInput,
 )
-from job_scan.codex_process import CodexModelOption, CodexProcess, CodexProcessError
+from job_scan.codex_login import CodexLoginSnapshot, CodexLoginWorkflow
+from job_scan.codex_process import (
+    CodexModelOption,
+    CodexNotAuthenticated,
+    CodexProcess,
+    CodexProcessError,
+)
 from job_scan.company_size import (
     AiCompanySizeLookup,
     CompanySizeEvidence,
@@ -230,6 +238,13 @@ class _AiConfigurationState(BaseModel):
     locked: bool
 
 
+class _CodexAuthState(BaseModel):
+    """Expose isolated Codex account state plus safe device-login fields."""
+
+    authenticated: bool
+    login: CodexLoginSnapshot
+
+
 class _ManualJobImportStartResponse(ManualImportState):
     pass
 
@@ -252,10 +267,7 @@ def create_review_app(
     ats_workflow: AtsWorkflow | None = None,
     ats_history_store: AtsHistoryStore | None = None,
     global_job_store: GlobalJobStore | None = None,
-    manual_job_importer:
-        Callable[[str, AppConfig, str, datetime, Callable[[str, str], None]], JobRecord]
-        | Callable[[str, AppConfig, str, datetime], JobRecord]
-        | None = None,
+    manual_job_importer: Callable[..., JobRecord] | None = None,
     manual_resume_preparer: Callable[[Path, SetupAnswers], SetupPreparation]
     | None = None,
     company_size_service: CompanySizeService | None = None,
@@ -316,10 +328,11 @@ def create_review_app(
             job_snapshots,
         ).import_url
 
-    def _supports_progress_callback(
+    def _supports_callback(
         importer: Callable[..., JobRecord],
+        callback_name: str,
     ) -> bool:
-        """Return true when importer can receive progress callback without break."""
+        """Return true when importer can receive one optional callback without break."""
         try:
             parameters = signature(importer).parameters
         except (TypeError, ValueError):
@@ -330,7 +343,7 @@ def create_review_app(
         )
         if has_var_keyword:
             return True
-        return "on_progress" in parameters
+        return callback_name in parameters
 
     def _import_job_with_progress(
         source_url: str,
@@ -338,21 +351,20 @@ def create_review_app(
         profile_text: str,
         imported_at_obj: datetime,
         progress: Callable[[str, str], None],
+        job_extracted: Callable[[JobRecord], None],
     ) -> JobRecord:
-        """Run one manual importer and pass progress callback only when supported."""
-        if _supports_progress_callback(manual_job_importer):
-            return manual_job_importer(
-                source_url,
-                config_obj,
-                profile_text,
-                imported_at_obj,
-                on_progress=progress,
-            )
+        """Run one manual importer with only the callbacks it supports."""
+        callbacks: dict[str, object] = {}
+        if _supports_callback(manual_job_importer, "on_progress"):
+            callbacks["on_progress"] = progress
+        if _supports_callback(manual_job_importer, "on_job_extracted"):
+            callbacks["on_job_extracted"] = job_extracted
         return manual_job_importer(
             source_url,
             config_obj,
             profile_text,
             imported_at_obj,
+            **callbacks,
         )
 
     def _ensure_scan_available() -> None:
@@ -375,7 +387,7 @@ def create_review_app(
             return setup_service.prepare(
                 resume_path,
                 answers,
-                reuse_current_profile=False,
+                reuse_current_profile=True,
             )
 
         manual_resume_preparer = prepare_job_tracker_resume
@@ -779,6 +791,44 @@ def create_review_app(
 
             profile = profile_bytes.decode("utf-8")
             imported_at = datetime.now(UTC)
+            company_size_future: Future[CompanySizeEvidence | None] = Future()
+            company_size_start_lock = Lock()
+            company_size_started = False
+
+            def start_company_size_lookup(extracted_job: JobRecord) -> None:
+                """Start one company lookup at extraction time, at most once."""
+                nonlocal company_size_started
+                with company_size_start_lock:
+                    if company_size_started:
+                        return
+                    company_size_started = True
+
+                def lookup_company_size() -> None:
+                    try:
+                        lookup_job = extracted_job.model_copy(
+                            update={"machine_status": MachineStatus.ELIGIBLE},
+                            deep=True,
+                        )
+                        lookup_snapshot = Snapshot(
+                            meta=StoreMeta(data_revision=0),
+                            jobs=[lookup_job],
+                        )
+                        company_sizes().apply(lookup_snapshot, config, imported_at)
+                        company_size_future.set_result(
+                            lookup_snapshot.jobs[0].company_size
+                        )
+                    except Exception as error:  # noqa: BLE001 - lookup failure must not hide the saved job
+                        company_size_future.set_exception(error)
+
+                thread = Thread(
+                    target=lookup_company_size,
+                    name="job-scan-manual-company-size",
+                    daemon=True,
+                )
+                try:
+                    thread.start()
+                except RuntimeError as error:
+                    company_size_future.set_exception(error)
 
             def run_import(progress: Callable[[str, str], None]) -> ManualImportResult:
                 nonlocal completed
@@ -794,15 +844,12 @@ def create_review_app(
                             profile,
                             imported_at,
                             progress,
+                            start_company_size_lookup,
                         )
-                        progress("save", "Applying company-size enrichment and saving to Saved.")
-                        imported = Snapshot(
-                            meta=StoreMeta(data_revision=0),
-                            jobs=[job],
-                        )
-                        company_sizes().apply(imported, config, imported_at)
+                        start_company_size_lookup(job)
+                        progress("save", "Saving this job to Saved.")
                         saved_job = global_jobs.upsert_with_default_status(
-                            imported.jobs[0],
+                            job,
                             UserStatus.SAVED,
                             resume_id=resume_id,
                             profile_hash=config.profile_sha256,
@@ -812,7 +859,39 @@ def create_review_app(
                             resume_id,
                             filename,
                         )
+
+                        def update_company_size() -> None:
+                            try:
+                                result = company_size_future.result()
+                                if result is None:
+                                    return
+                                with FileRWLock(
+                                    repository.paths.workflow_lock_file
+                                ).exclusive(), FileRWLock(
+                                    repository.paths.scan_lock_file
+                                ).exclusive():
+                                    _mutate_global_or_conflict(
+                                        global_jobs,
+                                        _company_size_mutator(
+                                            company_sizes(),
+                                            saved_job.canonical_job_key,
+                                            result,
+                                            config,
+                                        ),
+                                    )
+                            except Exception:  # noqa: BLE001 - background enrichment is best-effort
+                                return
+
                         completed = True
+                        updater = Thread(
+                            target=update_company_size,
+                            name="job-scan-manual-company-size-save",
+                            daemon=True,
+                        )
+                        try:
+                            updater.start()
+                        except RuntimeError:
+                            pass
                         return ManualImportResult(
                             job_key=saved_job.canonical_job_key,
                             result_status=saved_job.user_status,
@@ -1016,7 +1095,13 @@ def create_review_app(
 
     if ai_store is not None:
         discovery = ai_model_discovery or AiModelDiscovery()
-        discover_codex_models = codex_model_discovery or CodexProcess().models
+        codex_process = CodexProcess(home=repository.paths.codex_home)
+        codex_login = CodexLoginWorkflow(repository.paths.codex_home)
+        app.add_event_handler("shutdown", codex_login.close)
+        discover_codex_models = (
+            codex_model_discovery
+            or codex_process.models
+        )
 
         @app.get("/api/ai/config", response_model=_AiConfigurationState)
         def get_ai_configuration() -> _AiConfigurationState:
@@ -1062,6 +1147,38 @@ def create_review_app(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
                     str(error),
                 ) from None
+
+        @app.get("/api/ai/codex-auth", response_model=_CodexAuthState)
+        def get_codex_auth() -> _CodexAuthState:
+            login = CodexLoginSnapshot.model_validate(codex_login.snapshot())
+            if login.state in {"starting", "pending"}:
+                return _CodexAuthState(authenticated=False, login=login)
+            try:
+                codex_process.auth_status()
+            except CodexNotAuthenticated:
+                return _CodexAuthState(authenticated=False, login=login)
+            except CodexProcessError as error:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    str(error),
+                ) from None
+            return _CodexAuthState(authenticated=True, login=login)
+
+        @app.post(
+            "/api/ai/codex-login",
+            response_model=CodexLoginSnapshot,
+            dependencies=[Depends(require_mutation_request)],
+        )
+        def start_codex_login() -> CodexLoginSnapshot:
+            return CodexLoginSnapshot.model_validate(codex_login.start())
+
+        @app.delete(
+            "/api/ai/codex-login",
+            response_model=CodexLoginSnapshot,
+            dependencies=[Depends(require_mutation_request)],
+        )
+        def cancel_codex_login() -> CodexLoginSnapshot:
+            return CodexLoginSnapshot.model_validate(codex_login.cancel())
 
         @app.get("/api/ai/providers")
         def list_ai_providers() -> list[AiProviderView]:

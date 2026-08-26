@@ -91,7 +91,7 @@
                     <select class="form-select" id="codex-model" name="codex-model" data-search-select data-create="true" data-ai-config-control required>
                       <option value="{{ ai_selection.codex.model }}" selected>{{ ai_selection.codex.model }}</option>
                     </select>
-                    <span class="form-text d-block" id="codex-model-feedback" role="status" aria-live="polite">Uses the account already connected by codex login.</span>
+                    <span class="form-text d-block" id="codex-model-feedback" role="status" aria-live="polite">Job Scan keeps this Codex login separate from your personal Codex CLI.</span>
                   </label>
                   <label>
                     <span class="field-label">Codex CLI reasoning effort</span>
@@ -181,6 +181,27 @@
         </div>
       </div>
     </div>
+
+    <dialog class="manual-job-dialog codex-login-dialog" id="codex-login-dialog" aria-labelledby="codex-login-dialog-title">
+      <form method="dialog">
+        <header>
+          <p class="eyebrow">Codex CLI</p>
+          <h4 id="codex-login-dialog-title">Connect Codex to Job Scan</h4>
+          <p>This login is stored only in Job Scan's private Codex directory.</p>
+        </header>
+        <p class="manual-job-progress" data-codex-login-status role="status" aria-live="polite">Starting secure login...</p>
+        <div class="codex-device-code" data-codex-login-device hidden>
+          <span>One-time code</span>
+          <code data-codex-login-code></code>
+        </div>
+        <p class="manual-job-error" data-codex-login-error role="alert" hidden></p>
+        <div class="manual-job-actions">
+          <button type="button" data-cancel-codex-login>Cancel</button>
+          <button type="button" data-start-codex-login data-submit-manual-job hidden>Retry</button>
+          <button type="button" data-open-codex-login data-submit-manual-job hidden>Open login page</button>
+        </div>
+      </form>
+    </dialog>
 
     <main>
       <article class="job-card console-card card">

@@ -225,7 +225,7 @@ def _check_ai_runtime(paths: AppPaths, config: AppConfig | None) -> DoctorCheck:
         )
     if config is not None and config.ai_runtime == "codex-cli":
         try:
-            version = CodexProcess().version()
+            version = CodexProcess(home=paths.codex_home).version()
         except ClaudeProcessError as error:
             return DoctorCheck(name="claude_version", status="error", message=str(error))
         return DoctorCheck(
@@ -260,7 +260,7 @@ def _check_ai_credentials(paths: AppPaths, config: AppConfig | None) -> DoctorCh
         )
     if config is not None and config.ai_runtime == "codex-cli":
         try:
-            CodexProcess().auth_status()
+            CodexProcess(home=paths.codex_home).auth_status()
         except ClaudeProcessError as error:
             return DoctorCheck(name="claude_auth", status="error", message=str(error))
         return DoctorCheck(
