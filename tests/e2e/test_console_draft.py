@@ -33,8 +33,10 @@ from job_scan.domain import (
     SourceKind,
     SourceOccurrence,
     StoreMeta,
+    TrackerGroup,
     UserStatus,
     UserStatusHistoryEntry,
+    default_tracker_groups,
 )
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -383,6 +385,29 @@ GLOBAL_STATUS_SNAPSHOT = Snapshot(
     ],
 )
 
+GLOBAL_BATCH_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=47),
+    jobs=[
+        source_job(
+            f"batch-{suffix}",
+            (SourceKind.LINKEDIN,),
+            score=score,
+            german_requirement="none",
+        ).model_copy(
+            update={
+                "user_status": UserStatus.SAVED,
+                "user_status_history": [
+                    UserStatusHistoryEntry(
+                        status=UserStatus.SAVED,
+                        changed_at=datetime(2026, 8, 12, 9, 0, tzinfo=UTC),
+                    )
+                ],
+            }
+        )
+        for suffix, score in (("one", 91), ("two", 82), ("three", 73))
+    ],
+)
+
 GLOBAL_LIFECYCLE_SNAPSHOT = Snapshot(
     meta=StoreMeta(data_revision=45),
     jobs=[
@@ -446,6 +471,55 @@ GLOBAL_ATS_SNAPSHOT = Snapshot(
 )
 
 
+def _saved_job(
+    key: str,
+    *,
+    added_at: datetime,
+    posted_at: date | None,
+    score: int | None,
+) -> JobRecord:
+    return source_job(key, (SourceKind.LINKEDIN,), posted_at=posted_at, score=score).model_copy(
+        update={
+            "posted_at": posted_at,
+            "user_status": UserStatus.SAVED,
+            "user_status_history": [
+                UserStatusHistoryEntry(status=UserStatus.SAVED, changed_at=added_at),
+            ],
+        }
+    )
+
+
+GLOBAL_SORT_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=48),
+    jobs=[
+        _saved_job(
+            "sort-a",
+            added_at=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
+            posted_at=date(2026, 8, 10),
+            score=60,
+        ),
+        _saved_job(
+            "sort-b",
+            added_at=datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+            posted_at=date(2026, 8, 20),
+            score=90,
+        ),
+        _saved_job(
+            "sort-c",
+            added_at=datetime(2026, 8, 2, 9, 0, tzinfo=UTC),
+            posted_at=None,
+            score=75,
+        ),
+        _saved_job(
+            "sort-d",
+            added_at=datetime(2026, 8, 4, 9, 0, tzinfo=UTC),
+            posted_at=date(2026, 8, 15),
+            score=None,
+        ),
+    ],
+)
+
+
 @pytest.fixture
 def setup_page() -> Iterator[object]:
     """Serve the real console assets to one isolated headless browser page."""
@@ -453,6 +527,8 @@ def setup_page() -> Iterator[object]:
         browser = engine.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
+        tracker_groups = default_tracker_groups()
+        batch_snapshot = GLOBAL_BATCH_SNAPSHOT.model_copy(deep=True)
         ai_selection = {
             "ai_runtime": "claude-code",
             "claude": {
@@ -468,7 +544,105 @@ def setup_page() -> Iterator[object]:
         }
 
         def respond(route: object) -> None:
+            nonlocal batch_snapshot
             request = route.request
+            parsed_url = urlparse(request.url)
+            if parsed_url.path == "/api/job-tracker/jobs/batch-status":
+                payload = request.post_data_json
+                selected = set(payload["keys"])
+                batch_snapshot = batch_snapshot.model_copy(
+                    update={
+                        "jobs": [
+                            job.model_copy(
+                                update={
+                                    "user_status": payload["status"],
+                                    "user_status_updated_at": datetime(
+                                        2026, 8, 12, 10, 0, tzinfo=UTC
+                                    ),
+                                    "user_status_history": [
+                                        *job.user_status_history,
+                                        UserStatusHistoryEntry(
+                                            status=payload["status"],
+                                            changed_at=datetime(
+                                                2026, 8, 12, 10, 0, tzinfo=UTC
+                                            ),
+                                        ),
+                                    ],
+                                },
+                                deep=True,
+                            )
+                            if job.canonical_job_key in selected
+                            else job.model_copy(deep=True)
+                            for job in batch_snapshot.jobs
+                        ]
+                    },
+                    deep=True,
+                )
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"updated_jobs": len(selected)}),
+                )
+                return
+            if parsed_url.path == "/api/job-tracker/jobs/batch":
+                payload = request.post_data_json
+                if payload.get("confirmation_text") != "Delete all":
+                    route.fulfill(
+                        status=422,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "Enter Delete all to confirm."}),
+                    )
+                    return
+                selected = set(payload["keys"])
+                batch_snapshot = batch_snapshot.model_copy(
+                    update={
+                        "jobs": [
+                            job.model_copy(deep=True)
+                            for job in batch_snapshot.jobs
+                            if job.canonical_job_key not in selected
+                        ]
+                    },
+                    deep=True,
+                )
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"deleted_jobs": len(selected)}),
+                )
+                return
+            if parsed_url.path == "/api/tracker-groups" and request.method == "POST":
+                group = TrackerGroup(
+                    id=f"group-e2e-{len(tracker_groups)}",
+                    name=request.post_data_json["name"],
+                )
+                tracker_groups.append(group)
+                route.fulfill(
+                    status=201,
+                    content_type="application/json",
+                    body=group.model_dump_json(),
+                )
+                return
+            if parsed_url.path.startswith("/api/tracker-groups/"):
+                group_id = parsed_url.path.rsplit("/", 1)[-1]
+                group = next(item for item in tracker_groups if item.id == group_id)
+                if request.method == "PUT":
+                    group.name = request.post_data_json["name"]
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=group.model_dump_json(),
+                    )
+                    return
+                if request.method == "DELETE":
+                    tracker_groups.remove(group)
+                    route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {"deleted_jobs": 1 if group_id == "interviewing" else 0}
+                        ),
+                    )
+                    return
             if request.url.endswith("/api/ai/config"):
                 if request.method == "PUT":
                     update = request.post_data_json
@@ -566,6 +740,30 @@ def setup_page() -> Iterator[object]:
             if request.url.endswith("/api/ats-runs/current"):
                 route.fulfill(status=204, body="")
                 return
+            global_snapshot = (
+                batch_snapshot
+                if "batch=1" in request.url
+                else GLOBAL_LIFECYCLE_SNAPSHOT
+                if "lifecycle=1" in request.url
+                else GLOBAL_MANUAL_FACTS_SNAPSHOT
+                if "manual-facts=1" in request.url
+                else GLOBAL_STATUS_SNAPSHOT
+                if "global-status=1" in request.url
+                else GLOBAL_ATS_SNAPSHOT
+                if "ats-jobs=1" in request.url
+                else GLOBAL_SORT_SNAPSHOT
+                if "sort=1" in request.url
+                else Snapshot(meta=StoreMeta(data_revision=0))
+            )
+            global_snapshot = global_snapshot.model_copy(
+                update={
+                    "meta": global_snapshot.meta.model_copy(
+                        update={"tracker_groups": tracker_groups},
+                        deep=True,
+                    )
+                },
+                deep=True,
+            )
             route.fulfill(
                 status=200,
                 content_type="text/html",
@@ -575,17 +773,7 @@ def setup_page() -> Iterator[object]:
                         if "source-set=changed" in request.url
                         else SOURCE_FILTER_SNAPSHOT
                     ),
-                    global_snapshot=(
-                        GLOBAL_LIFECYCLE_SNAPSHOT
-                        if "lifecycle=1" in request.url
-                        else GLOBAL_MANUAL_FACTS_SNAPSHOT
-                        if "manual-facts=1" in request.url
-                        else GLOBAL_STATUS_SNAPSHOT
-                        if "global-status=1" in request.url
-                        else GLOBAL_ATS_SNAPSHOT
-                        if "ats-jobs=1" in request.url
-                        else None
-                    ),
+                    global_snapshot=global_snapshot,
                     ai_providers=AI_PROVIDERS,
                     ats_history=ATS_HISTORY,
                     selected_ats=SELECTED_ATS,
@@ -784,6 +972,163 @@ def test_ai_configuration_modal_is_read_only_while_ai_is_in_use(
     assert modal.locator("#ai-runtime").is_disabled()
     assert modal.locator("[data-add-ai-provider]").is_disabled()
     assert modal.locator("[data-save-ai-selection]").is_disabled()
+
+
+def test_job_tracker_group_dialog_creates_renames_and_deletes_empty_group(
+    setup_page: object,
+) -> None:
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
+    setup_page.locator("#global-url-filter").fill("keep-this-filter")
+    original_url = setup_page.url
+    setup_page.locator("[data-open-tracker-groups]").click()
+    dialog = setup_page.locator("[data-tracker-group-dialog]")
+    assert dialog.is_visible()
+    assert dialog.locator(
+        '[data-group-id="saved"] [data-delete-tracker-group]'
+    ).is_disabled()
+
+    dialog.locator("[data-new-tracker-group-name]").fill("Phone screen")
+    dialog.locator("[data-new-tracker-group-name]").press("Enter")
+    created = setup_page.locator(
+        '[data-tracker-group-row][data-group-name="Phone screen"]'
+    )
+    created.wait_for()
+    assert setup_page.url == original_url
+    assert setup_page.locator("#global-url-filter").input_value() == "keep-this-filter"
+    assert dialog.is_visible()
+    assert setup_page.locator(
+        '[data-review-group-tab="group-e2e-7"]'
+    ).count() == 1
+    created.locator("[data-tracker-group-name]").fill("Technical screen")
+    created.locator("[data-tracker-group-name]").press("Enter")
+    renamed = setup_page.locator(
+        '[data-tracker-group-row][data-group-name="Technical screen"]'
+    )
+    renamed.wait_for()
+    assert setup_page.url == original_url
+    assert dialog.is_visible()
+    assert setup_page.locator(
+        '[data-review-group-tab="group-e2e-7"] .review-group-label'
+    ).inner_text() == "Technical screen"
+    assert setup_page.locator(
+        'select[name="status"] option[value="group-e2e-7"]'
+    ).first.inner_text() == "Technical screen"
+    renamed.locator("[data-delete-tracker-group]").click()
+    delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
+    assert delete_dialog.is_visible()
+    assert delete_dialog.locator(
+        "[data-tracker-group-confirmation-field]"
+    ).is_hidden()
+    delete_dialog.locator("[data-confirm-tracker-group-delete]").click()
+    renamed.wait_for(state="detached")
+    assert setup_page.url == original_url
+    assert dialog.is_visible()
+    assert setup_page.locator(
+        '[data-tracker-group-row][data-group-name="Technical screen"]'
+    ).count() == 0
+    assert setup_page.locator(
+        '[data-review-group-tab="group-e2e-7"]'
+    ).count() == 0
+
+
+def test_job_tracker_nonempty_group_delete_requires_exact_name(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator("[data-open-tracker-groups]").click()
+    row = setup_page.locator(
+        '[data-tracker-group-row][data-group-id="interviewing"]'
+    )
+    assert row.locator(".tracker-group-job-count").inner_text() == "1 job"
+    row.locator("[data-delete-tracker-group]").click()
+    delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
+    confirmation = delete_dialog.locator(
+        "[data-tracker-group-confirmation-input]"
+    )
+    confirm = delete_dialog.locator("[data-confirm-tracker-group-delete]")
+
+    assert delete_dialog.is_visible()
+    assert confirmation.is_visible()
+    assert confirm.is_disabled()
+    delete_dialog.locator("[data-cancel-tracker-group-delete]").click()
+    assert not delete_dialog.is_visible()
+
+    row.locator("[data-delete-tracker-group]").click()
+    assert delete_dialog.is_visible()
+    confirmation.fill("interviewing")
+    assert confirm.is_disabled()
+    confirmation.fill("Interviewing")
+    assert not confirm.is_disabled()
+    original_url = setup_page.url
+    confirm.click()
+    setup_page.locator(
+        '[data-review-group-tab="interviewing"]'
+    ).wait_for(state="detached")
+    assert setup_page.url == original_url
+    assert setup_page.locator('[data-review-group-tab="interviewing"]').count() == 0
+    assert setup_page.locator('[data-job-key="global-interviewing"]').count() == 0
+
+
+def test_job_tracker_group_rename_updates_visible_job_labels_without_reload(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator("#global-url-filter").fill("keep-this-filter")
+    original_url = setup_page.url
+    setup_page.locator("[data-open-tracker-groups]").click()
+    dialog = setup_page.locator("[data-tracker-group-dialog]")
+    saved = dialog.locator('[data-tracker-group-row][data-group-id="saved"]')
+
+    saved.locator("[data-tracker-group-name]").fill("Inbox")
+    saved.locator("[data-tracker-group-name]").press("Enter")
+    dialog.locator(
+        '[data-tracker-group-row][data-group-name="Inbox"]'
+    ).wait_for()
+
+    assert setup_page.url == original_url
+    assert setup_page.locator("#global-url-filter").input_value() == "keep-this-filter"
+    assert dialog.is_visible()
+    assert setup_page.locator(
+        '[data-review-group-tab="saved"] .review-group-label'
+    ).inner_text() == "Inbox"
+    assert setup_page.locator(
+        '[data-review-block="global"] [data-tracker-status-name="saved"]'
+    ).first.inner_text() == "Inbox"
+    assert setup_page.locator(
+        'select[name="status"] option[value="saved"]'
+    ).first.inner_text() == "Inbox"
+    assert setup_page.locator(
+        "#manual-job-dialog [data-submit-manual-job]"
+    ).inner_text() == "Import to Inbox"
+
+
+def test_job_tracker_empty_group_delete_removes_lifecycle_nodes_without_reload(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator("[data-open-tracker-groups]").click()
+    applied = setup_page.locator(
+        '[data-tracker-group-row][data-group-id="applied"]'
+    )
+    assert applied.locator(".tracker-group-job-count").inner_text() == "0 jobs"
+
+    applied.locator("[data-delete-tracker-group]").click()
+    delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
+    delete_dialog.locator("[data-confirm-tracker-group-delete]").click()
+    applied.wait_for(state="detached")
+
+    card = setup_page.locator('[data-job-key="global-interviewing"]')
+    assert card.locator('[data-lifecycle-status="applied"]').count() == 0
+    interviewing = card.locator(
+        '[data-lifecycle-step][data-lifecycle-status="interviewing"]'
+    )
+    assert interviewing.get_attribute("data-lifecycle-event-index") == "1"
+    assert interviewing.locator(
+        "[data-lifecycle-date-input]"
+    ).get_attribute("data-lifecycle-event-index") == "1"
 
 
 def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> None:
@@ -1316,6 +1661,58 @@ def test_job_tracker_url_filter_matches_normalized_and_partial_urls(
 
     url_filter.fill("")
     assert global_card.is_visible()
+
+
+def test_job_tracker_filters_order_add_button_url_filter_then_sort(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+
+    order = setup_page.evaluate(
+        """() => [...document.querySelector('.job-tracker-filters').children].map(
+          (el) => el.matches('.source-filter') ? 'source'
+            : el.matches('.manual-job-button') ? 'add'
+            : el.matches('.url-filter') ? 'url'
+            : el.matches('.sort-filter') ? 'sort'
+            : 'other'
+        )"""
+    )
+
+    assert order == ["source", "add", "other", "url", "sort"]
+
+
+def test_job_tracker_sort_orders_by_added_posted_and_score(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?sort=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    sort_select = setup_page.locator("#global-sort")
+
+    def card_keys() -> list[str]:
+        return setup_page.evaluate(
+            """() => [...document.querySelectorAll(
+              '[data-review-block="global"] .job-group#saved .card-grid > .job-card',
+            )].map((card) => card.dataset.jobKey)"""
+        )
+
+    sort_select.select_option("added-asc")
+    assert card_keys() == ["sort-a", "sort-c", "sort-b", "sort-d"]
+
+    sort_select.select_option("added-desc")
+    assert card_keys() == ["sort-d", "sort-b", "sort-c", "sort-a"]
+
+    sort_select.select_option("posted-asc")
+    assert card_keys() == ["sort-a", "sort-d", "sort-b", "sort-c"]
+
+    sort_select.select_option("posted-desc")
+    assert card_keys() == ["sort-b", "sort-d", "sort-a", "sort-c"]
+
+    sort_select.select_option("score-asc")
+    assert card_keys() == ["sort-a", "sort-c", "sort-b", "sort-d"]
+
+    sort_select.select_option("score-desc")
+    assert card_keys() == ["sort-b", "sort-c", "sort-a", "sort-d"]
 
 
 def test_job_tracker_selects_a_new_manual_source_after_cards_refresh(
@@ -2079,10 +2476,186 @@ def test_job_tracker_card_drag_to_group_updates_status(
         '[data-review-group-tab="saved"]'
     ).get_attribute("aria-current") == "page"
 
+    setup_page.locator("[data-open-tracker-groups]").click()
+    group_dialog = setup_page.locator("[data-tracker-group-dialog]")
+    saved_row = group_dialog.locator('[data-group-id="saved"]')
+    applied_row = group_dialog.locator('[data-group-id="applied"]')
+    assert saved_row.locator(".tracker-group-job-count").inner_text() == "0 jobs"
+    assert applied_row.locator(".tracker-group-job-count").inner_text() == "1 job"
+    applied_row.locator("[data-delete-tracker-group]").click()
+    delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
+    assert delete_dialog.locator(
+        "[data-tracker-group-confirmation-field]"
+    ).is_visible()
+    assert delete_dialog.locator(
+        "[data-confirm-tracker-group-delete]"
+    ).is_disabled()
+    delete_dialog.evaluate("dialog => dialog.close()")
+    group_dialog.evaluate("dialog => dialog.close()")
+
     target.click()
     applied_card.drag_to(target)
     setup_page.wait_for_timeout(100)
     assert posted == [{"status": "applied"}]
+
+
+def _long_press_job_card(page: object, card: object) -> None:
+    pointer = {
+        "pointerId": 91,
+        "pointerType": "touch",
+        "isPrimary": True,
+        "button": 0,
+        "clientX": 40,
+        "clientY": 40,
+    }
+    card.dispatch_event("pointerdown", pointer)
+    page.wait_for_timeout(1250)
+    card.dispatch_event("pointerup", pointer)
+
+
+def test_job_tracker_long_press_enters_batch_mode_and_card_clicks_toggle(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    first = setup_page.locator(
+        '[data-review-block="global"] #saved article[data-job-key="batch-one"]'
+    )
+    second = setup_page.locator(
+        '[data-review-block="global"] #saved article[data-job-key="batch-two"]'
+    )
+    assert first.count() == 1
+    assert second.count() == 1
+
+    _long_press_job_card(setup_page, first)
+
+    toolbar = setup_page.locator("[data-job-batch-toolbar]")
+    assert toolbar.is_visible()
+    assert toolbar.locator("[data-batch-selected-count]").inner_text() == "1 selected"
+    assert first.get_attribute("aria-selected") == "true"
+    assert not first.locator("[data-job-detail-dialog]").is_visible()
+
+    second.click()
+    assert toolbar.locator("[data-batch-selected-count]").inner_text() == "2 selected"
+    first.click()
+    assert toolbar.locator("[data-batch-selected-count]").inner_text() == "1 selected"
+    second.click()
+    assert not toolbar.is_visible()
+
+
+def test_job_tracker_pointer_movement_cancels_long_press_batch_mode(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="batch-one"]')
+    pointer = {
+        "pointerId": 92,
+        "pointerType": "touch",
+        "isPrimary": True,
+        "button": 0,
+        "clientX": 40,
+        "clientY": 40,
+    }
+
+    card.dispatch_event("pointerdown", pointer)
+    card.dispatch_event("pointermove", {**pointer, "clientX": 60})
+    setup_page.wait_for_timeout(1250)
+    card.dispatch_event("pointerup", {**pointer, "clientX": 60})
+
+    assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
+    assert card.get_attribute("aria-selected") is None
+
+
+def test_job_tracker_group_switch_exits_batch_mode(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="batch-one"]')
+    _long_press_job_card(setup_page, card)
+
+    setup_page.locator('[data-review-group-tab="applied"]').click()
+
+    assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
+    assert card.get_attribute("aria-selected") is None
+
+
+def test_job_tracker_batch_move_button_moves_every_selected_job_without_reload(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    original_url = setup_page.url
+    first = setup_page.locator('article[data-job-key="batch-one"]')
+    second = setup_page.locator('article[data-job-key="batch-two"]')
+    _long_press_job_card(setup_page, first)
+    second.click()
+
+    setup_page.locator("[data-batch-move]").click()
+    move_dialog = setup_page.locator("[data-job-batch-move-dialog]")
+    assert move_dialog.is_visible()
+    move_dialog.locator("[data-batch-target-group]").select_option("applied")
+    move_dialog.locator("[data-confirm-batch-move]").click()
+
+    setup_page.locator('#applied article[data-job-key="batch-one"]').wait_for()
+    setup_page.locator('#applied article[data-job-key="batch-two"]').wait_for()
+    assert setup_page.url == original_url
+    assert setup_page.locator(
+        '[data-review-group-count="saved"]'
+    ).inner_text() == "1"
+    assert setup_page.locator(
+        '[data-review-group-count="applied"]'
+    ).inner_text() == "2"
+    assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
+
+
+def test_job_tracker_dragging_selected_card_moves_the_whole_batch(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    first = setup_page.locator('article[data-job-key="batch-one"]')
+    second = setup_page.locator('article[data-job-key="batch-two"]')
+    _long_press_job_card(setup_page, first)
+    second.click()
+
+    first.drag_to(setup_page.locator('[data-review-group-tab="interviewing"]'))
+
+    setup_page.locator('#interviewing article[data-job-key="batch-one"]').wait_for()
+    setup_page.locator('#interviewing article[data-job-key="batch-two"]').wait_for()
+    assert setup_page.locator(
+        '[data-review-group-count="interviewing"]'
+    ).inner_text() == "2"
+
+
+def test_job_tracker_batch_delete_requires_exact_delete_all_confirmation(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    first = setup_page.locator('article[data-job-key="batch-one"]')
+    second = setup_page.locator('article[data-job-key="batch-two"]')
+    _long_press_job_card(setup_page, first)
+    second.click()
+
+    setup_page.locator("[data-batch-delete]").click()
+    delete_dialog = setup_page.locator("[data-job-batch-delete-dialog]")
+    confirmation = delete_dialog.locator("[data-batch-delete-confirmation]")
+    confirm = delete_dialog.locator("[data-confirm-batch-delete]")
+    assert delete_dialog.is_visible()
+    assert "Delete all" in delete_dialog.inner_text()
+    assert confirm.is_disabled()
+    confirmation.fill("delete all")
+    assert confirm.is_disabled()
+    confirmation.fill("Delete all")
+    assert confirm.is_enabled()
+    confirm.click()
+
+    first.wait_for(state="detached")
+    second.wait_for(state="detached")
+    assert setup_page.locator('article[data-job-key="batch-three"]').count() == 1
+    assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
 
 
 def test_global_status_request_does_not_replace_the_job_resume(
@@ -2749,7 +3322,7 @@ def test_job_tracker_group_double_click_focuses_latest_unread_result(
     group_tab.focus()
     setup_page.keyboard.press("Enter")
     assert setup_page.evaluate("document.activeElement.dataset.jobKey") == (
-        "notice-newer"
+        "notice-older"
     )
 
     group_tab.focus()

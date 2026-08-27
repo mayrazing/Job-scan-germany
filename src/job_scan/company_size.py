@@ -577,44 +577,50 @@ class CompanySizeService:
                 and job.machine_status in {MachineStatus.ELIGIBLE, MachineStatus.UNCERTAIN}
             ):
                 candidates.setdefault(_company_key(job.company), []).append(job)
-        total_companies = len(candidates)
-        if progress is not None:
-            progress(CompanySizeProgress(0, total_companies))
         try:
             cached = self._store.load()
         except CompanySizeStoreError:
             cached = {}
-        for completed_companies, key in enumerate(sorted(candidates), start=1):
+        pending: list[str] = []
+        for key in sorted(candidates):
+            result = cached.get(key)
+            if result is None or checked_at - result.checked_at > _CACHE_TTL:
+                pending.append(key)
+                continue
+            for job in candidates[key]:
+                _apply_company_size_result(job, result, config.minimum_company_size)
+        total_companies = len(pending)
+        if progress is not None:
+            progress(CompanySizeProgress(0, total_companies))
+        for completed_companies, key in enumerate(pending, start=1):
             jobs = candidates[key]
             company = jobs[0].company
             location = next((job.location for job in jobs if job.location.strip()), None)
-            result = cached.get(key)
-            if result is None or checked_at - result.checked_at > _CACHE_TTL:
-                result = (
-                    self._native_result(jobs, config, checked_at)
-                    if key not in self._native_attempted_keys
-                    else None
-                )
-                if result is None:
-                    try:
-                        result = self._lookup.lookup(
-                            company,
-                            config,
-                            checked_at,
-                            location=location,
-                        )
-                    except CompanySizeLookupError:
-                        result = _unknown_evidence(company, checked_at)
-                else:
-                    result = result.model_copy(
-                        update={"company_name": company, "checked_at": checked_at},
-                        deep=True,
-                    )
-                cached[key] = result
+            result = (
+                self._native_result(jobs, config, checked_at)
+                if key not in self._native_attempted_keys
+                else None
+            )
+            if result is None:
                 try:
-                    self._store.save(cached)
-                except CompanySizeStoreError:
-                    pass
+                    result = self._lookup.lookup(
+                        company,
+                        config,
+                        checked_at,
+                        location=location,
+                    )
+                except CompanySizeLookupError:
+                    result = _unknown_evidence(company, checked_at)
+            else:
+                result = result.model_copy(
+                    update={"company_name": company, "checked_at": checked_at},
+                    deep=True,
+                )
+            cached[key] = result
+            try:
+                self._store.save(cached)
+            except CompanySizeStoreError:
+                pass
             for job in jobs:
                 _apply_company_size_result(job, result, config.minimum_company_size)
             if progress is not None:

@@ -40,6 +40,7 @@
 
   const sourceFilterKey = "job-scan.review-source-filter.v1";
   const globalSourceFilterKey = "job-scan.global-source-filter.v1";
+  let jobBatchController = null;
 
   const cardSources = (card) => card.dataset.sources.split(",").filter(Boolean);
 
@@ -180,7 +181,8 @@
   const updateReviewGroupCounts = () => {
     document.querySelectorAll("[data-review-workspace]").forEach((workspace) => {
       workspace.querySelectorAll(".review-groups > .job-group").forEach((group) => {
-        const visibleCount = [...group.querySelectorAll(".job-card")].filter(
+        const cards = [...group.querySelectorAll(".job-card")];
+        const visibleCount = cards.filter(
           (card) => !card.hidden,
         ).length;
         workspace
@@ -188,6 +190,16 @@
           .forEach((count) => {
             count.textContent = String(visibleCount);
           });
+        if (workspace.closest('[data-review-block="global"]')) {
+          const settingsRow = document.querySelector(
+            `[data-tracker-group-row][data-group-id="${CSS.escape(group.id)}"]`,
+          );
+          if (settingsRow) {
+            settingsRow.dataset.groupCount = String(cards.length);
+            settingsRow.querySelector(".tracker-group-job-count").textContent =
+              `${cards.length} ${cards.length === 1 ? "job" : "jobs"}`;
+          }
+        }
       });
     });
   };
@@ -372,7 +384,6 @@
       ),
     ];
     let sources = [...new Set(globalCards().flatMap(cardSources))].sort();
-    sourceFilter.hidden = sources.length === 0;
 
     const selectedSources = new Set(
       restoredSourceFilter(sources, globalSourceFilterKey),
@@ -406,9 +417,8 @@
         .forEach((source) => {
           control.addOption({ value: source, text: sourceLabels[source] || source });
           control.addItem(source, true);
-        });
+      });
       sources = nextSources;
-      sourceFilter.hidden = sources.length === 0;
       saveSourceFilter(sources, control.items, globalSourceFilterKey);
       updateSourceSummary();
     };
@@ -454,6 +464,55 @@
     applyGlobalFilters();
     urlFilter?.addEventListener("input", applyGlobalFilters);
     document.addEventListener("job-scan:review-updated", applyGlobalFilters);
+  };
+
+  const globalSortKeyFor = (mode) => {
+    if (mode === "added-desc" || mode === "added-asc") {
+      return (card) =>
+        card.dataset.addedAt ? new Date(card.dataset.addedAt).getTime() : null;
+    }
+    if (mode === "posted-desc" || mode === "posted-asc") {
+      return (card) =>
+        card.dataset.postedAt
+          ? new Date(`${card.dataset.postedAt}T00:00:00`).getTime()
+          : null;
+    }
+    if (mode === "score-desc" || mode === "score-asc") {
+      return (card) =>
+        card.dataset.score === "" ? null : Number(card.dataset.score);
+    }
+    return null;
+  };
+
+  const initializeGlobalSort = () => {
+    const select = document.querySelector("#global-sort");
+    if (!select) return;
+    const applySort = () => {
+      const mode = select.value;
+      const keyFor = globalSortKeyFor(mode);
+      if (!keyFor) return;
+      const ascending = mode.endsWith("-asc");
+      document
+        .querySelectorAll(
+          '[data-review-block="global"] .review-groups > .job-group > .card-grid',
+        )
+        .forEach((grid) => {
+          const cards = [...grid.querySelectorAll(":scope > .job-card")];
+          cards.sort((left, right) => {
+            const leftKey = keyFor(left);
+            const rightKey = keyFor(right);
+            if (leftKey === null && rightKey === null) return 0;
+            if (leftKey === null) return 1;
+            if (rightKey === null) return -1;
+            return ascending ? leftKey - rightKey : rightKey - leftKey;
+          });
+          cards.forEach((card) => grid.append(card));
+        });
+    };
+    select.addEventListener("change", applySort);
+    document.addEventListener("job-scan:review-updated", () => {
+      if (select.value) applySort();
+    });
   };
 
   const reviewGroupOrderKey = "job-scan.review-group-order.v1";
@@ -600,6 +659,7 @@
     let touchDropBefore = false;
     let lastTouchJumpTab = null;
     let lastTouchJumpAt = 0;
+    const reevaluationJumpKeys = new Map();
     const clearDragState = () => {
       reviewGroupTabs(navigation).forEach((tab) => {
         tab.classList.remove(
@@ -616,6 +676,7 @@
     };
     const clearJobDragState = () => {
       draggedJobCard?.classList.remove("is-job-dragging");
+      jobBatchController?.clearDragging();
       clearJobDropTargets();
     };
     const finishJobDrag = () => {
@@ -664,17 +725,24 @@
         (panel) => panel.id === groupId,
       );
       if (!group) return false;
-      const latest = [...group.querySelectorAll(
+      const candidates = [...group.querySelectorAll(
         ':scope > .card-grid > .job-card[data-reevaluation-status]',
       )].sort((left, right) => (
         Date.parse(right.dataset.reevaluationFinishedAt || "")
         - Date.parse(left.dataset.reevaluationFinishedAt || "")
-      ))[0];
-      if (!latest) return false;
+      ));
+      if (candidates.length === 0) return false;
+      const lastKey = reevaluationJumpKeys.get(groupId);
+      const lastIndex = candidates.findIndex(
+        (card) => card.dataset.jobKey === lastKey,
+      );
+      const nextIndex = lastIndex === -1 ? 0 : (lastIndex + 1) % candidates.length;
+      const target = candidates[nextIndex];
+      reevaluationJumpKeys.set(groupId, target.dataset.jobKey);
       selectReviewGroup(container, navigation, groupId, true);
-      revealFilteredReevaluationCard(latest);
-      latest.focus({ preventScroll: true });
-      latest.scrollIntoView({ behavior: "smooth", block: "center" });
+      revealFilteredReevaluationCard(target);
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
       return true;
     };
 
@@ -682,6 +750,9 @@
       const tab = dropTarget(event);
       if (!tab) return;
       event.preventDefault();
+      if (workspace.closest('[data-review-block="global"]')) {
+        jobBatchController?.exit();
+      }
       selectReviewGroup(
         container,
         navigation,
@@ -757,6 +828,10 @@
         const select = form?.elements.namedItem("status");
         const targetStatus = target.dataset.reviewGroupTab;
         finishJobDrag();
+        if (jobBatchController?.isActiveFor(card)) {
+          if (targetStatus) void jobBatchController.moveTo(targetStatus);
+          return;
+        }
         if (!form || !select || !targetStatus) return;
         select.value = targetStatus;
         if (select.value === targetStatus) form.requestSubmit();
@@ -777,6 +852,14 @@
     container.addEventListener("dragstart", (event) => {
       const card = event.target.closest("[data-job-drag-source]");
       if (!card) return;
+      jobBatchController?.cancelLongPress();
+      if (
+        jobBatchController?.isActiveFor(card)
+        && !jobBatchController.isSelected(card)
+      ) {
+        event.preventDefault();
+        return;
+      }
       const bounds = card.getBoundingClientRect();
       const preview = document.createElement("div");
       const previewCard = card.cloneNode(true);
@@ -806,7 +889,11 @@
       );
       requestAnimationFrame(() => preview.remove());
       draggedJobCard = card;
-      card.classList.add("is-job-dragging");
+      if (jobBatchController?.isActiveFor(card)) {
+        jobBatchController.markDragging();
+      } else {
+        card.classList.add("is-job-dragging");
+      }
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", card.dataset.jobKey);
     });
@@ -1095,6 +1182,765 @@
     }
   };
 
+  const initializeJobBatchMode = () => {
+    const reviewBlock = document.querySelector('[data-review-block="global"]');
+    const toolbar = reviewBlock?.querySelector("[data-job-batch-toolbar]");
+    const selectedCount = toolbar?.querySelector("[data-batch-selected-count]");
+    const moveDialog = reviewBlock?.querySelector("[data-job-batch-move-dialog]");
+    const moveMessage = moveDialog?.querySelector("[data-batch-move-message]");
+    const moveTarget = moveDialog?.querySelector("[data-batch-target-group]");
+    const moveError = moveDialog?.querySelector("[data-job-batch-move-error]");
+    const confirmMove = moveDialog?.querySelector("[data-confirm-batch-move]");
+    const deleteDialog = reviewBlock?.querySelector(
+      "[data-job-batch-delete-dialog]",
+    );
+    const deleteMessage = deleteDialog?.querySelector("[data-batch-delete-message]");
+    const deleteConfirmation = deleteDialog?.querySelector(
+      "[data-batch-delete-confirmation]",
+    );
+    const deleteError = deleteDialog?.querySelector("[data-job-batch-delete-error]");
+    const confirmDelete = deleteDialog?.querySelector("[data-confirm-batch-delete]");
+    if (
+      !reviewBlock
+      || !toolbar
+      || !selectedCount
+      || !moveDialog
+      || !moveMessage
+      || !moveTarget
+      || !confirmMove
+      || !deleteDialog
+      || !deleteMessage
+      || !deleteConfirmation
+      || !confirmDelete
+    ) {
+      return null;
+    }
+
+    const selectedKeys = new Set();
+    const longPressDelay = 1200;
+    const movementTolerance = 10;
+    let sourceGroupId = null;
+    let longPress = null;
+    let suppressNextClickCard = null;
+    let busy = false;
+
+    const cards = () => [
+      ...reviewBlock.querySelectorAll(
+        'article.job-card[data-status-scope="global"][data-job-key]',
+      ),
+    ];
+    const selectedCards = () => cards().filter(
+      (card) => selectedKeys.has(card.dataset.jobKey),
+    );
+    const isActive = () => selectedKeys.size > 0;
+    const showError = (element, message) => {
+      if (!element) return;
+      element.textContent = message;
+      element.hidden = false;
+    };
+    const clearError = (element) => {
+      if (!element) return;
+      element.textContent = "";
+      element.hidden = true;
+    };
+    const clearLongPress = () => {
+      if (longPress?.timer) window.clearTimeout(longPress.timer);
+      longPress = null;
+    };
+    const render = () => {
+      const active = isActive();
+      reviewBlock.classList.toggle("is-batch-mode", active);
+      toolbar.hidden = !active;
+      selectedCount.textContent = `${selectedKeys.size} selected`;
+      cards().forEach((card) => {
+        const selected = selectedKeys.has(card.dataset.jobKey);
+        const toggle = card.querySelector("[data-job-batch-toggle]");
+        card.classList.toggle("is-batch-selected", selected);
+        if (active) {
+          card.setAttribute("aria-selected", String(selected));
+        } else {
+          card.removeAttribute("aria-selected");
+        }
+        if (toggle) {
+          toggle.hidden = !active;
+          toggle.setAttribute("aria-pressed", String(selected));
+        }
+      });
+    };
+    const closeDialog = (dialog) => {
+      if (dialog.open) dialog.close("cancel");
+    };
+    const exit = () => {
+      clearLongPress();
+      selectedKeys.clear();
+      sourceGroupId = null;
+      setBusy(false);
+      closeDialog(moveDialog);
+      closeDialog(deleteDialog);
+      render();
+    };
+    const toggleCard = (card) => {
+      const groupId = card.closest(".job-group")?.id;
+      const jobKey = card.dataset.jobKey;
+      if (!groupId || !jobKey) return;
+      if (!isActive()) sourceGroupId = groupId;
+      if (groupId !== sourceGroupId) return;
+      if (selectedKeys.has(jobKey)) {
+        selectedKeys.delete(jobKey);
+      } else {
+        selectedKeys.add(jobKey);
+      }
+      if (selectedKeys.size === 0) sourceGroupId = null;
+      render();
+    };
+    const setBusy = (value) => {
+      busy = value;
+      toolbar.querySelectorAll("button").forEach((button) => {
+        button.disabled = value;
+      });
+      confirmMove.disabled = value || moveTarget.value === sourceGroupId;
+      confirmDelete.disabled = value || deleteConfirmation.value !== "Delete all";
+    };
+    const selectGroupWithoutChangingPage = (groupId) => {
+      const workspace = reviewBlock.querySelector("[data-review-workspace]");
+      const container = workspace?.querySelector(":scope > .review-groups");
+      const navigation = workspace?.querySelector(":scope > .review-group-nav");
+      if (container && navigation) {
+        selectReviewGroup(container, navigation, groupId);
+      }
+    };
+    const refreshAfterMutation = async (targetGroupId = null) => {
+      const refreshedDocument = await fetchReviewDocument(window.location.href);
+      reconcileGlobalJobs(refreshedDocument);
+      if (targetGroupId) selectGroupWithoutChangingPage(targetGroupId);
+      exit();
+    };
+    const moveTo = async (targetStatus, errorElement = null) => {
+      if (
+        busy
+        || !isActive()
+        || !targetStatus
+        || targetStatus === sourceGroupId
+      ) {
+        return false;
+      }
+      setBusy(true);
+      clearError(errorElement);
+      try {
+        const response = await fetch("/api/job-tracker/jobs/batch-status", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            keys: [...selectedKeys],
+            status: targetStatus,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await responseError(
+            response,
+            "Could not move the selected jobs.",
+          ));
+        }
+        await refreshAfterMutation(targetStatus);
+        return true;
+      } catch (error) {
+        if (errorElement) {
+          showError(errorElement, error.message);
+        } else {
+          window.alert(error.message);
+        }
+        setBusy(false);
+        return false;
+      }
+    };
+
+    reviewBlock.addEventListener("pointerdown", (event) => {
+      const card = event.target.closest(
+        'article.job-card[data-status-scope="global"]',
+      );
+      if (
+        !card
+        || event.button !== 0
+        || event.target.closest("a, button, input, select, label, form, dialog")
+      ) {
+        return;
+      }
+      clearLongPress();
+      longPress = {
+        card,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        activated: false,
+        timer: window.setTimeout(() => {
+          if (!longPress || longPress.card !== card) return;
+          longPress.activated = true;
+          toggleCard(card);
+        }, longPressDelay),
+      };
+    });
+    reviewBlock.addEventListener("pointermove", (event) => {
+      if (!longPress || event.pointerId !== longPress.pointerId) return;
+      if (
+        Math.hypot(
+          event.clientX - longPress.startX,
+          event.clientY - longPress.startY,
+        ) > movementTolerance
+      ) {
+        clearLongPress();
+      }
+    });
+    const finishPointer = (event) => {
+      if (!longPress || event.pointerId !== longPress.pointerId) return;
+      const activatedCard = longPress.activated ? longPress.card : null;
+      clearLongPress();
+      if (!activatedCard) return;
+      suppressNextClickCard = activatedCard;
+      window.setTimeout(() => {
+        if (suppressNextClickCard === activatedCard) suppressNextClickCard = null;
+      }, 0);
+    };
+    reviewBlock.addEventListener("pointerup", finishPointer);
+    reviewBlock.addEventListener("pointercancel", finishPointer);
+    reviewBlock.addEventListener("click", (event) => {
+      const card = event.target.closest(
+        'article.job-card[data-status-scope="global"]',
+      );
+      if (!card || !isActive()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (card === suppressNextClickCard) {
+        suppressNextClickCard = null;
+        return;
+      }
+      toggleCard(card);
+    }, true);
+    reviewBlock.addEventListener("keydown", (event) => {
+      const card = event.target.closest(
+        'article.job-card[data-status-scope="global"]',
+      );
+      if (
+        !card
+        || !isActive()
+        || event.target !== card
+        || !["Enter", " "].includes(event.key)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      toggleCard(card);
+    }, true);
+
+    toolbar.querySelector("[data-exit-batch]").addEventListener("click", exit);
+    toolbar.querySelector("[data-batch-move]").addEventListener("click", () => {
+      clearError(moveError);
+      [...moveTarget.options].forEach((option) => {
+        option.disabled = option.value === sourceGroupId;
+      });
+      const firstTarget = [...moveTarget.options].find((option) => !option.disabled);
+      if (firstTarget) moveTarget.value = firstTarget.value;
+      moveMessage.textContent = `Move ${selectedKeys.size} selected ${
+        selectedKeys.size === 1 ? "job" : "jobs"
+      } to:`;
+      confirmMove.disabled = !firstTarget;
+      moveDialog.showModal();
+      moveTarget.focus();
+    });
+    moveTarget.addEventListener("change", () => {
+      confirmMove.disabled = busy || moveTarget.value === sourceGroupId;
+    });
+    moveDialog.querySelector("[data-cancel-batch-move]").addEventListener(
+      "click",
+      () => moveDialog.close("cancel"),
+    );
+    confirmMove.addEventListener("click", async () => {
+      if (confirmMove.disabled) return;
+      const moved = await moveTo(moveTarget.value, moveError);
+      if (moved && moveDialog.open) moveDialog.close("moved");
+    });
+
+    toolbar.querySelector("[data-batch-delete]").addEventListener("click", () => {
+      clearError(deleteError);
+      deleteConfirmation.value = "";
+      confirmDelete.disabled = true;
+      deleteMessage.textContent = `This permanently deletes ${selectedKeys.size} selected ${
+        selectedKeys.size === 1 ? "job" : "jobs"
+      } and their Job Tracker history.`;
+      deleteDialog.showModal();
+      deleteConfirmation.focus();
+    });
+    deleteConfirmation.addEventListener("input", () => {
+      confirmDelete.disabled = busy || deleteConfirmation.value !== "Delete all";
+    });
+    deleteDialog.querySelector("[data-cancel-batch-delete]").addEventListener(
+      "click",
+      () => deleteDialog.close("cancel"),
+    );
+    confirmDelete.addEventListener("click", async () => {
+      if (busy || confirmDelete.disabled || !isActive()) return;
+      setBusy(true);
+      clearError(deleteError);
+      try {
+        const response = await fetch("/api/job-tracker/jobs/batch", {
+          method: "DELETE",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            keys: [...selectedKeys],
+            confirmation_text: deleteConfirmation.value,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await responseError(
+            response,
+            "Could not delete the selected jobs.",
+          ));
+        }
+        await refreshAfterMutation();
+      } catch (error) {
+        showError(deleteError, error.message);
+        setBusy(false);
+      }
+    });
+    document.addEventListener("click", (event) => {
+      const step = event.target.closest("[data-nav-step]");
+      if (step && step.dataset.navStep !== "job-tracker") exit();
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Escape"
+        && isActive()
+        && !moveDialog.open
+        && !deleteDialog.open
+      ) {
+        exit();
+      }
+    });
+    document.addEventListener("job-scan:review-updated", () => {
+      if (!isActive()) return;
+      const availableKeys = new Set(cards().map((card) => card.dataset.jobKey));
+      [...selectedKeys].forEach((key) => {
+        if (!availableKeys.has(key)) selectedKeys.delete(key);
+      });
+      if (selectedKeys.size === 0) sourceGroupId = null;
+      render();
+    });
+
+    return {
+      exit,
+      isActiveFor: (card) => isActive() && reviewBlock.contains(card),
+      isSelected: (card) => selectedKeys.has(card.dataset.jobKey),
+      markDragging: () => {
+        selectedCards().forEach((card) => card.classList.add("is-job-dragging"));
+      },
+      clearDragging: () => {
+        cards().forEach((card) => card.classList.remove("is-job-dragging"));
+      },
+      cancelLongPress: clearLongPress,
+      moveTo,
+    };
+  };
+
+  const initializeTrackerGroupSettings = () => {
+    const dialog = document.querySelector("[data-tracker-group-dialog]");
+    const opener = document.querySelector("[data-open-tracker-groups]");
+    const deleteDialog = document.querySelector(
+      "[data-tracker-group-delete-dialog]",
+    );
+    if (!dialog || !opener || !deleteDialog) return;
+    const reviewBlock = document.querySelector('[data-review-block="global"]');
+    const workspace = reviewBlock?.querySelector("[data-review-workspace]");
+    const navigation = workspace?.querySelector(":scope > .review-group-nav");
+    const groupPanels = workspace?.querySelector(":scope > .review-groups");
+    const groupList = dialog.querySelector("[data-tracker-group-list]");
+    const errorMessage = dialog.querySelector("[data-tracker-group-error]");
+    const form = dialog.querySelector("form");
+    const closeButton = dialog.querySelector("[data-close-tracker-groups]");
+    const newName = dialog.querySelector("[data-new-tracker-group-name]");
+    const deleteMessage = deleteDialog.querySelector(
+      "[data-tracker-group-delete-message]",
+    );
+    const confirmationField = deleteDialog.querySelector(
+      "[data-tracker-group-confirmation-field]",
+    );
+    const confirmationName = deleteDialog.querySelector(
+      "[data-tracker-group-confirmation-name]",
+    );
+    const confirmationInput = deleteDialog.querySelector(
+      "[data-tracker-group-confirmation-input]",
+    );
+    const deleteError = deleteDialog.querySelector(
+      "[data-tracker-group-delete-error]",
+    );
+    const confirmDelete = deleteDialog.querySelector(
+      "[data-confirm-tracker-group-delete]",
+    );
+    let pendingDelete = null;
+
+    const showError = (target, message) => {
+      if (!target) return;
+      target.textContent = message;
+      target.hidden = false;
+    };
+    const clearError = (target) => {
+      if (!target) return;
+      target.textContent = "";
+      target.hidden = true;
+    };
+    const requestGroupChange = async (url, method, payload, fallback) => {
+      const response = await fetch(url, {
+        method,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(await responseError(response, fallback));
+      }
+      return response.json();
+    };
+    const statusSelector = (groupId) => (
+      `[data-tracker-status-name="${CSS.escape(groupId)}"]`
+    );
+    const groupTab = (groupId) => navigation?.querySelector(
+      `[data-review-group-tab="${CSS.escape(groupId)}"]`,
+    );
+    const addStatusOption = (group) => {
+      document.querySelectorAll('select[name="status"]').forEach((select) => {
+        const option = document.createElement("option");
+        option.value = group.id;
+        option.textContent = group.name;
+        select.append(option);
+      });
+      const batchTarget = document.querySelector("[data-batch-target-group]");
+      if (batchTarget) {
+        const option = document.createElement("option");
+        option.value = group.id;
+        option.textContent = group.name;
+        batchTarget.append(option);
+      }
+    };
+    const addGroupRow = (group) => {
+      const template = groupList?.querySelector("[data-tracker-group-row]");
+      if (!template) return;
+      const row = template.cloneNode(true);
+      row.dataset.groupId = group.id;
+      row.dataset.groupName = group.name;
+      row.dataset.groupCount = "0";
+      const input = row.querySelector("[data-tracker-group-name]");
+      input.value = group.name;
+      input.setAttribute("aria-label", `Rename ${group.name}`);
+      const hiddenLabel = row.querySelector("label .visually-hidden");
+      if (hiddenLabel) hiddenLabel.textContent = `${group.name} group name`;
+      row.querySelector(".tracker-group-job-count").textContent = "0 jobs";
+      const deleteButton = row.querySelector("[data-delete-tracker-group]");
+      deleteButton.disabled = false;
+      deleteButton.removeAttribute("aria-disabled");
+      deleteButton.removeAttribute("title");
+      row.querySelector("[data-save-tracker-group]").disabled = false;
+      groupList.append(row);
+    };
+    const addGroupNavigation = (group) => {
+      const template = navigation?.querySelector("[data-review-group-tab]");
+      if (!template || !groupPanels) return;
+      const tab = template.cloneNode(true);
+      tab.href = `#${group.id}`;
+      tab.dataset.reviewGroupTab = group.id;
+      tab.removeAttribute("aria-current");
+      tab.classList.remove(
+        "is-dragging",
+        "is-drag-over-before",
+        "is-drag-over-after",
+        "is-job-drop-target",
+      );
+      tab.querySelector(".review-group-label").textContent = group.name;
+      const count = tab.querySelector("[data-review-group-count]");
+      count.dataset.reviewGroupCount = group.id;
+      count.textContent = "0";
+      const notice = tab.querySelector("[data-review-group-notice-count]");
+      notice.dataset.reviewGroupNoticeCount = group.id;
+      notice.textContent = "";
+      notice.hidden = true;
+      navigation.insertBefore(
+        tab,
+        navigation.querySelector(".review-group-announcement"),
+      );
+
+      const panel = document.createElement("section");
+      panel.className = "job-group";
+      panel.id = group.id;
+      panel.hidden = true;
+      panel.setAttribute("aria-labelledby", `${group.id}-title`);
+      const title = document.createElement("h2");
+      title.className = "visually-hidden";
+      title.id = `${group.id}-title`;
+      title.textContent = group.name;
+      const grid = document.createElement("div");
+      grid.className = "card-grid";
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No jobs in this group.";
+      grid.append(empty);
+      panel.append(title, grid);
+      groupPanels.append(panel);
+    };
+    const renameGroupInPage = (group) => {
+      const row = groupList?.querySelector(
+        `[data-group-id="${CSS.escape(group.id)}"]`,
+      );
+      if (row) {
+        row.dataset.groupName = group.name;
+        const input = row.querySelector("[data-tracker-group-name]");
+        input.value = group.name;
+        input.setAttribute("aria-label", `Rename ${group.name}`);
+        const hiddenLabel = row.querySelector("label .visually-hidden");
+        if (hiddenLabel) hiddenLabel.textContent = `${group.name} group name`;
+        if (group.id === "saved") {
+          row.querySelector("[data-delete-tracker-group]").title =
+            `${group.name} is the required starting group`;
+        }
+      }
+      const tab = groupTab(group.id);
+      if (tab) tab.querySelector(".review-group-label").textContent = group.name;
+      const panelTitle = groupPanels?.querySelector(
+        `#${CSS.escape(group.id)} > h2`,
+      );
+      if (panelTitle) panelTitle.textContent = group.name;
+      document.querySelectorAll(
+        `select[name="status"] option[value="${CSS.escape(group.id)}"]`,
+      ).forEach((option) => { option.textContent = group.name; });
+      document.querySelectorAll(
+        `[data-batch-target-group] option[value="${CSS.escape(group.id)}"]`,
+      ).forEach((option) => { option.textContent = group.name; });
+      document.querySelectorAll(statusSelector(group.id)).forEach((label) => {
+        label.textContent = group.name;
+      });
+      document.querySelectorAll(
+        `[data-lifecycle-status="${CSS.escape(group.id)}"]`,
+      ).forEach((event) => {
+        event.dataset.lifecycleStatusLabel = group.name;
+        event.querySelectorAll("[data-lifecycle-date-input]").forEach((input) => {
+          input.setAttribute("aria-label", `Change ${group.name} date`);
+        });
+      });
+      if (group.id === "saved") {
+        const importButton = document.querySelector(
+          "#manual-job-dialog [data-submit-manual-job]",
+        );
+        if (importButton) {
+          importButton.dataset.savedGroupName = group.name;
+          importButton.dataset.defaultLabel = `Import to ${group.name}`;
+          if (!importButton.disabled) importButton.textContent = `Import to ${group.name}`;
+        }
+      }
+    };
+    const reindexLifecycle = (card) => {
+      [
+        ...card.querySelectorAll("[data-lifecycle-step]"),
+      ].forEach((event, index) => {
+        event.dataset.lifecycleEventIndex = String(index);
+        event.querySelectorAll("[data-lifecycle-date-input]").forEach((input) => {
+          input.dataset.lifecycleEventIndex = String(index);
+        });
+        event.querySelectorAll("[data-lifecycle-time]").forEach((time) => {
+          time.dataset.lifecycleTime = String(index);
+        });
+      });
+      [
+        ...card.querySelectorAll("[data-lifecycle-event]"),
+      ].forEach((event, index) => {
+        event.querySelectorAll("[data-lifecycle-date-input]").forEach((input) => {
+          input.dataset.lifecycleEventIndex = String(index);
+        });
+        event.querySelectorAll("[data-lifecycle-time]").forEach((time) => {
+          time.dataset.lifecycleTime = String(index);
+        });
+      });
+    };
+    const removeGroupFromPage = (groupId) => {
+      const tab = groupTab(groupId);
+      const wasSelected = tab?.getAttribute("aria-current") === "page";
+      groupList?.querySelector(
+        `[data-group-id="${CSS.escape(groupId)}"]`,
+      )?.remove();
+      tab?.remove();
+      groupPanels?.querySelector(`#${CSS.escape(groupId)}`)?.remove();
+      document.querySelectorAll(
+        `select[name="status"] option[value="${CSS.escape(groupId)}"]`,
+      ).forEach((option) => { option.remove(); });
+      document.querySelectorAll(
+        `[data-batch-target-group] option[value="${CSS.escape(groupId)}"]`,
+      ).forEach((option) => { option.remove(); });
+      reviewBlock?.querySelectorAll("article.job-card").forEach((card) => {
+        card.querySelectorAll(
+          `[data-lifecycle-status="${CSS.escape(groupId)}"]`,
+        ).forEach((event) => { event.remove(); });
+        reindexLifecycle(card);
+      });
+      if (wasSelected && groupPanels && navigation) {
+        const fallback = reviewGroupTabs(navigation)[0]?.dataset.reviewGroupTab;
+        if (fallback) selectReviewGroup(groupPanels, navigation, fallback, true);
+      }
+      if (workspace && navigation) {
+        saveReviewGroupOrder(
+          workspace.dataset.reviewOrderKey || reviewGroupOrderKey,
+          reviewGroupTabs(navigation).map((item) => item.dataset.reviewGroupTab),
+        );
+      }
+      document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+    };
+
+    opener.addEventListener("click", () => {
+      clearError(errorMessage);
+      if (!dialog.open) dialog.showModal();
+    });
+
+    closeButton?.addEventListener("click", () => dialog.close("cancel"));
+    form?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const activeInput = document.activeElement;
+      if (activeInput === newName) {
+        dialog.querySelector("[data-create-tracker-group]")?.click();
+        return;
+      }
+      activeInput
+        ?.closest("[data-tracker-group-row]")
+        ?.querySelector("[data-save-tracker-group]")
+        ?.click();
+    });
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.isComposing) return;
+      if (event.target === newName) {
+        event.preventDefault();
+        dialog.querySelector("[data-create-tracker-group]")?.click();
+        return;
+      }
+      const row = event.target.closest("[data-tracker-group-row]");
+      if (!row || !event.target.matches("[data-tracker-group-name]")) return;
+      event.preventDefault();
+      row.querySelector("[data-save-tracker-group]")?.click();
+    });
+
+    dialog.addEventListener("click", async (event) => {
+      const createButton = event.target.closest("[data-create-tracker-group]");
+      if (createButton) {
+        const name = newName?.value.trim() || "";
+        if (!name) {
+          showError(errorMessage, "Enter a group name.");
+          newName?.focus();
+          return;
+        }
+        createButton.disabled = true;
+        clearError(errorMessage);
+        try {
+          const group = await requestGroupChange(
+            "/api/tracker-groups",
+            "POST",
+            { name },
+            "Could not add this group.",
+          );
+          addGroupRow(group);
+          addGroupNavigation(group);
+          addStatusOption(group);
+          newName.value = "";
+          createButton.disabled = false;
+          document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+        } catch (error) {
+          showError(errorMessage, error.message);
+          createButton.disabled = false;
+        }
+        return;
+      }
+
+      const row = event.target.closest("[data-tracker-group-row]");
+      if (!row) return;
+      const groupId = row.dataset.groupId;
+      const groupName = row.dataset.groupName;
+      const saveButton = event.target.closest("[data-save-tracker-group]");
+      if (saveButton) {
+        const input = row.querySelector("[data-tracker-group-name]");
+        const name = input?.value.trim() || "";
+        if (!name) {
+          showError(errorMessage, "Enter a group name.");
+          input?.focus();
+          return;
+        }
+        saveButton.disabled = true;
+        clearError(errorMessage);
+        try {
+          const group = await requestGroupChange(
+            `/api/tracker-groups/${encodeURIComponent(groupId)}`,
+            "PUT",
+            { name },
+            "Could not rename this group.",
+          );
+          renameGroupInPage(group);
+          saveButton.disabled = false;
+        } catch (error) {
+          showError(errorMessage, error.message);
+          saveButton.disabled = false;
+        }
+        return;
+      }
+
+      const deleteButton = event.target.closest("[data-delete-tracker-group]");
+      if (!deleteButton || deleteButton.disabled) return;
+      const count = Number.parseInt(row.dataset.groupCount || "0", 10);
+      pendingDelete = { id: groupId, name: groupName, count };
+      clearError(deleteError);
+      confirmationInput.value = "";
+      confirmationField.hidden = count === 0;
+      confirmationInput.required = count > 0;
+      confirmationName.textContent = `"${groupName}"`;
+      confirmDelete.disabled = count > 0;
+      deleteMessage.textContent = count > 0
+        ? `This permanently deletes ${count} ${count === 1 ? "job" : "jobs"} and all Job Tracker history in ${groupName}.`
+        : `Delete the empty group ${groupName}?`;
+      deleteDialog.showModal();
+      if (count > 0) confirmationInput.focus();
+    });
+
+    confirmationInput.addEventListener("input", () => {
+      if (!pendingDelete || pendingDelete.count === 0) return;
+      confirmDelete.disabled = confirmationInput.value !== pendingDelete.name;
+    });
+
+    deleteDialog.addEventListener("close", () => {
+      pendingDelete = null;
+      confirmationInput.value = "";
+      clearError(deleteError);
+    });
+
+    confirmDelete.addEventListener("click", async () => {
+      if (!pendingDelete || confirmDelete.disabled) return;
+      confirmDelete.disabled = true;
+      clearError(deleteError);
+      try {
+        const deletedGroup = pendingDelete;
+        await requestGroupChange(
+          `/api/tracker-groups/${encodeURIComponent(pendingDelete.id)}`,
+          "DELETE",
+          {
+            confirmation_name: pendingDelete.count > 0
+              ? confirmationInput.value
+              : null,
+          },
+          "Could not delete this group.",
+        );
+        removeGroupFromPage(deletedGroup.id);
+        deleteDialog.close("deleted");
+      } catch (error) {
+        showError(deleteError, error.message);
+        confirmDelete.disabled = (
+          pendingDelete.count > 0
+          && confirmationInput.value !== pendingDelete.name
+        );
+      }
+    });
+  };
+
   const renderJobReevaluationState = (progress, state) => {
     if (!progress) return;
     const stepText = typeof state?.step === "string" ? ` (${state.step})` : "";
@@ -1161,7 +2007,7 @@
       closeButton?.removeAttribute("disabled");
       submitButton.disabled = false;
       resumeInput?.removeAttribute("disabled");
-      submitButton.textContent = "Import to Saved";
+      submitButton.textContent = submitButton.dataset.defaultLabel || "Import to Saved";
       if (progressMessage) {
         progressMessage.hidden = true;
         progressMessage.classList.remove("manual-job-error");
@@ -1352,9 +2198,12 @@
     document.querySelectorAll("[data-review-workspace]").forEach(
       initializeReviewGroupWorkspace,
     );
+    jobBatchController = initializeJobBatchMode();
     initializeSourceFilter();
     initializeGlobalSourceFilter();
+    initializeGlobalSort();
     initializeManualJobImport();
+    initializeTrackerGroupSettings();
     updateReviewGroupNoticeCounts();
     document.addEventListener(
       "job-scan:review-updated",
@@ -1547,7 +2396,9 @@
     const step = event.target.closest("[data-lifecycle-step]");
     if (!step || event.target.closest(".lifecycle-date-editor")) return;
     if (step.dataset.lifecycleStatus === "saved") {
-      window.alert("Saved is the lifecycle starting point and cannot be deleted.");
+      window.alert(
+        `${step.dataset.lifecycleStatusLabel} is the lifecycle starting point and cannot be deleted.`,
+      );
       return;
     }
     const card = step.closest("[data-job-key]");

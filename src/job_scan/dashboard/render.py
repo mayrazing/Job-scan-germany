@@ -19,7 +19,7 @@ from job_scan.dashboard.view_model import (
     build_current_dashboard,
     build_global_dashboard,
 )
-from job_scan.domain import Snapshot, StoreMeta
+from job_scan.domain import Snapshot, StoreMeta, default_tracker_groups
 from job_scan.setup_service import SetupAnswers
 
 if TYPE_CHECKING:
@@ -49,6 +49,7 @@ def render_dashboard(
     return template.render(
         revision=snapshot.meta.data_revision,
         current_dashboard=build_current_dashboard(snapshot),
+        tracker_groups=default_tracker_groups(),
         dashboard_css=_asset_text("dashboard.css"),
         dashboard_js=_asset_text("dashboard.js"),
     )
@@ -94,6 +95,10 @@ def render_console(
     scan_history = scan_history or []
     ats_history = ats_history or []
     global_snapshot = global_snapshot or Snapshot(meta=StoreMeta(data_revision=0))
+    tracker_groups = global_snapshot.meta.tracker_groups or default_tracker_groups()
+    saved_group_name = next(
+        group.name for group in tracker_groups if group.id == "saved"
+    )
     current_dashboard = build_current_dashboard(snapshot)
     global_dashboard = build_global_dashboard(global_snapshot)
     template = _environment().get_template("setup.html")
@@ -101,6 +106,8 @@ def render_console(
         revision=snapshot.meta.data_revision,
         current_dashboard=current_dashboard,
         global_dashboard=global_dashboard,
+        tracker_groups=tracker_groups,
+        saved_group_name=saved_group_name,
         setup=setup_answers,
         ai_selection=ai_selection,
         ai_providers=ai_providers,

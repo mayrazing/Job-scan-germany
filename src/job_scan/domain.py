@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 from datetime import UTC, date, datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Literal, Self, TypeAlias
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -57,18 +57,44 @@ class UserStatus(StrEnum):
     IGNORED = "ignored"
 
 
+TrackerStatus: TypeAlias = UserStatus | str
+
+
+def tracker_status_id(status: TrackerStatus) -> str:
+    """Return the stable persisted ID for one tracker status."""
+    return status.value if isinstance(status, UserStatus) else status
+
+
+def _normalize_tracker_status(value: object) -> TrackerStatus:
+    if isinstance(value, UserStatus):
+        return value
+    normalized = str(value).strip()
+    try:
+        return UserStatus(normalized)
+    except ValueError:
+        if not normalized or len(normalized) > 64:
+            raise ValueError("invalid tracker status ID") from None
+        if not normalized[0].isalpha() or any(
+            not (character.islower() or character.isdigit() or character == "-")
+            for character in normalized
+        ):
+            raise ValueError("invalid tracker status ID") from None
+        return normalized
+
+
 class UserStatusHistoryEntry(BaseModel):
     """Record one confirmed Job Tracker status change."""
 
-    status: UserStatus
+    status: TrackerStatus
     changed_at: datetime
 
-    @field_validator("status")
+    @field_validator("status", mode="before")
     @classmethod
-    def require_tracker_status(cls, value: UserStatus) -> UserStatus:
-        if value is UserStatus.NEW:
+    def require_tracker_status(cls, value: object) -> TrackerStatus:
+        normalized = _normalize_tracker_status(value)
+        if normalized is UserStatus.NEW:
             raise ValueError("status history cannot contain new")
-        return value
+        return normalized
 
     @field_validator("changed_at")
     @classmethod
@@ -494,12 +520,17 @@ class JobRecord(BaseModel):
     last_seen: datetime
     availability_status: AvailabilityStatus
     machine_status: MachineStatus = MachineStatus.PENDING
-    user_status: UserStatus = UserStatus.NEW
+    user_status: TrackerStatus = UserStatus.NEW
     user_status_updated_at: datetime
     user_status_history: list[UserStatusHistoryEntry] = Field(
         default_factory=list,
         exclude_if=lambda value: not value,
     )
+
+    @field_validator("user_status", mode="before")
+    @classmethod
+    def normalize_user_status(cls, value: object) -> TrackerStatus:
+        return _normalize_tracker_status(value)
     application_resume_id: str | None = Field(
         default=None,
         pattern=r"^sha256:[0-9a-f]{64}$",
@@ -660,11 +691,43 @@ class GlobalJobDeletion(BaseModel):
         return value.astimezone(UTC)
 
 
+class TrackerGroup(BaseModel):
+    """Store one configurable Job Tracker group."""
+
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("tracker group name cannot be blank")
+        return value
+
+
+def default_tracker_groups() -> list[TrackerGroup]:
+    """Return fresh copies of the seven built-in tracker groups."""
+    return [
+        TrackerGroup(id="saved", name="Saved"),
+        TrackerGroup(id="applied", name="Applied"),
+        TrackerGroup(id="interviewing", name="Interviewing"),
+        TrackerGroup(id="offer", name="Offer"),
+        TrackerGroup(id="withdrawn", name="Withdrawn"),
+        TrackerGroup(id="rejected", name="Rejected"),
+        TrackerGroup(id="ignored", name="Ignored"),
+    ]
+
+
 class StoreMeta(BaseModel):
     record_type: Literal["meta"] = "meta"
     data_revision: int
     generated_at: datetime | None = None
     global_job_deletions: list[GlobalJobDeletion] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+    tracker_groups: list[TrackerGroup] = Field(
         default_factory=list,
         exclude_if=lambda value: not value,
     )

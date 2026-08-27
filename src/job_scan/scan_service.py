@@ -521,6 +521,42 @@ def _default_source_factory(
                 and (reference.listing_posted_at - stored.posted_at).days >= 60
             )
 
+        if config.indeed_de_enabled:
+            adapters.append(
+                IndeedDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if config.linkedin_enabled:
+            adapters.append(
+                LinkedinAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if config.stepstone_de_enabled:
+            adapters.append(
+                StepstoneDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if config.glassdoor_de_enabled:
+            adapters.append(
+                GlassdoorDeAdapter(
+                    config,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if config.simplify_de_enabled:
+            adapters.append(
+                SimplifyDeAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
         if config.arbeitsagentur_enabled:
             adapters.append(
                 JobsucheAdapter(
@@ -580,42 +616,6 @@ def _default_source_factory(
         if "dallmeier" in config.target_companies:
             adapters.append(
                 DallmeierAdapter(
-                    config,
-                    http_client,
-                    capture_snapshot=should_capture_snapshot,
-                )
-            )
-        if config.linkedin_enabled:
-            adapters.append(
-                LinkedinAdapter(
-                    config,
-                    capture_snapshot=should_capture_snapshot,
-                )
-            )
-        if config.indeed_de_enabled:
-            adapters.append(
-                IndeedDeAdapter(
-                    config,
-                    capture_snapshot=should_capture_snapshot,
-                )
-            )
-        if config.stepstone_de_enabled:
-            adapters.append(
-                StepstoneDeAdapter(
-                    config,
-                    capture_snapshot=should_capture_snapshot,
-                )
-            )
-        if config.glassdoor_de_enabled:
-            adapters.append(
-                GlassdoorDeAdapter(
-                    config,
-                    capture_snapshot=should_capture_snapshot,
-                )
-            )
-        if config.simplify_de_enabled:
-            adapters.append(
-                SimplifyDeAdapter(
                     config,
                     http_client,
                     capture_snapshot=should_capture_snapshot,

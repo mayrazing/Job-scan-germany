@@ -14,19 +14,24 @@
   </dialog>
 {%- endmacro %}
 
-{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
+{% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current', tracker_groups=()) -%}
   {% set saved_event = namespace(entry=none, index=none) %}
   {% if status_scope == 'global' %}
     {% for event in job.user_status_history %}
-      {% if saved_event.entry is none and event.status.value == 'saved' %}
+      {% if saved_event.entry is none and event.status_id == 'saved' %}
         {% set saved_event.entry = event %}
         {% set saved_event.index = loop.index0 %}
       {% endif %}
     {% endfor %}
   {% endif %}
-  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
+  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-added-at="{{ saved_event.entry.changed_at.isoformat() if saved_event.entry else '' }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
+    {% if status_scope == 'global' %}
+      <button class="job-batch-toggle" type="button" data-job-batch-toggle aria-label="Select {{ job.title }} at {{ job.company }}" aria-pressed="false" hidden>
+        <span aria-hidden="true">✓</span>
+      </button>
+    {% endif %}
     <div class="job-preview-status" aria-label="Job status">
-      <span><strong>User status</strong><small>{{ job.user_status.value | replace('_', ' ') }}</small></span>
+      <span><strong>User status</strong><small data-tracker-status-name="{{ job.user_status_id }}">{{ job.user_status_name }}</small></span>
       <span><strong>Machine</strong><small>{{ job.machine_status.value | replace('_', ' ') }}</small></span>
       <span><strong>Availability</strong><small>{{ job.availability_status.value }}</small></span>
     </div>
@@ -74,9 +79,9 @@
         <label>
           <span>Set user status</span>
           <select name="status">
-            {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
-            {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
-              <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
+            {% if job.user_status_id == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
+            {% for group in tracker_groups %}
+              <option value="{{ group.id }}"{% if group.id == job.user_status_id %} selected{% endif %}>{{ group.name }}</option>
             {% endfor %}
           </select>
         </label>
@@ -105,7 +110,7 @@
     <dialog class="job-detail-dialog" data-job-detail-dialog aria-label="Job details for {{ job.title }} at {{ job.company }}">
       <div class="job-detail-panel">
     <div class="status-rail job-detail-status" aria-label="Job status">
-      <span><strong>User status:</strong> {{ job.user_status.value | replace('_', ' ') }}</span>
+      <span><strong>User status:</strong> <span data-tracker-status-name="{{ job.user_status_id }}">{{ job.user_status_name }}</span></span>
       <span><strong>Machine:</strong> {{ job.machine_status.value | replace('_', ' ') }}</span>
       <span><strong>Effective:</strong> {{ job.effective_status.value | replace('_', ' ') }}</span>
       <span><strong>Availability:</strong> {{ job.availability_status.value }}</span>
@@ -163,17 +168,17 @@
         <section class="job-lifecycle" data-job-lifecycle aria-label="Job lifecycle">
           <header class="lifecycle-heading">
             <strong>Job lifecycle</strong>
-            <span>Current: {{ job.user_status.value | replace('_', ' ') | title }}</span>
+            <span>Current: <span data-tracker-status-name="{{ job.user_status_id }}">{{ job.user_status_name }}</span></span>
           </header>
           <ol class="lifecycle-steps" aria-label="Status progress">
             {% for event in job.user_status_history %}
-              <li data-lifecycle-step data-lifecycle-event-index="{{ loop.index0 }}" data-lifecycle-status="{{ event.status.value }}" data-lifecycle-status-label="{{ event.status.value | replace('_', ' ') | title }}" data-state="{% if loop.last %}current{% else %}complete{% endif %}"{% if loop.last %} aria-current="step"{% endif %}>
+              <li data-lifecycle-step data-lifecycle-event-index="{{ loop.index0 }}" data-lifecycle-status="{{ event.status_id }}" data-lifecycle-status-label="{{ event.status_name }}" data-state="{% if loop.last %}current{% else %}complete{% endif %}"{% if loop.last %} aria-current="step"{% endif %}>
                 <span class="lifecycle-dot" aria-hidden="true"></span>
-                <strong>{{ event.status.value | replace('_', ' ') | title }}</strong>
+                <strong data-tracker-status-name="{{ event.status_id }}">{{ event.status_name }}</strong>
                 {% if status_scope == 'global' %}
                   <label class="lifecycle-date-editor">
                     <time data-lifecycle-time="{{ loop.index0 }}" data-lifecycle-time-format="date" datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
-                    <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status.value | replace('_', ' ') }} date">
+                    <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status_name }} date">
                   </label>
                 {% else %}
                   <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.date().isoformat() }}</time>
@@ -185,16 +190,16 @@
             <summary>Lifecycle details</summary>
             <ol>
               {% for event in job.user_status_history %}
-                <li data-lifecycle-event>
+                <li data-lifecycle-event data-lifecycle-status="{{ event.status_id }}">
                   {% if status_scope == 'global' %}
                     <label class="lifecycle-date-editor">
                       <time data-lifecycle-time="{{ loop.index0 }}" data-lifecycle-time-format="datetime" datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
-                      <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status.value | replace('_', ' ') }} date">
+                      <input type="date" value="{{ event.changed_at.date().isoformat() }}" data-lifecycle-date-input data-lifecycle-event-index="{{ loop.index0 }}" aria-label="Change {{ event.status_name }} date">
                     </label>
                   {% else %}
                     <time datetime="{{ event.changed_at.isoformat() }}">{{ event.changed_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
                   {% endif %}
-                  <span><strong>{{ event.status.value | replace('_', ' ') | title }}</strong></span>
+                  <span><strong data-tracker-status-name="{{ event.status_id }}">{{ event.status_name }}</strong></span>
                 </li>
               {% endfor %}
             </ol>
@@ -301,9 +306,9 @@
             <label>
               <span>Set user status</span>
               <select name="status">
-                {% if job.user_status.value == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
-                {% for status in ('saved', 'applied', 'interviewing', 'offer', 'withdrawn', 'rejected', 'ignored') %}
-                  <option value="{{ status }}"{% if status == job.user_status.value %} selected{% endif %}>{{ status | replace('_', ' ') | title }}</option>
+                {% if job.user_status_id == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
+                {% for group in tracker_groups %}
+                  <option value="{{ group.id }}"{% if group.id == job.user_status_id %} selected{% endif %}>{{ group.name }}</option>
                 {% endfor %}
               </select>
             </label>
@@ -479,18 +484,18 @@
   </nav>
 {%- endmacro %}
 
-{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current') -%}
+{% macro groups(dashboard, ats_selectable=false, company_size_searchable=false, status_scope='current', tracker_groups=()) -%}
   {% for group in dashboard.active_groups.values() %}
     <section class="job-group" id="{{ group.id }}" aria-labelledby="{{ group.id }}-title"{% if not loop.first %} hidden{% endif %}>
       <h2 class="visually-hidden" id="{{ group.id }}-title">{{ group.title }}</h2>
       <div class="card-grid">
-        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
+        {% for job in group.cards %}{{ card(job, ats_selectable, company_size_searchable, status_scope, tracker_groups) }}{% else %}<p class="empty">No jobs in this group.</p>{% endfor %}
       </div>
     </section>
   {% endfor %}
 {%- endmacro %}
 
-{% macro manual_job_import() -%}
+{% macro manual_job_import(saved_group_name='Saved') -%}
   <button class="manual-job-button" type="button" data-open-manual-job aria-controls="manual-job-dialog">Add job from URL</button>
   <dialog class="manual-job-dialog" id="manual-job-dialog" aria-labelledby="manual-job-dialog-title">
     <form data-manual-job-form method="dialog" aria-busy="false">
@@ -511,7 +516,7 @@
       <p class="manual-job-progress" data-manual-job-progress hidden role="status"></p>
       <div class="manual-job-actions">
         <button type="button" data-close-manual-job>Cancel</button>
-        <button type="submit" data-submit-manual-job>Import to Saved</button>
+        <button type="submit" data-submit-manual-job data-default-label="Import to {{ saved_group_name }}" data-saved-group-name="{{ saved_group_name }}">Import to {{ saved_group_name }}</button>
       </div>
     </form>
   </dialog>

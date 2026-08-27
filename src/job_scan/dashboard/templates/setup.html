@@ -12,18 +12,10 @@
   </head>
   <body data-review-run-id="{{ selected_run_id or '' }}" data-ats-run-id="{{ selected_ats.run_id if selected_ats else '' }}">
     <div class="console-sticky-header">
-      <header class="page-header">
-        <div>
-          <p class="eyebrow">Local scan console</p>
+      <header class="page-header workflow-toolbar">
+        <div class="console-brand">
           <h1>Job scan</h1>
         </div>
-        <div class="console-header-actions">
-          <button class="btn btn-outline-secondary" type="button" data-open-ai-config data-bs-toggle="modal" data-bs-target="#ai-config-modal">AI configuration</button>
-          <p class="revision console-state">Status <strong id="header-status">Ready</strong></p>
-        </div>
-      </header>
-
-      <div class="workflow-toolbar">
         <nav class="group-nav flow-nav" aria-label="Workflow">
           <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
           <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
@@ -32,22 +24,26 @@
           <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
           <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
         </nav>
-        <div class="background-task-menu" data-background-task-menu>
-          <button class="btn btn-outline-secondary background-task-toggle" type="button" data-background-task-toggle aria-expanded="false" aria-controls="background-task-panel">
-            <span class="background-task-dot" aria-hidden="true"></span>
-            <span>Tasks</span>
-            <span class="background-task-count" data-background-task-count>0</span>
-          </button>
-          <section class="background-task-panel" id="background-task-panel" aria-label="Running tasks" hidden>
-            <header class="background-task-panel-header">
-              <strong>Running tasks</strong>
-              <span data-background-task-summary>No active tasks</span>
-            </header>
-            <ol class="background-task-list" data-background-task-list aria-live="polite"></ol>
-            <p class="background-task-empty" data-background-task-empty>No tasks are running.</p>
-          </section>
+        <div class="console-header-actions">
+          <button class="btn btn-outline-secondary" type="button" data-open-ai-config data-bs-toggle="modal" data-bs-target="#ai-config-modal">AI configuration</button>
+          <p class="revision console-state visually-hidden">Status <strong id="header-status">Ready</strong></p>
+          <div class="background-task-menu" data-background-task-menu>
+            <button class="btn btn-outline-secondary background-task-toggle" type="button" data-background-task-toggle aria-expanded="false" aria-controls="background-task-panel">
+              <span class="background-task-dot" aria-hidden="true"></span>
+              <span>Tasks</span>
+              <span class="background-task-count" data-background-task-count>0</span>
+            </button>
+            <section class="background-task-panel" id="background-task-panel" aria-label="Running tasks" hidden>
+              <header class="background-task-panel-header">
+                <strong>Running tasks</strong>
+                <span data-background-task-summary>No active tasks</span>
+              </header>
+              <ol class="background-task-list" data-background-task-list aria-live="polite"></ol>
+              <p class="background-task-empty" data-background-task-empty>No tasks are running.</p>
+            </section>
+          </div>
         </div>
-      </div>
+      </header>
     </div>
 
     <div class="modal fade" id="ai-config-modal" tabindex="-1" aria-labelledby="ai-config-modal-title" aria-hidden="true">
@@ -227,8 +223,10 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 1 of 6</p>
-                <h2 id="setup-title">What should we look for?</h2>
-                <p>These values map to the current <code>job-scan setup</code> questions.</p>
+                <div class="section-title-line">
+                  <h2 id="setup-title">What should we look for?</h2>
+                  <p>These values map to the current <code>job-scan setup</code> questions.</p>
+                </div>
               </div>
               <span class="fixed-scope">DE · Sponsorship required</span>
             </header>
@@ -304,6 +302,75 @@
                 </div>
               </fieldset>
 
+              <fieldset class="form-section" id="opencli-config">
+                <legend>OpenCLI</legend>
+                <p class="form-text">Website sources connect through OpenCLI Browser Bridge. Each limit applies to every search term. For example, with 3 search terms and a limit of 10, that source searches for up to 30 jobs per location.</p>
+                <div class="field-grid">
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="indeed-de-limit">Indeed Deutschland</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="indeed-de-enabled" name="indeed-de-enabled" type="checkbox" role="switch" aria-label="Enable Indeed Deutschland" aria-controls="indeed-de-limit"{% if setup.indeed_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="indeed-de-limit" name="indeed-de-limit" type="number" value="{{ setup.indeed_de_limit }}" min="1" max="100" required{% if not setup.indeed_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="linkedin-limit">LinkedIn</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="linkedin-enabled" name="linkedin-enabled" type="checkbox" role="switch" aria-label="Enable LinkedIn" aria-controls="linkedin-limit"{% if setup.linkedin_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="linkedin-limit" name="linkedin-limit" type="number" value="{{ setup.linkedin_limit }}" min="1" max="100" required{% if not setup.linkedin_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="stepstone-de-limit">StepStone</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="stepstone-de-enabled" name="stepstone-de-enabled" type="checkbox" role="switch" aria-label="Enable StepStone" aria-controls="stepstone-de-limit"{% if setup.stepstone_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="stepstone-de-limit" name="stepstone-de-limit" type="number" value="{{ setup.stepstone_de_limit }}" min="1" max="100" required{% if not setup.stepstone_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="glassdoor-de-limit">Glassdoor DE</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="glassdoor-de-enabled" name="glassdoor-de-enabled" type="checkbox" role="switch" aria-label="Enable Glassdoor DE" aria-controls="glassdoor-de-limit"{% if setup.glassdoor_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="glassdoor-de-limit" name="glassdoor-de-limit" type="number" value="{{ setup.glassdoor_de_limit }}" min="1" max="100" required{% if not setup.glassdoor_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                  <div class="opencli-source-control">
+                    <div class="opencli-source-heading">
+                      <label class="field-label" for="simplify-de-limit">Simplify DE</label>
+                      <div class="form-check form-switch">
+                        <input class="form-check-input" id="simplify-de-enabled" name="simplify-de-enabled" type="checkbox" role="switch" aria-label="Enable Simplify DE" aria-controls="simplify-de-limit"{% if setup.simplify_de_enabled %} checked{% endif %}>
+                      </div>
+                    </div>
+                    <input class="form-control" id="simplify-de-limit" name="simplify-de-limit" type="number" value="{{ setup.simplify_de_limit }}" min="1" max="100" required{% if not setup.simplify_de_enabled %} disabled{% endif %}>
+                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section" id="api-config">
+                <legend>API</legend>
+                <p class="form-text">Choose API sources for this scan.</p>
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="arbeitsagentur-enabled" name="arbeitsagentur-enabled" type="checkbox" role="switch"{% if setup.arbeitsagentur_enabled %} checked{% endif %}>
+                  <label class="form-check-label" for="arbeitsagentur-enabled">
+                    <span class="field-label">Arbeitsagentur</span>
+                    <span class="form-text">Use the Bundesagentur für Arbeit Jobsuche API.</span>
+                  </label>
+                </div>
+              </fieldset>
+
               <fieldset class="form-section" id="target-companies-config">
                 <legend>Target companies <span>Optional</span></legend>
                 <p class="form-text">Search selected companies directly. Locations shape official searches when supported; other company sources filter locations from job details.</p>
@@ -358,75 +425,6 @@
                 </div>
               </fieldset>
 
-              <fieldset class="form-section" id="api-config">
-                <legend>API</legend>
-                <p class="form-text">Choose API sources for this scan.</p>
-                <div class="form-check form-switch">
-                  <input class="form-check-input" id="arbeitsagentur-enabled" name="arbeitsagentur-enabled" type="checkbox" role="switch"{% if setup.arbeitsagentur_enabled %} checked{% endif %}>
-                  <label class="form-check-label" for="arbeitsagentur-enabled">
-                    <span class="field-label">Arbeitsagentur</span>
-                    <span class="form-text">Use the Bundesagentur für Arbeit Jobsuche API.</span>
-                  </label>
-                </div>
-              </fieldset>
-
-              <fieldset class="form-section" id="opencli-config">
-                <legend>OpenCLI</legend>
-                <p class="form-text">Website sources connect through OpenCLI Browser Bridge. Each limit applies to every search term. For example, with 3 search terms and a limit of 10, that source searches for up to 30 jobs per location.</p>
-                <div class="field-grid">
-                  <div class="opencli-source-control">
-                    <div class="opencli-source-heading">
-                      <label class="field-label" for="linkedin-limit">LinkedIn</label>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" id="linkedin-enabled" name="linkedin-enabled" type="checkbox" role="switch" aria-label="Enable LinkedIn" aria-controls="linkedin-limit"{% if setup.linkedin_enabled %} checked{% endif %}>
-                      </div>
-                    </div>
-                    <input class="form-control" id="linkedin-limit" name="linkedin-limit" type="number" value="{{ setup.linkedin_limit }}" min="1" max="100" required{% if not setup.linkedin_enabled %} disabled{% endif %}>
-                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
-                  </div>
-                  <div class="opencli-source-control">
-                    <div class="opencli-source-heading">
-                      <label class="field-label" for="indeed-de-limit">Indeed Deutschland</label>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" id="indeed-de-enabled" name="indeed-de-enabled" type="checkbox" role="switch" aria-label="Enable Indeed Deutschland" aria-controls="indeed-de-limit"{% if setup.indeed_de_enabled %} checked{% endif %}>
-                      </div>
-                    </div>
-                    <input class="form-control" id="indeed-de-limit" name="indeed-de-limit" type="number" value="{{ setup.indeed_de_limit }}" min="1" max="100" required{% if not setup.indeed_de_enabled %} disabled{% endif %}>
-                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
-                  </div>
-                  <div class="opencli-source-control">
-                    <div class="opencli-source-heading">
-                      <label class="field-label" for="stepstone-de-limit">StepStone</label>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" id="stepstone-de-enabled" name="stepstone-de-enabled" type="checkbox" role="switch" aria-label="Enable StepStone" aria-controls="stepstone-de-limit"{% if setup.stepstone_de_enabled %} checked{% endif %}>
-                      </div>
-                    </div>
-                    <input class="form-control" id="stepstone-de-limit" name="stepstone-de-limit" type="number" value="{{ setup.stepstone_de_limit }}" min="1" max="100" required{% if not setup.stepstone_de_enabled %} disabled{% endif %}>
-                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
-                  </div>
-                  <div class="opencli-source-control">
-                    <div class="opencli-source-heading">
-                      <label class="field-label" for="glassdoor-de-limit">Glassdoor DE</label>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" id="glassdoor-de-enabled" name="glassdoor-de-enabled" type="checkbox" role="switch" aria-label="Enable Glassdoor DE" aria-controls="glassdoor-de-limit"{% if setup.glassdoor_de_enabled %} checked{% endif %}>
-                      </div>
-                    </div>
-                    <input class="form-control" id="glassdoor-de-limit" name="glassdoor-de-limit" type="number" value="{{ setup.glassdoor_de_limit }}" min="1" max="100" required{% if not setup.glassdoor_de_enabled %} disabled{% endif %}>
-                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
-                  </div>
-                  <div class="opencli-source-control">
-                    <div class="opencli-source-heading">
-                      <label class="field-label" for="simplify-de-limit">Simplify DE</label>
-                      <div class="form-check form-switch">
-                        <input class="form-check-input" id="simplify-de-enabled" name="simplify-de-enabled" type="checkbox" role="switch" aria-label="Enable Simplify DE" aria-controls="simplify-de-limit"{% if setup.simplify_de_enabled %} checked{% endif %}>
-                      </div>
-                    </div>
-                    <input class="form-control" id="simplify-de-limit" name="simplify-de-limit" type="number" value="{{ setup.simplify_de_limit }}" min="1" max="100" required{% if not setup.simplify_de_enabled %} disabled{% endif %}>
-                    <span class="form-text">Jobs per search term and location. Maximum 100.</span>
-                  </div>
-                </div>
-              </fieldset>
-
               <div class="accordion advanced-settings" id="advanced-settings">
                 <div class="accordion-item">
                   <h2 class="accordion-header">
@@ -470,8 +468,10 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 2 of 6</p>
-                <h2 id="run-title">Scanning for matching jobs</h2>
-                <p id="run-message" aria-live="polite">Preparing your factual profile...</p>
+                <div class="section-title-line">
+                  <h2 id="run-title">Scanning for matching jobs</h2>
+                  <p id="run-message" aria-live="polite">Preparing your factual profile...</p>
+                </div>
               </div>
               <span id="run-percent" class="run-percent">0%</span>
             </header>
@@ -502,8 +502,10 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 3 of 6</p>
-                <h2 id="review-title">Review queue</h2>
-                <p>Review current jobs without leaving this workflow.</p>
+                <div class="section-title-line">
+                  <h2 id="review-title">Review queue</h2>
+                  <p>Review current jobs without leaving this workflow.</p>
+                </div>
               </div>
               <span class="fixed-scope ready-badge">Data revision {{ revision }}</span>
             </header>
@@ -519,9 +521,13 @@
                   <article class="ai-provider-row{% if entry.run_id == selected_run_id %} is-selected{% endif %}" data-scan-history-id="{{ entry.run_id }}">
                     <div class="ai-provider-mark" aria-hidden="true">{{ entry.candidate_name[:2] | upper }}</div>
                     <div class="ai-provider-copy">
-                      <div class="ai-provider-title"><strong>{{ entry.candidate_name }}</strong></div>
-                      <p>{{ entry.job_count }} jobs · {{ entry.recommended_count }} recommended</p>
-                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                      <div class="history-row-line">
+                        <div class="ai-provider-title"><strong>{{ entry.candidate_name }}</strong></div>
+                        <span class="history-row-sep" aria-hidden="true">|</span>
+                        <span>{{ entry.job_count }} jobs · {{ entry.recommended_count }} recommended</span>
+                        <span class="history-row-sep" aria-hidden="true">|</span>
+                        <time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                      </div>
                     </div>
                     <div class="ai-provider-actions scan-history-actions">
                       <a class="btn btn-outline-secondary" data-scan-download href="/api/scan-history/{{ entry.run_id }}/resume">Download resume</a>
@@ -598,7 +604,7 @@
                 </header>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.review-group-order.v1">
                   {{ navigation(current_dashboard, 'Current history job groups') }}
-                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current') }}</div>
+                  <div class="review-groups">{{ groups(current_dashboard, false, true, 'current', tracker_groups) }}</div>
                 </div>
               </section>
             </div>
@@ -608,32 +614,150 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 4 of 6</p>
-                <h2 id="job-tracker-title">Job Tracker</h2>
-                <p>Track jobs across all searches in one place.</p>
+                <div class="section-title-line">
+                  <h2 id="job-tracker-title">Job Tracker</h2>
+                  <p>Track jobs across all searches in one place.</p>
+                </div>
               </div>
               <span class="fixed-scope ready-badge">Data revision {{ revision }}</span>
             </header>
             <div class="embedded-review">
               <section class="review-block" data-review-block="global">
                 <div class="review-filters job-tracker-filters">
-                  <div class="source-filter">
-                    <label for="global-source-filter">
-                      <span class="field-label">Search sources</span>
+                  <div class="source-filter tracker-source-filter">
+                    <label class="field-label" for="global-source-filter">Search sources</label>
+                    <div class="tracker-source-control">
                       <select class="form-select" id="global-source-filter" name="global-source-filter" multiple aria-describedby="source-filter-help"></select>
-                    </label>
+                      <button class="btn btn-outline-secondary tracker-group-settings-button" type="button" data-open-tracker-groups aria-controls="tracker-group-dialog" aria-label="Manage Job Tracker groups" title="Manage Job Tracker groups">⚙</button>
+                    </div>
                   </div>
+                  {{ manual_job_import(saved_group_name) }}
                   <div class="url-filter">
                     <label for="global-url-filter">
                       <span class="field-label">Job URL</span>
                       <input class="form-control" id="global-url-filter" name="global-url-filter" type="search" inputmode="url" autocomplete="off" placeholder="Paste job URL">
                     </label>
                   </div>
-                  {{ manual_job_import() }}
+                  <div class="sort-filter">
+                    <label for="global-sort">
+                      <span class="field-label">Sort by</span>
+                      <select class="form-select" id="global-sort" name="global-sort">
+                        <option value="">Default order</option>
+                        <option value="added-desc">Added: newest first</option>
+                        <option value="added-asc">Added: oldest first</option>
+                        <option value="posted-desc">Posted: newest first</option>
+                        <option value="posted-asc">Posted: oldest first</option>
+                        <option value="score-desc">Score: highest first</option>
+                        <option value="score-asc">Score: lowest first</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div class="job-batch-toolbar" data-job-batch-toolbar role="toolbar" aria-label="Selected Job Tracker jobs" hidden>
+                  <div>
+                    <strong data-batch-selected-count>0 selected</strong>
+                    <span>Click a card to add or remove it.</span>
+                  </div>
+                  <div class="job-batch-actions">
+                    <button class="btn btn-primary" type="button" data-batch-move>Move</button>
+                    <button class="btn btn-outline-danger" type="button" data-batch-delete>Delete</button>
+                    <button class="btn btn-outline-secondary" type="button" data-exit-batch>Exit</button>
+                  </div>
                 </div>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Job Tracker groups') }}
-                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global') }}</div>
+                  <div class="review-groups">{{ groups(global_dashboard, true, true, 'global', tracker_groups) }}</div>
                 </div>
+                <dialog class="manual-job-dialog job-batch-dialog" data-job-batch-move-dialog aria-labelledby="job-batch-move-title">
+                  <form method="dialog">
+                    <header>
+                      <h4 id="job-batch-move-title">Move selected jobs</h4>
+                      <p data-batch-move-message></p>
+                    </header>
+                    <label>
+                      <span>Target group</span>
+                      <select class="form-select" data-batch-target-group>
+                        {% for group in tracker_groups %}
+                          <option value="{{ group.id }}">{{ group.name }}</option>
+                        {% endfor %}
+                      </select>
+                    </label>
+                    <p class="manual-job-error" data-job-batch-move-error role="alert" hidden></p>
+                    <div class="manual-job-actions">
+                      <button class="btn btn-outline-secondary" type="button" data-cancel-batch-move>Cancel</button>
+                      <button class="btn btn-primary" type="button" data-confirm-batch-move>Move jobs</button>
+                    </div>
+                  </form>
+                </dialog>
+                <dialog class="manual-job-dialog job-batch-dialog" data-job-batch-delete-dialog aria-labelledby="job-batch-delete-title">
+                  <form method="dialog">
+                    <header>
+                      <h4 id="job-batch-delete-title">Delete selected jobs?</h4>
+                      <p data-batch-delete-message></p>
+                    </header>
+                    <label>
+                      <span>Type <strong>"Delete all"</strong> to permanently delete the selected jobs</span>
+                      <input type="text" autocomplete="off" data-batch-delete-confirmation>
+                    </label>
+                    <p class="manual-job-error" data-job-batch-delete-error role="alert" hidden></p>
+                    <div class="manual-job-actions">
+                      <button class="btn btn-outline-secondary" type="button" data-cancel-batch-delete>Cancel</button>
+                      <button class="btn btn-outline-danger" type="button" data-confirm-batch-delete disabled>Delete jobs</button>
+                    </div>
+                  </form>
+                </dialog>
+                <dialog class="manual-job-dialog tracker-group-dialog" id="tracker-group-dialog" data-tracker-group-dialog aria-labelledby="tracker-group-dialog-title">
+                  <form method="dialog">
+                    <header>
+                      <p class="eyebrow">Job Tracker</p>
+                      <h4 id="tracker-group-dialog-title">Manage groups</h4>
+                      <p>Add, rename, or delete the groups used by every tracked job.</p>
+                    </header>
+                    <div class="tracker-group-list" data-tracker-group-list>
+                      {% for group in global_dashboard.active_groups.values() %}
+                        <div class="tracker-group-row" data-tracker-group-row data-group-id="{{ group.id }}" data-group-name="{{ group.title }}" data-group-count="{{ group.count }}">
+                          <label>
+                            <span class="visually-hidden">{{ group.title }} group name</span>
+                            <input type="text" value="{{ group.title }}" maxlength="80" data-tracker-group-name aria-label="Rename {{ group.title }}">
+                          </label>
+                          <span class="tracker-group-job-count">{{ group.count }} {{ 'job' if group.count == 1 else 'jobs' }}</span>
+                          <div class="tracker-group-row-actions">
+                            <button class="btn btn-outline-secondary" type="button" data-save-tracker-group>Save</button>
+                            <button class="btn btn-outline-danger" type="button" data-delete-tracker-group{% if group.id == 'saved' %} disabled aria-disabled="true" title="{{ group.title }} is the required starting group"{% endif %}>Delete</button>
+                          </div>
+                        </div>
+                      {% endfor %}
+                    </div>
+                    <div class="tracker-group-create">
+                      <label for="tracker-group-new-name">
+                        <span>New group</span>
+                        <input id="tracker-group-new-name" type="text" maxlength="80" autocomplete="off" placeholder="Group name" data-new-tracker-group-name>
+                      </label>
+                      <button class="btn btn-primary" type="button" data-create-tracker-group>Add group</button>
+                    </div>
+                    <p class="manual-job-error" data-tracker-group-error role="alert" hidden></p>
+                    <div class="manual-job-actions">
+                      <button class="btn btn-outline-secondary" type="button" data-close-tracker-groups>Close</button>
+                    </div>
+                  </form>
+                </dialog>
+                <dialog class="manual-job-dialog tracker-group-delete-dialog" data-tracker-group-delete-dialog aria-labelledby="tracker-group-delete-title">
+                  <form method="dialog">
+                    <header>
+                      <h4 id="tracker-group-delete-title">Delete group?</h4>
+                      <p data-tracker-group-delete-message></p>
+                    </header>
+                    <label data-tracker-group-confirmation-field>
+                      <span>Type <strong data-tracker-group-confirmation-name></strong> to confirm</span>
+                      <input type="text" autocomplete="off" data-tracker-group-confirmation-input>
+                    </label>
+                    <p class="manual-job-error" data-tracker-group-delete-error role="alert" hidden></p>
+                    <div class="manual-job-actions">
+                      <button class="btn btn-outline-secondary" type="submit" value="cancel" formnovalidate data-cancel-tracker-group-delete>Cancel</button>
+                      <button class="btn btn-outline-danger" type="button" data-confirm-tracker-group-delete>Delete</button>
+                    </div>
+                  </form>
+                </dialog>
               </section>
             </div>
           </section>
@@ -650,8 +774,10 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 5 of 6</p>
-                <h2 id="ats-running-title">ATS run</h2>
-                <p>Follow the current ATS check from Job Tracker to completion.</p>
+                <div class="section-title-line">
+                  <h2 id="ats-running-title">ATS run</h2>
+                  <p>Follow the current ATS check from Job Tracker to completion.</p>
+                </div>
               </div>
               <span class="fixed-scope ready-badge" id="ats-run-badge">Idle</span>
             </header>
@@ -685,8 +811,10 @@
             <header class="section-heading">
               <div>
                 <p class="eyebrow">Step 6 of 6</p>
-                <h2 id="ats-title">ATS check</h2>
-                <p>Check resume readability once, then compare the resume with each selected job.</p>
+                <div class="section-title-line">
+                  <h2 id="ats-title">ATS check</h2>
+                  <p>Check resume readability once, then compare the resume with each selected job.</p>
+                </div>
               </div>
               <span class="fixed-scope ready-badge" id="ats-result-scope">{% if selected_ats %}Saved check · {{ selected_ats.jobs | length }} jobs{% else %}No saved checks{% endif %}</span>
             </header>
@@ -703,9 +831,13 @@
                   <article class="ai-provider-row{% if selected_ats and entry.run_id == selected_ats.run_id %} is-selected{% endif %}" data-ats-history-id="{{ entry.run_id }}">
                     <div class="ai-provider-mark" aria-hidden="true">ATS</div>
                     <div class="ai-provider-copy">
-                      <div class="ai-provider-title"><strong>{{ entry.resume_filename }}</strong></div>
-                      <p>{{ entry.job_count }} jobs · {{ entry.readiness_score }} resume readiness{% if entry.failed_job_count %} · {{ entry.failed_job_count }} failed{% endif %}</p>
-                      <small><time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time></small>
+                      <div class="history-row-line">
+                        <div class="ai-provider-title"><strong>{{ entry.resume_filename }}</strong></div>
+                        <span class="history-row-sep" aria-hidden="true">|</span>
+                        <span>{{ entry.job_count }} jobs · {{ entry.readiness_score }} resume readiness{% if entry.failed_job_count %} · {{ entry.failed_job_count }} failed{% endif %}</span>
+                        <span class="history-row-sep" aria-hidden="true">|</span>
+                        <time data-local-datetime datetime="{{ entry.finished_at.isoformat() }}">{{ entry.finished_at.strftime('%Y-%m-%d %H:%M') }} UTC</time>
+                      </div>
                     </div>
                     <div class="ai-provider-actions scan-history-actions">
                       <a class="btn btn-outline-secondary" data-ats-history-view href="/setup?ats_run_id={{ entry.run_id }}#ats-check">👁 View</a>

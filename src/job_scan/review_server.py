@@ -94,11 +94,7 @@ from job_scan.domain import (
     StoreMeta,
     UserStatus,
 )
-from job_scan.global_jobs import (
-    GLOBAL_USER_STATUSES,
-    GlobalJobStore,
-    filter_untracked_jobs,
-)
+from job_scan.global_jobs import GlobalJobStore, filter_untracked_jobs
 from job_scan.http_client import InvalidResponse
 from job_scan.job_snapshot import JobSnapshotStore
 from job_scan.locking import FileRWLock, LockUnavailable
@@ -149,14 +145,53 @@ _SESSION_COOKIE = "job_scan_session"
 
 
 class _StatusMutation(BaseModel):
-    status: UserStatus
+    status: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")
 
     @field_validator("status")
     @classmethod
-    def reject_new_status(cls, value: UserStatus) -> UserStatus:
+    def reject_new_status(cls, value: str) -> str:
         """Keep New as an automatic state, never a user-selected state."""
-        if value not in GLOBAL_USER_STATUSES:
+        if value == UserStatus.NEW.value:
             raise ValueError("New is not a selectable user status")
+        return value
+
+
+class _TrackerGroupMutation(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("group name cannot be blank")
+        return value
+
+
+class _TrackerGroupDeletion(BaseModel):
+    confirmation_name: str | None = Field(default=None, max_length=80)
+
+
+class _BatchStatusMutation(_StatusMutation):
+    keys: list[str] = Field(min_length=1, max_length=1000)
+
+    @field_validator("keys")
+    @classmethod
+    def require_unique_job_keys(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value) or any(not key.strip() for key in value):
+            raise ValueError("job keys must be non-blank and unique")
+        return value
+
+
+class _BatchDeletionMutation(BaseModel):
+    keys: list[str] = Field(min_length=1, max_length=1000)
+    confirmation_text: str = Field(max_length=40)
+
+    @field_validator("keys")
+    @classmethod
+    def require_unique_job_keys(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value) or any(not key.strip() for key in value):
+            raise ValueError("job keys must be non-blank and unique")
         return value
 
 
@@ -443,10 +478,18 @@ def create_review_app(
 
     def save_review_status(
         job: JobRecord,
-        selected_status: UserStatus,
+        selected_status: str,
         run_id: str | None = None,
     ) -> None:
         """Copy one Review decision and its default resume into Job Tracker."""
+        group_ids = {
+            group.id for group in global_jobs.load_read_only().meta.tracker_groups
+        }
+        if selected_status not in group_ids:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "The selected Job Tracker group does not exist.",
+            )
         context = resume_context(run_id)
         if context is None:
             raise HTTPException(
@@ -907,7 +950,12 @@ def create_review_app(
                             start_company_size_lookup,
                         )
                         start_company_size_lookup(job)
-                        progress("save", "Saving this job to Saved.")
+                        saved_group_name = next(
+                            group.name
+                            for group in global_jobs.load_read_only().meta.tracker_groups
+                            if group.id == UserStatus.SAVED.value
+                        )
+                        progress("save", f"Saving this job to {saved_group_name}.")
                         saved_job = global_jobs.upsert_with_default_status(
                             job,
                             UserStatus.SAVED,
@@ -1576,28 +1624,17 @@ def create_review_app(
         dependencies=[Depends(require_mutation_request)],
     )
     def generate_global_job_snapshot(key: str, force: bool = False) -> Response:
-        try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                working = global_jobs.load()
-                occurrence = capture_missing_snapshot(working, key, force=force)
-                if occurrence is not None:
-                    _mutate_global_or_conflict(
-                        global_jobs,
-                        _job_snapshot_mutator(
-                            key,
-                            occurrence,
-                            replace_existing=force,
-                        ),
-                    )
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the snapshot after it completes.",
-            ) from None
+        working = global_jobs.load()
+        occurrence = capture_missing_snapshot(working, key, force=force)
+        if occurrence is not None:
+            _mutate_global_or_conflict(
+                global_jobs,
+                _job_snapshot_mutator(
+                    key,
+                    occurrence,
+                    replace_existing=force,
+                ),
+            )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     if workflow is not None:
@@ -1941,24 +1978,16 @@ def create_review_app(
     def refresh_global_job_company_size(key: str) -> CompanySizeEvidence:
         service = company_sizes()
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(blocking=False):
-                snapshot = global_jobs.load()
-                job = _find_job(snapshot, key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                config = company_size_config(job_tracker=True)
-                result = service.lookup_for_job(job, config, datetime.now(UTC))
-                _mutate_global_or_conflict(
-                    global_jobs,
-                    _company_size_mutator(service, key, result, config),
-                )
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the company-size search after it completes.",
-            ) from None
+            snapshot = global_jobs.load()
+            job = _find_job(snapshot, key)
+            if job is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND)
+            config = company_size_config(job_tracker=True)
+            result = service.lookup_for_job(job, config, datetime.now(UTC))
+            _mutate_global_or_conflict(
+                global_jobs,
+                _company_size_mutator(service, key, result, config),
+            )
         except CompanySizeLookupError as error:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -2011,24 +2040,16 @@ def create_review_app(
         try:
             filename = Path(resume.filename or "").name
             resume_bytes = read_resume_upload(resume.file)
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(blocking=False):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                resume_path, _created = store_uploaded_resume(
-                    repository.paths,
-                    filename,
-                    resume_bytes,
-                )
-                resume_id = f"sha256:{resume_path.stem}"
-                global_jobs.set_application_resume(job, resume_id, filename)
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the resume change after it completes.",
-            ) from None
+            job = global_jobs.find(key)
+            if job is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND)
+            resume_path, _created = store_uploaded_resume(
+                repository.paths,
+                filename,
+                resume_bytes,
+            )
+            resume_id = f"sha256:{resume_path.stem}"
+            global_jobs.set_application_resume(job, resume_id, filename)
         except HTTPException:
             raise
         except (ResumeError, OSError, ValueError) as error:
@@ -2045,18 +2066,101 @@ def create_review_app(
     )
     def delete_global_job(key: str) -> Response:
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(blocking=False):
-                global_jobs.delete(key)
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry deleting the global job after it completes.",
-            ) from None
+            global_jobs.delete(key)
         except KeyError:
             raise HTTPException(status.HTTP_404_NOT_FOUND) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/api/tracker-groups",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def create_tracker_group(mutation: _TrackerGroupMutation) -> dict[str, str]:
+        try:
+            group = global_jobs.create_group(mutation.name)
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        return {"id": group.id, "name": group.name}
+
+    @app.put(
+        "/api/tracker-groups/{group_id}",
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def rename_tracker_group(
+        group_id: str,
+        mutation: _TrackerGroupMutation,
+    ) -> dict[str, str]:
+        try:
+            group = global_jobs.rename_group(group_id, mutation.name)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        return {"id": group.id, "name": group.name}
+
+    @app.delete(
+        "/api/tracker-groups/{group_id}",
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def delete_tracker_group(
+        group_id: str,
+        mutation: _TrackerGroupDeletion,
+    ) -> dict[str, int]:
+        try:
+            deleted_jobs = global_jobs.delete_group(
+                group_id,
+                confirmation_name=mutation.confirmation_name,
+            )
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        return {"deleted_jobs": deleted_jobs}
+
+    @app.post(
+        "/api/job-tracker/jobs/batch-status",
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def set_batch_job_status(mutation: _BatchStatusMutation) -> dict[str, int]:
+        try:
+            global_jobs.set_status_many(mutation.keys, mutation.status)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        return {"updated_jobs": len(mutation.keys)}
+
+    @app.delete(
+        "/api/job-tracker/jobs/batch",
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def delete_batch_jobs(mutation: _BatchDeletionMutation) -> dict[str, int]:
+        try:
+            deleted_jobs = global_jobs.delete_many(
+                mutation.keys,
+                confirmation_text=mutation.confirmation_text,
+            )
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
+        return {"deleted_jobs": deleted_jobs}
 
     @app.post(
         "/api/jobs/{key}/status",
@@ -2143,19 +2247,14 @@ def create_review_app(
     )
     def set_global_job_status(key: str, mutation: _StatusMutation) -> Response:
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                global_jobs.set_status(job, mutation.status)
-        except LockUnavailable:
+            job = global_jobs.find(key)
+            if job is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND)
+            global_jobs.set_status(job, mutation.status)
+        except ValueError as error:
             raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the status change after it completes.",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -2174,28 +2273,17 @@ def create_review_app(
             )
             if value is not None
         )
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.set_manual_fact(job, field_name, value)
-                except KeyError:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-                except ValueError as error:
-                    raise HTTPException(
-                        status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        str(error),
-                    ) from None
-        except LockUnavailable:
+            global_jobs.set_manual_fact(job, field_name, value)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
             raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the manual fact after it completes.",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -2209,32 +2297,21 @@ def create_review_app(
         event_index: int,
         mutation: _LifecycleDateMutation,
     ) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.set_status_date(
-                        job,
-                        event_index,
-                        mutation.changed_on,
-                    )
-                except (KeyError, IndexError):
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-                except ValueError as error:
-                    raise HTTPException(
-                        status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        str(error),
-                    ) from None
-        except LockUnavailable:
+            global_jobs.set_status_date(
+                job,
+                event_index,
+                mutation.changed_on,
+            )
+        except (KeyError, IndexError):
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
             raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the lifecycle date change after it completes.",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -2247,28 +2324,17 @@ def create_review_app(
         key: str,
         event_index: int,
     ) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.delete_status_event(job, event_index)
-                except (KeyError, IndexError):
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-                except ValueError as error:
-                    raise HTTPException(
-                        status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        str(error),
-                    ) from None
-        except LockUnavailable:
+            global_jobs.delete_status_event(job, event_index)
+        except (KeyError, IndexError):
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
             raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the lifecycle event deletion after it completes.",
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
             ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -2278,39 +2344,28 @@ def create_review_app(
         dependencies=[Depends(require_mutation_request)],
     )
     def set_global_job_salary(key: str, mutation: _SalaryMutation) -> Response:
-        try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                global_jobs.set_salaries(
-                    job,
-                    expected_salary=(
-                        SalaryValue(
-                            amount=mutation.expected_salary,
-                            period=mutation.expected_salary_period,
-                        )
-                        if mutation.expected_salary
-                        else None
-                    ),
-                    offer_salary=(
-                        SalaryValue(
-                            amount=mutation.offer_salary,
-                            period=mutation.offer_salary_period,
-                        )
-                        if mutation.offer_salary
-                        else None
-                    ),
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        global_jobs.set_salaries(
+            job,
+            expected_salary=(
+                SalaryValue(
+                    amount=mutation.expected_salary,
+                    period=mutation.expected_salary_period,
                 )
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the salary change after it completes.",
-            ) from None
+                if mutation.expected_salary
+                else None
+            ),
+            offer_salary=(
+                SalaryValue(
+                    amount=mutation.offer_salary,
+                    period=mutation.offer_salary_period,
+                )
+                if mutation.offer_salary
+                else None
+            ),
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
@@ -2319,24 +2374,13 @@ def create_review_app(
         dependencies=[Depends(require_mutation_request)],
     )
     def add_global_job_note(key: str, mutation: _JobNoteMutation) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.add_note(job, mutation.content)
-                except KeyError:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry adding the note after it completes.",
-            ) from None
+            global_jobs.add_note(job, mutation.content)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.put(
@@ -2349,24 +2393,13 @@ def create_review_app(
         note_id: uuid.UUID,
         mutation: _JobNoteMutation,
     ) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.edit_note(job, note_id, mutation.content)
-                except KeyError:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry editing the note after it completes.",
-            ) from None
+            global_jobs.edit_note(job, note_id, mutation.content)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.delete(
@@ -2375,24 +2408,13 @@ def create_review_app(
         dependencies=[Depends(require_mutation_request)],
     )
     def delete_global_job_note(key: str, note_id: uuid.UUID) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
         try:
-            with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                blocking=False
-            ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                blocking=False
-            ):
-                job = global_jobs.find(key)
-                if job is None:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND)
-                try:
-                    global_jobs.delete_note(job, note_id)
-                except KeyError:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND) from None
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry deleting the note after it completes.",
-            ) from None
+            global_jobs.delete_note(job, note_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(

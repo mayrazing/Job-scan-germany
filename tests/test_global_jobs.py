@@ -81,6 +81,197 @@ def store(tmp_path: Path) -> GlobalJobStore:
     return GlobalJobStore(AppPaths.from_root(tmp_path / "home"))
 
 
+def test_new_store_exposes_default_tracker_groups(store: GlobalJobStore) -> None:
+    snapshot = store.load()
+
+    assert [(group.id, group.name) for group in snapshot.meta.tracker_groups] == [
+        ("saved", "Saved"),
+        ("applied", "Applied"),
+        ("interviewing", "Interviewing"),
+        ("offer", "Offer"),
+        ("withdrawn", "Withdrawn"),
+        ("rejected", "Rejected"),
+        ("ignored", "Ignored"),
+    ]
+
+
+def test_custom_tracker_group_can_receive_jobs(store: GlobalJobStore) -> None:
+    group = store.create_group("Phone screen")
+    job = _job("job-1", external_ids=("shared",))
+
+    saved = store.set_status(job, group.id, NOW)
+
+    assert saved.jobs[0].user_status == group.id
+    assert saved.jobs[0].user_status_history[-1].status == group.id
+    assert store.load().meta.tracker_groups[-1] == group
+
+
+def test_batch_status_move_updates_every_job_in_one_revision(
+    store: GlobalJobStore,
+) -> None:
+    first = _job("first", external_ids=("first-source",))
+    second = _job("second", external_ids=("second-source",))
+    store.set_status(first, UserStatus.SAVED, NOW)
+    before = store.set_status(second, UserStatus.SAVED, NOW)
+
+    moved = store.set_status_many(
+        ["first", "second"],
+        UserStatus.APPLIED,
+        NOW + timedelta(minutes=1),
+    )
+
+    assert moved.meta.data_revision == before.meta.data_revision + 1
+    assert {job.user_status for job in moved.jobs} == {UserStatus.APPLIED}
+    assert all(
+        [entry.status for entry in job.user_status_history]
+        == [UserStatus.SAVED, UserStatus.APPLIED]
+        for job in moved.jobs
+    )
+
+
+def test_batch_status_move_rejects_unknown_job_without_moving_anything(
+    store: GlobalJobStore,
+) -> None:
+    store.set_status(
+        _job("first", external_ids=("first-source",)),
+        UserStatus.SAVED,
+        NOW,
+    )
+    before = store.load()
+
+    with pytest.raises(KeyError, match="missing"):
+        store.set_status_many(
+            ["first", "missing"],
+            UserStatus.APPLIED,
+            NOW + timedelta(minutes=1),
+        )
+
+    assert store.load() == before
+
+
+def test_batch_delete_requires_exact_confirmation_and_is_atomic(
+    store: GlobalJobStore,
+) -> None:
+    for key in ("first", "second"):
+        store.set_status(
+            _job(key, external_ids=(f"{key}-source",)),
+            UserStatus.SAVED,
+            NOW,
+        )
+    before = store.load()
+
+    with pytest.raises(ValueError, match="Delete all"):
+        store.delete_many(["first", "second"], confirmation_text="delete all")
+    with pytest.raises(KeyError, match="missing"):
+        store.delete_many(
+            ["first", "missing"],
+            confirmation_text="Delete all",
+        )
+
+    assert store.load() == before
+    deleted_count = store.delete_many(
+        ["first", "second"],
+        confirmation_text="Delete all",
+        now=NOW + timedelta(minutes=1),
+    )
+    deleted = store.load()
+    assert deleted_count == 2
+    assert deleted.jobs == []
+    assert deleted.meta.data_revision == before.meta.data_revision + 1
+    assert {
+        marker.canonical_job_keys[0]
+        for marker in deleted.meta.global_job_deletions
+    } == {"first", "second"}
+
+
+def test_renaming_tracker_group_keeps_its_identity_and_job_history(
+    store: GlobalJobStore,
+) -> None:
+    job = _job("job-1", external_ids=("shared",))
+    store.set_status(job, UserStatus.SAVED, NOW)
+
+    renamed = store.rename_group("saved", "Inbox")
+
+    tracked = store.find("job-1")
+    assert renamed.id == "saved"
+    assert renamed.name == "Inbox"
+    assert tracked is not None
+    assert tracked.user_status is UserStatus.SAVED
+    assert tracked.user_status_history[0].status is UserStatus.SAVED
+
+
+def test_tracker_group_names_must_be_nonempty_and_unique(
+    store: GlobalJobStore,
+) -> None:
+    store.create_group("Phone screen")
+
+    with pytest.raises(ValueError, match="cannot be blank"):
+        store.create_group("  ")
+    with pytest.raises(ValueError, match="already exists"):
+        store.create_group(" phone SCREEN ")
+
+
+def test_saved_tracker_group_cannot_be_deleted(store: GlobalJobStore) -> None:
+    with pytest.raises(ValueError, match="required starting group"):
+        store.delete_group("saved")
+
+
+def test_empty_tracker_group_can_be_deleted_without_name_confirmation(
+    store: GlobalJobStore,
+) -> None:
+    group = store.create_group("Phone screen")
+
+    deleted_count = store.delete_group(group.id)
+
+    assert deleted_count == 0
+    assert group.id not in {item.id for item in store.load().meta.tracker_groups}
+
+
+def test_nonempty_tracker_group_requires_exact_name_before_batch_delete(
+    store: GlobalJobStore,
+) -> None:
+    group = store.create_group("Phone screen")
+    job = _job("job-1", external_ids=("shared",))
+    store.set_status(job, group.id, NOW)
+
+    with pytest.raises(ValueError, match="exact group name"):
+        store.delete_group(group.id)
+    with pytest.raises(ValueError, match="exact group name"):
+        store.delete_group(group.id, confirmation_name="phone screen")
+
+    assert store.find("job-1") is not None
+    assert group.id in {item.id for item in store.load().meta.tracker_groups}
+
+
+def test_nonempty_tracker_group_deletes_jobs_and_surviving_history_atomically(
+    store: GlobalJobStore,
+) -> None:
+    group = store.create_group("Phone screen")
+    deleted_job = _job("deleted", external_ids=("deleted-source",))
+    surviving_job = _job("surviving", external_ids=("surviving-source",))
+    store.set_status(deleted_job, group.id, NOW)
+    store.set_status(surviving_job, group.id, NOW)
+    store.set_status(surviving_job, UserStatus.APPLIED, NOW + timedelta(minutes=1))
+
+    deleted_count = store.delete_group(
+        group.id,
+        confirmation_name="Phone screen",
+        now=NOW + timedelta(minutes=2),
+    )
+
+    snapshot = store.load()
+    assert deleted_count == 1
+    assert store.find("deleted") is None
+    assert [job.canonical_job_key for job in snapshot.jobs] == ["surviving"]
+    assert [entry.status for entry in snapshot.jobs[0].user_status_history] == [
+        UserStatus.SAVED,
+        UserStatus.APPLIED,
+    ]
+    assert group.id not in {item.id for item in snapshot.meta.tracker_groups}
+    assert len(snapshot.meta.global_job_deletions) == 1
+    assert snapshot.meta.global_job_deletions[0].canonical_job_keys == ["deleted"]
+
+
 def test_import_ignores_new_and_newest_old_status_wins(store: GlobalJobStore) -> None:
     earlier = _job(
         "old-key",
@@ -301,7 +492,7 @@ def test_saved_status_event_cannot_be_deleted(store: GlobalJobStore) -> None:
     tracked = store.find("job-1")
     assert tracked is not None
 
-    with pytest.raises(ValueError, match="Saved lifecycle event cannot be deleted"):
+    with pytest.raises(ValueError, match="required starting lifecycle event cannot be deleted"):
         store.delete_status_event(tracked, 0)
 
     assert store.find("job-1") == tracked

@@ -19,7 +19,9 @@ from job_scan.domain import (
     SalaryValue,
     Snapshot,
     StoreMeta,
+    TrackerGroup,
     UserStatus,
+    UserStatusHistoryEntry,
 )
 
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
@@ -96,6 +98,92 @@ def test_global_dashboard_contains_only_manual_status_groups_and_keeps_closed_jo
         PrimaryView.REJECTED: ["rejected"],
         PrimaryView.IGNORED: ["ignored"],
     }
+
+
+def test_configured_groups_drive_global_sidebar_status_picker_and_lifecycle_names() -> None:
+    custom_status = "group-phone-screen"
+    job = _job("custom", user=UserStatus.SAVED).model_copy(
+        update={
+            "user_status": custom_status,
+            "user_status_history": [
+                UserStatusHistoryEntry(status=UserStatus.SAVED, changed_at=NOW),
+                UserStatusHistoryEntry(
+                    status=custom_status,
+                    changed_at=NOW + timedelta(days=1),
+                ),
+            ],
+        }
+    )
+    snapshot = Snapshot(
+        meta=StoreMeta(
+            data_revision=7,
+            generated_at=NOW,
+            tracker_groups=[
+                TrackerGroup(id="saved", name="Inbox"),
+                TrackerGroup(id=custom_status, name="Phone screen"),
+            ],
+        ),
+        jobs=[job],
+    )
+
+    dashboard = view_model.build_global_dashboard(snapshot)
+    html = render_console(global_snapshot=snapshot)
+    soup = BeautifulSoup(html, "html.parser")
+    global_block = soup.select_one('[data-review-block="global"]')
+    assert global_block is not None
+    card = global_block.select_one('[data-job-key="custom"]')
+    assert card is not None
+
+    assert [group.title for group in dashboard.active_groups.values()] == [
+        "Inbox",
+        "Phone screen",
+    ]
+    assert [group.id for group in dashboard.active_groups.values()] == [
+        "saved",
+        custom_status,
+    ]
+    assert [label.get_text(strip=True) for label in global_block.select(".review-group-label")] == [
+        "Inbox",
+        "Phone screen",
+    ]
+    assert [option.get_text(strip=True) for option in card.select('select[name="status"] option')] == [
+        "Inbox",
+        "Phone screen",
+    ] * 2
+    assert card.select_one(".job-preview-status small").get_text(strip=True) == "Phone screen"
+    assert "User status: Phone screen" in card.select_one(
+        ".job-detail-status"
+    ).get_text(" ", strip=True)
+    assert [
+        step.get_text(" ", strip=True)
+        for step in card.select("[data-lifecycle-step] strong")
+    ] == ["Inbox", "Phone screen"]
+    assert soup.select_one(
+        "#manual-job-dialog [data-submit-manual-job]"
+    ).get_text(strip=True) == (
+        "Import to Inbox"
+    )
+
+
+def test_job_tracker_renders_group_settings_control_and_dialogs() -> None:
+    html = render_console(global_snapshot=_snapshot(_job("saved", user=UserStatus.SAVED)))
+    soup = BeautifulSoup(html, "html.parser")
+
+    opener = soup.select_one("[data-open-tracker-groups]")
+    dialog = soup.select_one("[data-tracker-group-dialog]")
+    delete_dialog = soup.select_one("[data-tracker-group-delete-dialog]")
+    rows = soup.select("[data-tracker-group-row]")
+    saved_row = soup.select_one('[data-tracker-group-row][data-group-id="saved"]')
+
+    assert opener is not None
+    assert opener.get("aria-controls") == "tracker-group-dialog"
+    assert dialog is not None
+    assert delete_dialog is not None
+    assert len(rows) == 7
+    assert saved_row is not None
+    assert saved_row.select_one("[data-delete-tracker-group]").has_attr("disabled")
+    assert soup.select_one(".tracker-source-control #global-source-filter") is not None
+    assert soup.select_one(".tracker-source-control [data-open-tracker-groups]") is not None
 
 
 def test_console_splits_current_search_and_tracked_jobs_into_two_views() -> None:

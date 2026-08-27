@@ -15,7 +15,10 @@ from job_scan.domain import (
     ReevaluationNotice,
     SalaryValue,
     Snapshot,
-    UserStatus,
+    TrackerGroup,
+    TrackerStatus,
+    default_tracker_groups,
+    tracker_status_id,
 )
 from job_scan.status import effective_status, primary_view
 
@@ -75,7 +78,9 @@ _COMPANY_SIZE_BOUNDS = {
 class JobStatusEvent:
     """Expose one immutable Job Tracker status change."""
 
-    status: UserStatus
+    status: TrackerStatus
+    status_id: str
+    status_name: str
     changed_at: datetime
 
 
@@ -105,7 +110,9 @@ class JobCard:
     source_names: tuple[str, ...]
     first_seen: datetime
     last_seen: datetime
-    user_status: UserStatus
+    user_status: TrackerStatus
+    user_status_id: str
+    user_status_name: str
     user_status_history: tuple[JobStatusEvent, ...]
     application_resume_id: str | None
     application_resume_filename: str | None
@@ -154,7 +161,7 @@ class DashboardGroup:
 class DashboardViewModel:
     """Store one ordered set of visible Review groups."""
 
-    active_groups: Mapping[PrimaryView, DashboardGroup]
+    active_groups: Mapping[PrimaryView | str, DashboardGroup]
 
 
 def build_dashboard(snapshot: Snapshot) -> DashboardViewModel:
@@ -168,20 +175,27 @@ def build_current_dashboard(snapshot: Snapshot) -> DashboardViewModel:
 
 
 def build_global_dashboard(snapshot: Snapshot) -> DashboardViewModel:
-    """Project globally decided jobs into the seven user-owned groups."""
-    user_views = {
-        UserStatus.SAVED: PrimaryView.SAVED,
-        UserStatus.APPLIED: PrimaryView.APPLIED,
-        UserStatus.INTERVIEWING: PrimaryView.INTERVIEWING,
-        UserStatus.OFFER: PrimaryView.OFFER,
-        UserStatus.WITHDRAWN: PrimaryView.WITHDRAWN,
-        UserStatus.REJECTED: PrimaryView.REJECTED,
-        UserStatus.IGNORED: PrimaryView.IGNORED,
+    """Project globally decided jobs into configured tracker groups."""
+    groups = snapshot.meta.tracker_groups or default_tracker_groups()
+    status_names = {group.id: group.name for group in groups}
+    active_jobs: dict[str, list[JobRecord]] = {group.id: [] for group in groups}
+    for job in snapshot.jobs:
+        group_id = tracker_status_id(job.user_status)
+        if group_id in active_jobs:
+            active_jobs[group_id].append(job)
+    active_groups = {
+        _global_group_key(group): DashboardGroup(
+            id=group.id,
+            title=group.name,
+            cards=tuple(
+                _card(job, status_names)
+                for job in _sort_active(active_jobs[group.id])
+            ),
+        )
+        for group in groups
     }
-    return _build_dashboard(
-        snapshot,
-        GLOBAL_VIEW_ORDER,
-        lambda job: user_views.get(job.user_status),
+    return DashboardViewModel(
+        active_groups=MappingProxyType(active_groups),
     )
 
 
@@ -200,7 +214,7 @@ def _build_dashboard(
         if view in active_jobs:
             active_jobs[view].append(job)
 
-    groups = {
+    groups: dict[PrimaryView | str, DashboardGroup] = {
         view: DashboardGroup(
             id=view.value,
             title=_GROUP_TITLES[view],
@@ -211,7 +225,10 @@ def _build_dashboard(
     return DashboardViewModel(active_groups=MappingProxyType(groups))
 
 
-def _card(job: JobRecord) -> JobCard:
+def _card(
+    job: JobRecord,
+    status_names: Mapping[str, str] | None = None,
+) -> JobCard:
     """Copy raw display facts from one record into an immutable card."""
     status = effective_status(job)
     source_names = tuple(
@@ -242,6 +259,8 @@ def _card(job: JobRecord) -> JobCard:
         if company_size is not None
         else None
     )
+    resolved_status_names = status_names or {}
+    user_status_id = tracker_status_id(job.user_status)
     return JobCard(
         canonical_key=job.canonical_job_key,
         company=job.company,
@@ -279,8 +298,21 @@ def _card(job: JobRecord) -> JobCard:
         first_seen=job.first_seen,
         last_seen=job.last_seen,
         user_status=job.user_status,
+        user_status_id=user_status_id,
+        user_status_name=_tracker_status_name(
+            user_status_id,
+            resolved_status_names,
+        ),
         user_status_history=tuple(
-            JobStatusEvent(status=entry.status, changed_at=entry.changed_at)
+            JobStatusEvent(
+                status=entry.status,
+                status_id=tracker_status_id(entry.status),
+                status_name=_tracker_status_name(
+                    tracker_status_id(entry.status),
+                    resolved_status_names,
+                ),
+                changed_at=entry.changed_at,
+            )
             for entry in job.user_status_history
         ),
         application_resume_id=job.application_resume_id,
@@ -379,6 +411,20 @@ def _card(job: JobRecord) -> JobCard:
             if manual_company_industry is None and company_industry is not None
             else ()
         ),
+    )
+
+
+def _global_group_key(group: TrackerGroup) -> PrimaryView | str:
+    try:
+        return PrimaryView(group.id)
+    except ValueError:
+        return group.id
+
+
+def _tracker_status_name(status_id: str, names: Mapping[str, str]) -> str:
+    return names.get(
+        status_id,
+        status_id.replace("_", " ").replace("-", " ").title(),
     )
 
 

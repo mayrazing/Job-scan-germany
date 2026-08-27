@@ -963,7 +963,7 @@ def test_new_scan_reviews_a_job_even_when_an_old_search_already_reviewed_it(
     assert result.machine_status is MachineStatus.PENDING
 
 
-def test_default_source_factory_includes_opencli_sources_after_jobsuche(
+def test_default_source_factory_includes_opencli_sources_before_jobsuche(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -972,12 +972,12 @@ def test_default_source_factory_includes_opencli_sources_after_jobsuche(
     adapters = _default_source_factory(paths)(config(paths))
 
     assert [adapter.source for adapter in adapters] == [
-        SourceKind.ARBEITSAGENTUR,
-        SourceKind.LINKEDIN,
         SourceKind.INDEED,
+        SourceKind.LINKEDIN,
         SourceKind.STEPSTONE,
         SourceKind.GLASSDOOR,
         SourceKind.SIMPLIFY,
+        SourceKind.ARBEITSAGENTUR,
     ]
 
 
@@ -1377,16 +1377,16 @@ def test_default_source_factory_includes_selected_bosch_source(
     adapters = _default_source_factory(paths)(value)
 
     assert [adapter.source for adapter in adapters] == [
-        SourceKind.ARBEITSAGENTUR,
-        SourceKind.BOSCH,
-        SourceKind.LINKEDIN,
         SourceKind.INDEED,
+        SourceKind.LINKEDIN,
         SourceKind.STEPSTONE,
         SourceKind.GLASSDOOR,
         SourceKind.SIMPLIFY,
+        SourceKind.ARBEITSAGENTUR,
+        SourceKind.BOSCH,
     ]
-    assert isinstance(adapters[1], BoschAdapter)
-    assert adapters[1].source_instance == "bosch"
+    assert isinstance(adapters[6], BoschAdapter)
+    assert adapters[6].source_instance == "bosch"
 
 
 def test_default_source_factory_includes_selected_target_companies_together(
@@ -1411,6 +1411,11 @@ def test_default_source_factory_includes_selected_target_companies_together(
     adapters = _default_source_factory(paths)(value)
 
     assert [adapter.source for adapter in adapters] == [
+        SourceKind.INDEED,
+        SourceKind.LINKEDIN,
+        SourceKind.STEPSTONE,
+        SourceKind.GLASSDOOR,
+        SourceKind.SIMPLIFY,
         SourceKind.ARBEITSAGENTUR,
         SourceKind.BOSCH,
         SourceKind.TELEKOM,
@@ -1419,20 +1424,15 @@ def test_default_source_factory_includes_selected_target_companies_together(
         SourceKind.DHL,
         SourceKind.THYSSENKRUPP,
         SourceKind.DALLMEIER,
-        SourceKind.LINKEDIN,
-        SourceKind.INDEED,
-        SourceKind.STEPSTONE,
-        SourceKind.GLASSDOOR,
-        SourceKind.SIMPLIFY,
     ]
-    assert adapters[1].source_instance == "bosch"
-    assert adapters[2].source_instance == "telekom"
-    assert adapters[3].source_instance == "rohdeschwarz"
-    assert adapters[4].source_instance == "siemens"
-    assert adapters[5].source_instance == "dhl"
-    assert adapters[6].source_instance == "thyssenkrupp"
-    assert isinstance(adapters[7], DallmeierAdapter)
-    assert adapters[7].source_instance == "dallmeier"
+    assert adapters[6].source_instance == "bosch"
+    assert adapters[7].source_instance == "telekom"
+    assert adapters[8].source_instance == "rohdeschwarz"
+    assert adapters[9].source_instance == "siemens"
+    assert adapters[10].source_instance == "dhl"
+    assert adapters[11].source_instance == "thyssenkrupp"
+    assert isinstance(adapters[12], DallmeierAdapter)
+    assert adapters[12].source_instance == "dallmeier"
 
 
 def test_default_http_cache_is_scoped_to_its_run_id(tmp_path: Path) -> None:
@@ -1522,8 +1522,8 @@ def test_default_source_factory_skips_arbeitsagentur_when_disabled(
     adapters = _default_source_factory(paths)(value)
 
     assert [adapter.source for adapter in adapters] == [
-        SourceKind.LINKEDIN,
         SourceKind.INDEED,
+        SourceKind.LINKEDIN,
         SourceKind.STEPSTONE,
         SourceKind.GLASSDOOR,
         SourceKind.SIMPLIFY,
@@ -1539,51 +1539,51 @@ def test_default_source_factory_skips_arbeitsagentur_when_disabled(
         (
             "linkedin_enabled",
             [
-                SourceKind.ARBEITSAGENTUR,
                 SourceKind.INDEED,
                 SourceKind.STEPSTONE,
                 SourceKind.GLASSDOOR,
                 SourceKind.SIMPLIFY,
+                SourceKind.ARBEITSAGENTUR,
             ],
         ),
         (
             "indeed_de_enabled",
             [
-                SourceKind.ARBEITSAGENTUR,
                 SourceKind.LINKEDIN,
                 SourceKind.STEPSTONE,
                 SourceKind.GLASSDOOR,
                 SourceKind.SIMPLIFY,
+                SourceKind.ARBEITSAGENTUR,
             ],
         ),
         (
             "stepstone_de_enabled",
             [
-                SourceKind.ARBEITSAGENTUR,
-                SourceKind.LINKEDIN,
                 SourceKind.INDEED,
+                SourceKind.LINKEDIN,
                 SourceKind.GLASSDOOR,
                 SourceKind.SIMPLIFY,
+                SourceKind.ARBEITSAGENTUR,
             ],
         ),
         (
             "glassdoor_de_enabled",
             [
-                SourceKind.ARBEITSAGENTUR,
-                SourceKind.LINKEDIN,
                 SourceKind.INDEED,
+                SourceKind.LINKEDIN,
                 SourceKind.STEPSTONE,
                 SourceKind.SIMPLIFY,
+                SourceKind.ARBEITSAGENTUR,
             ],
         ),
         (
             "simplify_de_enabled",
             [
-                SourceKind.ARBEITSAGENTUR,
-                SourceKind.LINKEDIN,
                 SourceKind.INDEED,
+                SourceKind.LINKEDIN,
                 SourceKind.STEPSTONE,
                 SourceKind.GLASSDOOR,
+                SourceKind.ARBEITSAGENTUR,
             ],
         ),
     ],

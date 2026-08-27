@@ -393,7 +393,7 @@ def test_packaged_dashboard_javascript_uses_review_api_request_contract() -> Non
     assert "return options" in javascript
     assert "response.ok" in javascript
     assert "preserveOpenDetail: action === \"resume\"" in javascript
-    assert 'submitButton.textContent = "Import to Saved"' in javascript
+    assert 'submitButton.dataset.defaultLabel || "Import to Saved"' in javascript
     assert "Import to Shortlisted" not in javascript
 
 

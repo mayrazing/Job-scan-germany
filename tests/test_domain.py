@@ -209,7 +209,8 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
 
     assert set(dumped) == set(Snapshot.model_fields)
     assert set(dumped["meta"]) == set(StoreMeta.model_fields) - {
-        "global_job_deletions"
+        "global_job_deletions",
+        "tracker_groups",
     }
     assert set(dumped["jobs"][0]) == set(JobRecord.model_fields) - {
         "global_status_deleted_at",

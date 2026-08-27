@@ -468,7 +468,7 @@ main {
 .card-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.85rem;
+  gap: 0.6rem;
   align-items: start;
 }
 
@@ -489,7 +489,7 @@ main {
   width: 100%;
   min-width: 0;
   max-width: none;
-  min-height: 160px;
+  min-height: 0;
   border-top: 1px solid var(--border);
   border-left: 4px solid var(--action);
   cursor: pointer;
@@ -553,6 +553,40 @@ main {
   transform: none;
 }
 
+.review-block.is-batch-mode .card-grid > .job-card {
+  cursor: pointer;
+}
+
+.card-grid > .job-card.is-batch-selected {
+  border-color: var(--action);
+  box-shadow: inset 0 0 0 2px var(--action);
+}
+
+.job-batch-toggle {
+  position: absolute;
+  z-index: 4;
+  top: 0.65rem;
+  right: 0.65rem;
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  place-items: center;
+  border: 2px solid var(--action);
+  border-radius: 50%;
+  background: var(--surface);
+  color: transparent;
+  font: inherit;
+  font-weight: 850;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.job-batch-toggle[aria-pressed="true"] {
+  background: var(--action);
+  color: #FFFFFF;
+}
+
 .card-grid > .job-card:hover {
   border-color: var(--action);
   box-shadow: 0 0.7rem 1.5rem rgb(23 33 43 / 12%);
@@ -569,7 +603,7 @@ main {
   min-height: 0;
   grid-template-columns: 1fr;
   gap: 0;
-  padding: 0.55rem 0.7rem;
+  padding: 0.4rem 0.7rem;
   border-right: 1px solid var(--border);
   border-bottom: 0;
   background: #E7EFEB;
@@ -581,7 +615,7 @@ main {
   min-width: 0;
   gap: 0.1rem;
   align-content: center;
-  padding: 0.35rem 0.2rem;
+  padding: 0.22rem 0.2rem;
   overflow: hidden;
   line-height: 1.15;
   white-space: nowrap;
@@ -603,15 +637,15 @@ main {
   min-height: 0;
   grid-template-columns: minmax(0, 1fr) 13.5rem;
   grid-template-rows: auto auto;
-  gap: 0.55rem 1rem;
-  padding: 0.75rem 0.85rem;
+  gap: 0.35rem 1rem;
+  padding: 0.55rem 0.85rem;
 }
 
 .job-preview-summary {
   display: grid;
   min-height: 0;
   grid-row: 1 / -1;
-  gap: 0.45rem;
+  gap: 0.3rem;
   align-content: start;
   padding-right: 1rem;
   overflow: hidden;
@@ -624,7 +658,7 @@ main {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 1rem;
   align-items: start;
-  padding: 0.55rem 0.7rem;
+  padding: 0.35rem 0.7rem;
   border-bottom: 1px solid var(--border);
   background: #F9FBFA;
 }
@@ -758,11 +792,11 @@ main {
 
 .job-preview-footer {
   display: flex;
-  min-height: 1.8rem;
+  min-height: 1.5rem;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding-top: 0.4rem;
+  padding-top: 0.25rem;
   border-top: 1px solid var(--border);
   color: var(--action);
   font-size: 0.72rem;
@@ -904,7 +938,7 @@ main {
 }
 
 .company {
-  color: var(--muted);
+  color: #000;
   font-size: 0.82rem;
   font-weight: 700;
 }

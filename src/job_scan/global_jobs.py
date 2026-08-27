@@ -17,8 +17,12 @@ from job_scan.domain import (
     Snapshot,
     SourceOccurrence,
     StoreMeta,
+    TrackerGroup,
+    TrackerStatus,
     UserStatus,
     UserStatusHistoryEntry,
+    default_tracker_groups,
+    tracker_status_id,
 )
 from job_scan.locking import FileRWLock
 from job_scan.paths import AppPaths
@@ -100,6 +104,72 @@ class GlobalJobStore:
         """Load every global job with only its latest review result."""
         return self.load()
 
+    def create_group(self, name: str) -> TrackerGroup:
+        """Append one uniquely named tracker group."""
+        normalized_name = _tracker_group_name(name)
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            groups = [group.model_copy(deep=True) for group in current.meta.tracker_groups]
+            _require_unique_group_name(groups, normalized_name)
+            group = TrackerGroup(id=f"group-{uuid4().hex}", name=normalized_name)
+            groups.append(group)
+            self._persist_unlocked(current, current.jobs, groups=groups)
+        return group.model_copy(deep=True)
+
+    def rename_group(self, group_id: str, name: str) -> TrackerGroup:
+        """Change one group display name without changing its stable ID."""
+        normalized_name = _tracker_group_name(name)
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            groups = [group.model_copy(deep=True) for group in current.meta.tracker_groups]
+            group = _tracker_group(groups, group_id)
+            _require_unique_group_name(groups, normalized_name, excluding=group.id)
+            group.name = normalized_name
+            self._persist_unlocked(current, current.jobs, groups=groups)
+        return group.model_copy(deep=True)
+
+    def delete_group(
+        self,
+        group_id: str,
+        *,
+        confirmation_name: str | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Delete one group and batch-delete jobs currently assigned to it."""
+        if group_id == UserStatus.SAVED.value:
+            raise ValueError("The required starting group cannot be deleted")
+        deleted_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            groups = [group.model_copy(deep=True) for group in current.meta.tracker_groups]
+            group = _tracker_group(groups, group_id)
+            jobs = [job.model_copy(deep=True) for job in current.jobs]
+            deleted_jobs = [
+                job for job in jobs if tracker_status_id(job.user_status) == group.id
+            ]
+            if deleted_jobs and confirmation_name != group.name:
+                raise ValueError("enter the exact group name to delete its jobs")
+            deletions = [
+                item.model_copy(deep=True)
+                for item in current.meta.global_job_deletions
+            ]
+            deletions.extend(_deletion_for(job, deleted_at) for job in deleted_jobs)
+            survivors = [job for job in jobs if job not in deleted_jobs]
+            for job in survivors:
+                job.user_status_history = [
+                    entry
+                    for entry in job.user_status_history
+                    if tracker_status_id(entry.status) != group.id
+                ]
+            remaining_groups = [item for item in groups if item.id != group.id]
+            self._persist_unlocked(
+                current,
+                survivors,
+                deletions=deletions,
+                groups=remaining_groups,
+            )
+        return len(deleted_jobs)
+
     def mutate_details(self, mutator: Callable[[Snapshot], Snapshot]) -> Snapshot:
         """Update global job details without changing membership or user decisions."""
         with self._lock.exclusive():
@@ -114,7 +184,7 @@ class GlobalJobStore:
             for key, job in proposed_by_key.items():
                 current_job = current_by_key[key]
                 if (
-                    job.user_status not in GLOBAL_USER_STATUSES
+                    tracker_status_id(job.user_status) == UserStatus.NEW.value
                     or job.user_status != current_job.user_status
                     or job.user_status_updated_at != current_job.user_status_updated_at
                     or job.user_status_history != current_job.user_status_history
@@ -155,7 +225,7 @@ class GlobalJobStore:
     def set_status(
         self,
         job: JobRecord,
-        status: UserStatus,
+        status: TrackerStatus,
         now: datetime | None = None,
         *,
         resume_id: str | None = None,
@@ -163,18 +233,18 @@ class GlobalJobStore:
         application_resume_filename: str | None = None,
     ) -> Snapshot:
         """Persist one selected status for a job, regardless of its source snapshot."""
-        try:
-            selected_status = UserStatus(status)
-        except ValueError as exc:
-            raise ValueError("status is not a global user status") from exc
-        if selected_status not in GLOBAL_USER_STATUSES:
-            raise ValueError("global job status cannot be new")
+        selected_status = status
         if application_resume_filename is not None and resume_id is None:
             raise ValueError("application resume filename requires a resume id")
         updated_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
 
         with self._lock.exclusive():
             current = self._load_and_migrate_unlocked()
+            if tracker_status_id(selected_status) == UserStatus.NEW.value:
+                raise ValueError("global job status cannot be new")
+            group_ids = {group.id for group in current.meta.tracker_groups}
+            if tracker_status_id(selected_status) not in group_ids:
+                raise ValueError("status is not an active tracker group")
             jobs = [item.model_copy(deep=True) for item in current.jobs]
             deletions = [
                 item.model_copy(deep=True)
@@ -199,7 +269,7 @@ class GlobalJobStore:
             candidate.user_status = selected_status
             candidate.user_status_updated_at = (
                 previous.user_status_updated_at
-                if previous is not None and previous.user_status is selected_status
+                if previous is not None and previous.user_status == selected_status
                 else updated_at
             )
             candidate.global_status_deleted_at = None
@@ -220,6 +290,35 @@ class GlobalJobStore:
             return _visible_snapshot(
                 self._persist_unlocked(current, jobs, deletions=deletions)
             )
+
+    def set_status_many(
+        self,
+        keys: Sequence[str],
+        status: TrackerStatus,
+        now: datetime | None = None,
+    ) -> Snapshot:
+        """Move existing tracked jobs to one group in a single write."""
+        selected_keys = _validated_batch_keys(keys)
+        updated_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            selected_status_id = tracker_status_id(status)
+            if selected_status_id == UserStatus.NEW.value:
+                raise ValueError("global job status cannot be new")
+            if selected_status_id not in {
+                group.id for group in current.meta.tracker_groups
+            }:
+                raise ValueError("status is not an active tracker group")
+            jobs = [job.model_copy(deep=True) for job in current.jobs]
+            jobs_by_key = {job.canonical_job_key: job for job in jobs}
+            missing = next((key for key in selected_keys if key not in jobs_by_key), None)
+            if missing is not None:
+                raise KeyError(missing)
+            for key in selected_keys:
+                job = jobs_by_key[key]
+                _record_status(job, status, updated_at)
+                job.global_status_deleted_at = None
+            return _visible_snapshot(self._persist_unlocked(current, jobs))
 
     def set_application_resume(
         self,
@@ -370,8 +469,8 @@ class GlobalJobStore:
             merged = _merge_jobs([jobs[index] for index in matches])
             if event_index < 0 or event_index >= len(merged.user_status_history):
                 raise IndexError(event_index)
-            if merged.user_status_history[event_index].status is UserStatus.SAVED:
-                raise ValueError("The Saved lifecycle event cannot be deleted.")
+            if tracker_status_id(merged.user_status_history[event_index].status) == UserStatus.SAVED.value:
+                raise ValueError("The required starting lifecycle event cannot be deleted.")
             del merged.user_status_history[event_index]
             current_event = merged.user_status_history[-1]
             merged.user_status = current_event.status
@@ -755,6 +854,40 @@ class GlobalJobStore:
             deletions.append(_deletion_for(job, deleted_at))
             self._persist_unlocked(current, jobs, deletions=deletions)
 
+    def delete_many(
+        self,
+        keys: Sequence[str],
+        *,
+        confirmation_text: str,
+        now: datetime | None = None,
+    ) -> int:
+        """Delete tracked jobs together after exact destructive confirmation."""
+        if confirmation_text != "Delete all":
+            raise ValueError("enter Delete all to confirm batch deletion")
+        selected_keys = _validated_batch_keys(keys)
+        deleted_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [job.model_copy(deep=True) for job in current.jobs]
+            jobs_by_key = {job.canonical_job_key: job for job in jobs}
+            missing = next((key for key in selected_keys if key not in jobs_by_key), None)
+            if missing is not None:
+                raise KeyError(missing)
+            selected = set(selected_keys)
+            deleted_jobs = [
+                job for job in jobs if job.canonical_job_key in selected
+            ]
+            survivors = [
+                job for job in jobs if job.canonical_job_key not in selected
+            ]
+            deletions = [
+                marker.model_copy(deep=True)
+                for marker in current.meta.global_job_deletions
+            ]
+            deletions.extend(_deletion_for(job, deleted_at) for job in deleted_jobs)
+            self._persist_unlocked(current, survivors, deletions=deletions)
+        return len(deleted_jobs)
+
     def find(self, key: str) -> JobRecord | None:
         """Return a copy of one globally stored job by its canonical key."""
         job = next(
@@ -790,7 +923,12 @@ class GlobalJobStore:
 
     def _read_unlocked(self) -> tuple[Snapshot, bool]:
         if not self._paths.global_jobs_jsonl.exists():
-            return Snapshot(meta=StoreMeta(data_revision=0)), False
+            return Snapshot(
+                meta=StoreMeta(
+                    data_revision=0,
+                    tracker_groups=default_tracker_groups(),
+                )
+            ), False
         contents = self._paths.global_jobs_jsonl.read_bytes()
         loaded = parse_snapshot(contents)
         deletions = [
@@ -798,6 +936,12 @@ class GlobalJobStore:
         ]
         jobs: list[JobRecord] = []
         migration_needed = b'"resume_matches"' in contents
+        groups = [
+            group.model_copy(deep=True) for group in loaded.meta.tracker_groups
+        ]
+        if not groups:
+            groups = default_tracker_groups()
+            migration_needed = True
         for loaded_job in loaded.jobs:
             job = loaded_job.model_copy(deep=True)
             if job.global_status_deleted_at is not None:
@@ -813,7 +957,10 @@ class GlobalJobStore:
         return (
             Snapshot(
                 meta=loaded.meta.model_copy(
-                    update={"global_job_deletions": deletions}
+                    update={
+                        "global_job_deletions": deletions,
+                        "tracker_groups": groups,
+                    }
                 ),
                 jobs=jobs,
             ),
@@ -826,6 +973,7 @@ class GlobalJobStore:
         jobs: list[JobRecord],
         *,
         deletions: list[GlobalJobDeletion] | None = None,
+        groups: list[TrackerGroup] | None = None,
     ) -> Snapshot:
         for job in jobs:
             _ensure_status_history(job)
@@ -839,6 +987,14 @@ class GlobalJobStore:
                     else [
                         item.model_copy(deep=True)
                         for item in current.meta.global_job_deletions
+                    ]
+                ),
+                tracker_groups=(
+                    [item.model_copy(deep=True) for item in groups]
+                    if groups is not None
+                    else [
+                        item.model_copy(deep=True)
+                        for item in current.meta.tracker_groups
                     ]
                 ),
             ),
@@ -859,7 +1015,7 @@ class GlobalJobStore:
 def _merge_into(jobs: list[JobRecord], incoming: JobRecord) -> tuple[JobRecord, bool]:
     matches = _matching_indices(jobs, incoming)
     if not matches:
-        if incoming.user_status not in GLOBAL_USER_STATUSES:
+        if tracker_status_id(incoming.user_status) == UserStatus.NEW.value:
             return incoming.model_copy(deep=True), False
         jobs.append(incoming.model_copy(deep=True))
         return jobs[-1], True
@@ -1115,7 +1271,11 @@ def _set_reevaluation_notice(job: JobRecord, notice: ReevaluationNotice) -> None
 
 
 def _newest_status_job(candidates: Sequence[JobRecord]) -> JobRecord | None:
-    statuses = [job for job in candidates if job.user_status in GLOBAL_USER_STATUSES]
+    statuses = [
+        job
+        for job in candidates
+        if tracker_status_id(job.user_status) != UserStatus.NEW.value
+    ]
     if not statuses:
         return None
     return max(
@@ -1129,7 +1289,10 @@ def _newest_status_job(candidates: Sequence[JobRecord]) -> JobRecord | None:
 
 
 def _ensure_status_history(job: JobRecord) -> None:
-    if job.user_status not in GLOBAL_USER_STATUSES or job.user_status_history:
+    if (
+        tracker_status_id(job.user_status) == UserStatus.NEW.value
+        or job.user_status_history
+    ):
         return
     entry = UserStatusHistoryEntry(
         status=job.user_status,
@@ -1139,8 +1302,8 @@ def _ensure_status_history(job: JobRecord) -> None:
     job.user_status_updated_at = entry.changed_at
 
 
-def _record_status(job: JobRecord, status: UserStatus, changed_at: datetime) -> None:
-    if job.user_status_history and job.user_status_history[-1].status is status:
+def _record_status(job: JobRecord, status: TrackerStatus, changed_at: datetime) -> None:
+    if job.user_status_history and job.user_status_history[-1].status == status:
         job.user_status = status
         job.user_status_updated_at = job.user_status_history[-1].changed_at
         return
@@ -1150,6 +1313,42 @@ def _record_status(job: JobRecord, status: UserStatus, changed_at: datetime) -> 
     ]
     job.user_status = status
     job.user_status_updated_at = job.user_status_history[-1].changed_at
+
+
+def _tracker_group(groups: Sequence[TrackerGroup], group_id: str) -> TrackerGroup:
+    group = next((item for item in groups if item.id == group_id), None)
+    if group is None:
+        raise KeyError(group_id)
+    return group
+
+
+def _validated_batch_keys(keys: Sequence[str]) -> tuple[str, ...]:
+    selected = tuple(keys)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("batch job keys must be non-empty and unique")
+    if any(not key.strip() for key in selected):
+        raise ValueError("batch job keys cannot be blank")
+    return selected
+
+
+def _tracker_group_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError("tracker group name cannot be blank")
+    if len(normalized) > 80:
+        raise ValueError("tracker group name is too long")
+    return normalized
+
+
+def _require_unique_group_name(
+    groups: Sequence[TrackerGroup],
+    name: str,
+    *,
+    excluding: str | None = None,
+) -> None:
+    normalized = name.casefold()
+    if any(group.id != excluding and group.name.casefold() == normalized for group in groups):
+        raise ValueError("tracker group name already exists")
 
 
 def _utc_timestamp(value: datetime) -> datetime:

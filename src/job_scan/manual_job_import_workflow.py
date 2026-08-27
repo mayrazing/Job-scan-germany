@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from job_scan.domain import UserStatus
+from job_scan.domain import TrackerStatus
 
 ManualImportProgress = Callable[[str, str], None]
 ManualImportStep = str
@@ -25,7 +25,7 @@ class ManualImportResult:
     """Return the values needed by UI and upsert calls."""
 
     job_key: str
-    result_status: UserStatus
+    result_status: TrackerStatus
     resume_id: str | None = None
 
 
@@ -43,7 +43,7 @@ class ManualImportState(BaseModel):
     message: str
     progress_percent: float = Field(ge=0, le=100)
     job_key: str | None = None
-    result_status: UserStatus | None = None
+    result_status: TrackerStatus | None = None
     resume_id: str | None = None
     error: str | None = None
 

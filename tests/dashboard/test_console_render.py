@@ -749,12 +749,40 @@ def test_console_is_self_contained_for_local_server_use() -> None:
     assert not page.select("script[src]")
 
 
+def test_console_places_each_step_description_beside_its_title() -> None:
+    page = BeautifulSoup(render_console(), "html.parser")
+
+    title_ids = (
+        "setup-title",
+        "run-title",
+        "review-title",
+        "job-tracker-title",
+        "ats-running-title",
+        "ats-title",
+    )
+    for title_id in title_ids:
+        title = page.select_one(f"#{title_id}")
+        assert title is not None
+        title_line = title.parent
+        assert "section-title-line" in title_line.get("class", [])
+        assert title_line.select_one(":scope > p") is not None
+
+
 def test_console_renders_collapsible_background_task_menu_in_workflow_bar() -> None:
     page = BeautifulSoup(render_console(), "html.parser")
 
-    toolbar = page.select_one(".workflow-toolbar")
+    toolbar = page.select_one(
+        ".console-sticky-header > header.page-header.workflow-toolbar"
+    )
     assert toolbar is not None
+    assert toolbar.select_one(".console-brand > h1").get_text(strip=True) == "Job scan"
+    assert toolbar.select_one(".console-brand > .eyebrow") is None
     assert toolbar.select_one("nav.flow-nav") is not None
+    assert (
+        toolbar.select_one(".console-header-actions > [data-open-ai-config]")
+        is not None
+    )
+    assert toolbar.select_one(".console-state.visually-hidden #header-status") is not None
     toggle = toolbar.select_one(
         '[data-background-task-toggle][aria-controls="background-task-panel"]'
     )

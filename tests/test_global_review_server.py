@@ -410,6 +410,164 @@ def _open_session(client: TestClient) -> None:
     client.cookies.set("job_scan_session", TOKEN)
 
 
+def test_tracker_group_routes_create_rename_and_delete_empty_group(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        created = client.post(
+            "/api/tracker-groups",
+            json={"name": "Phone screen"},
+            headers=HEADERS,
+        )
+        group_id = created.json()["id"]
+        renamed = client.put(
+            f"/api/tracker-groups/{group_id}",
+            json={"name": "Technical screen"},
+            headers=HEADERS,
+        )
+        deleted = client.request(
+            "DELETE",
+            f"/api/tracker-groups/{group_id}",
+            json={},
+            headers=HEADERS,
+        )
+
+    assert created.status_code == 201
+    assert created.json()["name"] == "Phone screen"
+    assert renamed.status_code == 200
+    assert renamed.json() == {"id": group_id, "name": "Technical screen"}
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted_jobs": 0}
+
+
+def test_tracker_group_route_requires_exact_name_for_batch_job_delete(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    group = global_jobs.create_group("Phone screen")
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        group.id,
+        NOW,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        rejected = client.request(
+            "DELETE",
+            f"/api/tracker-groups/{group.id}",
+            json={"confirmation_name": "phone screen"},
+            headers=HEADERS,
+        )
+        deleted = client.request(
+            "DELETE",
+            f"/api/tracker-groups/{group.id}",
+            json={"confirmation_name": "Phone screen"},
+            headers=HEADERS,
+        )
+
+    assert rejected.status_code == 422
+    assert global_jobs.find("tracked") is None
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted_jobs": 1}
+
+
+def test_job_tracker_batch_routes_move_and_delete_atomically(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    for key in ("first", "second"):
+        global_jobs.set_status(
+            _job(key, external_id=key),
+            UserStatus.SAVED,
+            NOW,
+        )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        moved = client.post(
+            "/api/job-tracker/jobs/batch-status",
+            json={"keys": ["first", "second"], "status": "applied"},
+            headers=HEADERS,
+        )
+        moved_statuses = {job.user_status for job in global_jobs.load().jobs}
+        rejected = client.request(
+            "DELETE",
+            "/api/job-tracker/jobs/batch",
+            json={"keys": ["first", "second"], "confirmation_text": "delete all"},
+            headers=HEADERS,
+        )
+        deleted = client.request(
+            "DELETE",
+            "/api/job-tracker/jobs/batch",
+            json={"keys": ["first", "second"], "confirmation_text": "Delete all"},
+            headers=HEADERS,
+        )
+
+    assert moved.status_code == 200
+    assert moved.json() == {"updated_jobs": 2}
+    assert moved_statuses == {UserStatus.APPLIED}
+    assert rejected.status_code == 422
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted_jobs": 2}
+
+
+def test_status_route_accepts_configured_group_and_rejects_unknown_group(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    group = global_jobs.create_group("Phone screen")
+    app = create_review_app(
+        _repository(paths, _job("current", external_id="current")),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        accepted = client.post(
+            "/api/jobs/current/status",
+            json={"status": group.id},
+            headers=HEADERS,
+        )
+        rejected = client.post(
+            "/api/jobs/current/status",
+            json={"status": "group-missing"},
+            headers=HEADERS,
+        )
+
+    tracked = global_jobs.find("current")
+    assert accepted.status_code == 204
+    assert tracked is not None
+    assert tracked.user_status == group.id
+    assert rejected.status_code == 422
+
+
 @pytest.mark.parametrize(
     "selected_status",
     [
@@ -679,6 +837,37 @@ def test_global_unknown_fact_can_be_saved(
     assert getattr(saved, field_name) == expected
 
 
+def test_global_manual_fact_saves_while_scan_is_running(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    job = _job("tracked", external_id="tracked").model_copy(
+        update={"posted_at": None}
+    )
+    global_jobs.set_status(job, UserStatus.SAVED, NOW)
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with FileRWLock(paths.scan_lock_file).exclusive(), TestClient(
+        app,
+        base_url=ORIGIN,
+    ) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/facts",
+            json={"posted_at": "2026-08-12"},
+            headers=HEADERS,
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.manual_posted_at == date(2026, 8, 12)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -823,7 +1012,7 @@ def test_global_saved_lifecycle_event_cannot_be_deleted(tmp_path: Path) -> None:
     saved = global_jobs.find("tracked")
     assert response.status_code == 422
     assert response.json()["detail"] == (
-        "The Saved lifecycle event cannot be deleted."
+        "The required starting lifecycle event cannot be deleted."
     )
     assert saved is not None
     assert [entry.status for entry in saved.user_status_history] == [
