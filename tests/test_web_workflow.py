@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from threading import Event, Thread
@@ -256,7 +256,6 @@ def test_load_setup_answers_returns_the_last_saved_editable_values(
             "glassdoor_de_limit": 31,
             "simplify_de_limit": 37,
             "german_level": "C1",
-            "staffing_penalty": 23,
         }
     )
     workflow.run("candidate.docx", RESUME.read_bytes(), saved_answers)
@@ -481,7 +480,7 @@ def test_background_run_exposes_completed_review_batch_progress(
             title=f"Backend Engineer {index}",
             location="Berlin",
             description="Complete backend job description.",
-            posted_at=date(2026, 8, 5),
+            posted_at=date.today() - timedelta(days=2),
             content_hash=content_hash(
                 "Acme",
                 f"Backend Engineer {index}",
