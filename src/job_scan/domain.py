@@ -121,6 +121,20 @@ class JobNote(BaseModel):
         return value.astimezone(UTC)
 
 
+class ReevaluationNotice(BaseModel):
+    """Persist one unacknowledged Job Tracker re-evaluation result."""
+
+    status: Literal["succeeded", "failed"]
+    finished_at: datetime
+
+    @field_validator("finished_at")
+    @classmethod
+    def normalize_finished_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("re-evaluation finished_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+
 class AvailabilityStatus(StrEnum):
     ACTIVE = "active"
     STALE = "stale"
@@ -431,8 +445,8 @@ class ReviewHistoryEntry(BaseModel):
     failure_category: str | None = None
 
 
-class ResumeMatch(BaseModel):
-    """Keep the review fields shown for one resume on a global job."""
+class _LegacyResumeMatch(BaseModel):
+    """Read one legacy per-resume review while collapsing old tracker data."""
 
     resume_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     profile_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -453,6 +467,15 @@ class ResumeMatch(BaseModel):
     exclusion_reasons: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     last_error: str | None = None
+
+    @field_validator("reviewed_at", "last_review_attempt_at")
+    @classmethod
+    def normalize_legacy_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class JobRecord(BaseModel):
@@ -486,6 +509,19 @@ class JobRecord(BaseModel):
         default=None,
         min_length=1,
         max_length=255,
+        exclude_if=lambda value: value is None,
+    )
+    last_evaluated_resume_id: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    reevaluation_notice: ReevaluationNotice | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    reevaluation_acknowledged_at: datetime | None = Field(
+        default=None,
         exclude_if=lambda value: value is None,
     )
     expected_salary: SalaryValue | None = Field(
@@ -528,10 +564,6 @@ class JobRecord(BaseModel):
     manual_override_profile_hash: str | None = None
     ai_review: AIReview | None = None
     review_history: list[ReviewHistoryEntry] = Field(default_factory=list)
-    resume_matches: list[ResumeMatch] = Field(
-        default_factory=list,
-        exclude_if=lambda value: not value,
-    )
     possible_duplicates: list[DuplicateEvidence] = Field(default_factory=list)
     score: int | None = Field(default=None, ge=0, le=100)
     reason: str = ""
@@ -548,11 +580,69 @@ class JobRecord(BaseModel):
     company_size: CompanySizeEvidence | None = None
     company_industry: CompanyIndustryEvidence | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def collapse_legacy_resume_matches(cls, value: object) -> object:
+        """Keep one visible review when reading legacy per-resume history."""
+        if not isinstance(value, dict) or "resume_matches" not in value:
+            return value
+        migrated = dict(value)
+        raw_matches = migrated.pop("resume_matches")
+        if migrated.get("last_evaluated_resume_id") is not None:
+            return migrated
+        if not isinstance(raw_matches, list):
+            raise TypeError("resume_matches must be a list")
+        matches = [_LegacyResumeMatch.model_validate(item) for item in raw_matches]
+        if not matches:
+            return migrated
+        current_resume_id = migrated.get("application_resume_id")
+        selected = next(
+            (
+                match
+                for match in reversed(matches)
+                if match.resume_id == current_resume_id
+            ),
+            None,
+        )
+        if selected is None:
+            selected = max(
+                enumerate(matches),
+                key=lambda item: (_resume_match_timestamp(item[1]), item[0]),
+            )[1]
+        migrated["last_evaluated_resume_id"] = selected.resume_id
+        for field_name, field_value in selected.model_dump(
+            mode="python",
+            exclude={"resume_id", "profile_hash"},
+        ).items():
+            migrated[field_name] = field_value
+        return migrated
+
     @field_validator("user_status", mode="before")
     @classmethod
     def migrate_legacy_saved_statuses(cls, value: object) -> object:
         """Keep old reviewed and shortlisted jobs visible as saved jobs."""
         return UserStatus.SAVED if value in {"reviewed", "shortlisted"} else value
+
+    @field_validator("reevaluation_acknowledged_at")
+    @classmethod
+    def normalize_reevaluation_acknowledged_at(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("re-evaluation acknowledgement must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+def _resume_match_timestamp(match: _LegacyResumeMatch) -> datetime:
+    timestamps = [
+        value
+        for value in (match.reviewed_at, match.last_review_attempt_at)
+        if value is not None
+    ]
+    return max(timestamps, default=datetime.min.replace(tzinfo=UTC))
 
 
 class GlobalJobDeletion(BaseModel):

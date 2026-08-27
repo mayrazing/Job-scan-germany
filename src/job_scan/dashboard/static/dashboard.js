@@ -8,6 +8,7 @@
       action === "restore"
       || action === "snapshot"
       || action === "snapshot-force"
+      || action === "re-evaluate"
     ) {
       return options;
     }
@@ -186,6 +187,27 @@
           .querySelectorAll(`[data-review-group-count="${group.id}"]`)
           .forEach((count) => {
             count.textContent = String(visibleCount);
+          });
+      });
+    });
+  };
+
+  const updateReviewGroupNoticeCounts = () => {
+    document.querySelectorAll("[data-review-workspace]").forEach((workspace) => {
+      workspace.querySelectorAll(".review-groups > .job-group").forEach((group) => {
+        const count = group.querySelectorAll(
+          ':scope > .card-grid > .job-card[data-reevaluation-status="succeeded"], '
+          + ':scope > .card-grid > .job-card[data-reevaluation-status="failed"]',
+        ).length;
+        workspace
+          .querySelectorAll(`[data-review-group-notice-count="${group.id}"]`)
+          .forEach((badge) => {
+            badge.textContent = String(count);
+            badge.hidden = count === 0;
+            badge.setAttribute(
+              "aria-label",
+              `${count} unacknowledged re-evaluation ${count === 1 ? "result" : "results"}`,
+            );
           });
       });
     });
@@ -537,6 +559,19 @@
     if (updateHash) window.history.replaceState(null, "", `#${groupId}`);
   };
 
+  const revealFilteredReevaluationCard = (card) => {
+    if (!card.hidden || !card.closest('[data-review-block="global"]')) return;
+    const sourceControl = document.querySelector("#global-source-filter")?.tomselect;
+    if (sourceControl) {
+      sourceControl.setValue(Object.keys(sourceControl.options));
+    }
+    const urlFilter = document.querySelector("#global-url-filter");
+    if (urlFilter?.value) {
+      urlFilter.value = "";
+      urlFilter.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  };
+
   const initializeReviewGroupWorkspace = (workspace) => {
     const container = workspace.querySelector(":scope > .review-groups");
     if (!container) return;
@@ -563,6 +598,8 @@
     let touchPointerId = null;
     let touchDropTarget = null;
     let touchDropBefore = false;
+    let lastTouchJumpTab = null;
+    let lastTouchJumpAt = 0;
     const clearDragState = () => {
       reviewGroupTabs(navigation).forEach((tab) => {
         tab.classList.remove(
@@ -621,6 +658,25 @@
       commitReviewGroupOrder(tab);
       tab.focus();
     };
+    const focusLatestReevaluationResult = (tab) => {
+      const groupId = tab.dataset.reviewGroupTab;
+      const group = reviewGroupPanels(container).find(
+        (panel) => panel.id === groupId,
+      );
+      if (!group) return false;
+      const latest = [...group.querySelectorAll(
+        ':scope > .card-grid > .job-card[data-reevaluation-status]',
+      )].sort((left, right) => (
+        Date.parse(right.dataset.reevaluationFinishedAt || "")
+        - Date.parse(left.dataset.reevaluationFinishedAt || "")
+      ))[0];
+      if (!latest) return false;
+      selectReviewGroup(container, navigation, groupId, true);
+      revealFilteredReevaluationCard(latest);
+      latest.focus({ preventScroll: true });
+      latest.scrollIntoView({ behavior: "smooth", block: "center" });
+      return true;
+    };
 
     navigation.addEventListener("click", (event) => {
       const tab = dropTarget(event);
@@ -633,10 +689,23 @@
         true,
       );
     });
-    navigation.addEventListener("keydown", (event) => {
-      if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    navigation.addEventListener("dblclick", (event) => {
       const tab = dropTarget(event);
       if (!tab) return;
+      if (focusLatestReevaluationResult(tab)) event.preventDefault();
+    });
+    navigation.addEventListener("keydown", (event) => {
+      const tab = dropTarget(event);
+      if (!tab) return;
+      if (
+        event.key === "Enter"
+        && tab.getAttribute("aria-current") === "page"
+        && focusLatestReevaluationResult(tab)
+      ) {
+        event.preventDefault();
+        return;
+      }
+      if (!event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
       event.preventDefault();
       moveReviewGroupTab(tab, event.key === "ArrowUp" ? -1 : 1);
     });
@@ -768,6 +837,20 @@
       target.classList.add(
         touchDropBefore ? "is-drag-over-before" : "is-drag-over-after",
       );
+    });
+    navigation.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "mouse" || draggedTab) return;
+      const tab = dropTarget(event);
+      if (!tab || event.target.closest("[data-review-group-drag-handle]")) return;
+      const isDoubleTap = (
+        lastTouchJumpTab === tab
+        && event.timeStamp - lastTouchJumpAt <= 500
+      );
+      lastTouchJumpTab = isDoubleTap ? null : tab;
+      lastTouchJumpAt = isDoubleTap ? 0 : event.timeStamp;
+      if (isDoubleTap && focusLatestReevaluationResult(tab)) {
+        event.preventDefault();
+      }
     });
     window.addEventListener("pointerup", (event) => {
       if (event.pointerId !== touchPointerId || !draggedTab) return;
@@ -1012,6 +1095,51 @@
     }
   };
 
+  const renderJobReevaluationState = (progress, state) => {
+    if (!progress) return;
+    const stepText = typeof state?.step === "string" ? ` (${state.step})` : "";
+    progress.hidden = false;
+    progress.textContent = state?.message
+      ? `${state.message}${stepText}`
+      : `Re-evaluation in progress${stepText}`;
+    progress.classList.toggle("is-error", state?.status === "failed");
+  };
+
+  const pollJobReevaluation = async (importId, progress) => {
+    while (true) {
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+      let response;
+      try {
+        response = await fetch(
+          `/api/manual-job-imports/${encodeURIComponent(importId)}`,
+          {
+            credentials: "same-origin",
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
+      } catch (_error) {
+        throw new Error(
+          "Connection to re-evaluation progress lost. Try again.",
+        );
+      }
+      if (response.status === 404) {
+        throw new Error(
+          "Re-evaluation state was lost after the service restarted. Try again.",
+        );
+      }
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not read re-evaluation progress.",
+        ));
+      }
+      const state = await response.json();
+      renderJobReevaluationState(progress, state);
+      if (state.status === "complete") return state;
+      if (state.status === "failed") return state;
+    }
+  };
+
   const initializeManualJobImport = () => {
     const dialog = document.querySelector("#manual-job-dialog");
     const opener = document.querySelector("[data-open-manual-job]");
@@ -1227,6 +1355,11 @@
     initializeSourceFilter();
     initializeGlobalSourceFilter();
     initializeManualJobImport();
+    updateReviewGroupNoticeCounts();
+    document.addEventListener(
+      "job-scan:review-updated",
+      updateReviewGroupNoticeCounts,
+    );
   };
 
   if (document.readyState === "loading") {
@@ -1238,6 +1371,45 @@
   const openJobDetail = (card) => {
     const dialog = card.querySelector("[data-job-detail-dialog]");
     if (dialog && !dialog.open) dialog.showModal();
+    const finishedAt = card.dataset.reevaluationFinishedAt;
+    if (!card.dataset.reevaluationStatus || !finishedAt) return;
+    const jobKey = card.dataset.jobKey;
+    void fetch(
+      `/api/global-jobs/${encodeURIComponent(jobKey)}`
+      + "/re-evaluation-result/acknowledge",
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ finished_at: finishedAt }),
+      },
+    ).then(async (response) => {
+      if (
+        response.status === 409
+        && response.headers.get("X-Job-Scan-Conflict")
+          === "re-evaluation-result-changed"
+      ) {
+        await refreshReviewJob(jobKey, { preserveOpenDetail: true });
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await responseError(
+          response,
+          "Could not acknowledge this re-evaluation result.",
+        ));
+      }
+      if (card.dataset.reevaluationFinishedAt !== finishedAt) return;
+      delete card.dataset.reevaluationStatus;
+      delete card.dataset.reevaluationFinishedAt;
+      card.setAttribute(
+        "aria-label",
+        card.getAttribute("aria-label").replace(
+          /\. Re-evaluation (?:succeeded|failed); open to acknowledge$/,
+          "",
+        ),
+      );
+      updateReviewGroupNoticeCounts();
+    }).catch((error) => window.alert(error.message));
   };
 
   const openJobNoteDialog = (trigger, note = null) => {
@@ -1539,6 +1711,7 @@
       || action === "resume"
       || action === "snapshot"
       || action === "snapshot-force"
+      || action === "re-evaluate"
     )
       ? `/api/global-jobs/${jobKey}/${snapshotAction}${forceSuffix}`
       : runId
@@ -1560,20 +1733,84 @@
         action === "snapshot"
         || action === "snapshot-force"
         || action === "resume"
+        || action === "re-evaluate"
       )
     ) {
-      button.textContent = action === "resume" ? "Uploading..." : "Generating...";
+      button.textContent = action === "resume"
+        ? "Uploading..."
+        : action === "re-evaluate"
+          ? "Re-evaluating..."
+          : "Generating...";
     }
+    const reevaluationProgress = action === "re-evaluate"
+      ? form.closest(".job-action-group")?.querySelector(
+        "[data-job-reevaluate-progress]",
+      )
+      : null;
+    const reevaluationCard = action === "re-evaluate"
+      ? form.closest("[data-job-preview-card]")
+      : null;
+    const reevaluationBlock = reevaluationCard?.closest("[data-review-block]");
+    reevaluationProgress?.classList.remove("is-error");
     try {
-      const response = await fetch(endpoint, requestOptions(action, form));
+      let response = await fetch(endpoint, requestOptions(action, form));
+      if (
+        action === "re-evaluate"
+        && response.status === 409
+        && response.headers.get("X-Job-Scan-Conflict") === "resume-unchanged"
+      ) {
+        const message = await responseError(
+          response,
+          "The resume has not changed since the last evaluation.",
+        );
+        if (!window.confirm(`${message} Re-evaluate anyway?`)) {
+          if (button) {
+            button.disabled = false;
+            button.textContent = buttonText;
+          }
+          return;
+        }
+        response = await fetch(`${endpoint}?force=1`, requestOptions(action, form));
+      }
       if (!response.ok) {
         throw new Error(await responseError(response, "Could not update this job."));
+      }
+      if (action === "re-evaluate") {
+        const state = await response.json();
+        if (!state?.import_id) {
+          throw new Error("Re-evaluation did not return a tracking ID.");
+        }
+        renderJobReevaluationState(reevaluationProgress, state);
+        if (state.status === "running") {
+          reevaluationCard?.classList.add("is-reevaluating");
+        }
+        const terminalState = state.status === "running"
+          ? await pollJobReevaluation(state.import_id, reevaluationProgress)
+          : state;
+        await refreshReviewJob(rawJobKey, { preserveOpenDetail: true });
+        if (terminalState.status === "failed") {
+          const liveCard = reevaluationBlock
+            ? reviewCardForJob(reevaluationBlock, rawJobKey)
+            : null;
+          const liveProgress = liveCard?.querySelector(
+            "[data-job-reevaluate-progress]",
+          );
+          renderJobReevaluationState(liveProgress, terminalState);
+        }
+        return;
       }
       await refreshReviewJob(rawJobKey, {
         preserveOpenDetail: action === "resume",
       });
     } catch (error) {
-      window.alert(error.message);
+      reevaluationCard?.classList.remove("is-reevaluating");
+      if (reevaluationProgress) {
+        reevaluationProgress.hidden = false;
+        reevaluationProgress.textContent = error.message;
+        reevaluationProgress.classList.add("is-error");
+      } else {
+        window.alert(error.message);
+      }
       if (button) {
         button.disabled = false;
         button.classList.remove("is-saving");

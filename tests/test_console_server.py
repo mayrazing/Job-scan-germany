@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event
 
 import pytest
 from bs4 import BeautifulSoup
@@ -38,6 +39,10 @@ from job_scan.dashboard.render import render_dashboard
 from job_scan.domain import AvailabilityStatus, JobRecord, MachineStatus, UserStatus
 from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock
+from job_scan.manual_job_import_workflow import (
+    ManualImportResult,
+    ManualJobImportWorkflow,
+)
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
 from job_scan.resume_suggestions import ResumeSuggestions, ResumeSuggestionSettings
@@ -1081,6 +1086,60 @@ def test_ai_configuration_api_rejects_changes_while_a_scan_is_running(
     assert response.json() == {
         "detail": "AI is in use; retry the configuration change after it completes."
     }
+
+
+def test_ai_configuration_api_is_locked_while_a_manual_ai_task_is_running(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    repository = JsonlRepository(paths, FileRWLock(paths.lock_file), render_dashboard)
+    repository.mutate(lambda snapshot: snapshot)
+    manual_workflow = ManualJobImportWorkflow()
+    started = Event()
+    release = Event()
+
+    def run_manual_task(_progress: object) -> ManualImportResult:
+        started.set()
+        if not release.wait(timeout=5):
+            raise AssertionError("test did not release manual task")
+        return ManualImportResult("tracked", UserStatus.SAVED)
+
+    manual_workflow.start(
+        run_manual_task,
+        task_kind="re-evaluate",
+        task_key="re-evaluate:tracked",
+    )
+    assert started.wait(timeout=1)
+    app = create_review_app(
+        repository,
+        TOKEN,
+        frozenset({ORIGIN}),
+        ai_store=AiProviderStore(paths.ai_config_toml),
+        manual_import_workflow=manual_workflow,
+    )
+
+    try:
+        with TestClient(app, base_url=ORIGIN) as client:
+            client.cookies.set("job_scan_session", TOKEN)
+            state = client.get("/api/ai/config")
+            response = client.put(
+                "/api/ai/config",
+                json={
+                    "ai_runtime": "claude-code",
+                    "claude": {
+                        "model": "opus",
+                        "effort": "high",
+                        "thinking_enabled": False,
+                    },
+                },
+                headers=HEADERS,
+            )
+    finally:
+        release.set()
+
+    assert state.status_code == 200
+    assert state.json()["locked"] is True
+    assert response.status_code == 409
 
 
 def test_ai_configuration_api_rejects_changes_while_an_ai_call_holds_the_lock(

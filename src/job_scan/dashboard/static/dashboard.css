@@ -11,6 +11,12 @@
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+@property --reevaluation-border-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -143,10 +149,12 @@ main {
 }
 
 .review-group-nav a {
+  position: relative;
   display: grid;
   grid-template-columns: 1.5rem minmax(0, 1fr) auto;
   width: 100%;
   padding: 0.7rem 0.75rem;
+  overflow: visible;
   text-align: left;
   cursor: grab;
 }
@@ -198,6 +206,29 @@ main {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.review-group-nav .review-group-notice-count {
+  position: absolute;
+  z-index: 1;
+  top: -0.45rem;
+  left: -0.45rem;
+  display: inline-grid;
+  min-width: 1.35rem;
+  min-height: 1.35rem;
+  place-items: center;
+  padding-inline: 0.28rem;
+  border-radius: 999px;
+  background: #DC2626;
+  color: #FFFFFF;
+  box-shadow: 0 0 0 2px var(--surface);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.review-group-nav .review-group-notice-count[hidden] {
+  display: none;
 }
 
 .group-nav .review-group-announcement {
@@ -452,6 +483,7 @@ main {
 }
 
 .card-grid > .job-card {
+  position: relative;
   display: grid;
   grid-template-columns: 7.5rem minmax(0, 1fr);
   width: 100%;
@@ -462,6 +494,53 @@ main {
   border-left: 4px solid var(--action);
   cursor: pointer;
   transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.card-grid > .job-card.is-reevaluating::before,
+.card-grid > .job-card[data-reevaluation-status]::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+}
+
+.card-grid > .job-card.is-reevaluating::before {
+  padding: 4px;
+  background: conic-gradient(
+    from var(--reevaluation-border-angle),
+    transparent 0deg 250deg,
+    #2563EB 285deg 340deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: reevaluation-border-lap 1.15s linear infinite;
+}
+
+.card-grid > .job-card[data-reevaluation-status="succeeded"]::after {
+  background: rgb(34 197 94 / 18%);
+}
+
+.card-grid > .job-card[data-reevaluation-status="failed"]::after {
+  background: rgb(220 38 38 / 18%);
+}
+
+@keyframes reevaluation-border-lap {
+  to {
+    --reevaluation-border-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-grid > .job-card.is-reevaluating::before {
+    background: #2563EB;
+    animation: none;
+  }
 }
 
 .card-grid > .job-card[data-job-drag-source] {
@@ -1158,6 +1237,17 @@ main {
 
 .job-resume-control form {
   margin: 0;
+}
+
+.job-reevaluate-progress {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.job-reevaluate-progress.is-error {
+  color: var(--danger);
 }
 
 .job-notes-heading,

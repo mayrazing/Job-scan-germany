@@ -28,6 +28,7 @@ from job_scan.domain import (
     JobNote,
     JobRecord,
     MachineStatus,
+    ReevaluationNotice,
     Snapshot,
     SourceKind,
     SourceOccurrence,
@@ -555,6 +556,13 @@ def setup_page() -> Iterator[object]:
             if request.url.endswith("/api/setup-and-scan/current"):
                 route.fulfill(status=204, body="")
                 return
+            if request.url.endswith("/api/background-tasks"):
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"tasks": []}),
+                )
+                return
             if request.url.endswith("/api/ats-runs/current"):
                 route.fulfill(status=204, body="")
                 return
@@ -755,6 +763,10 @@ def test_ai_configuration_modal_is_read_only_while_ai_is_in_use(
                         "effort": "high",
                         "thinking_enabled": False,
                     },
+                    "codex": {
+                        "model": "gpt-5.6-sol",
+                        "effort": "high",
+                    },
                     "locked": True,
                 }
             ),
@@ -793,6 +805,113 @@ def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> 
         assert max(item[edge] for item in rectangles) == pytest.approx(
             min(item[edge] for item in rectangles), abs=0.1
         )
+
+
+def test_background_task_button_expands_and_collapses_active_task_list(
+    setup_page: object,
+) -> None:
+    setup_page.route(
+        "**/api/background-tasks",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "task_id": "scan:scan-1",
+                            "kind": "scan",
+                            "label": "Save and run scan",
+                            "status": "running",
+                            "message": "Reviewing jobs...",
+                            "progress_percent": 60,
+                            "subject_key": None,
+                        },
+                        {
+                            "task_id": "manual:add-1",
+                            "kind": "add-job",
+                            "label": "https://jobs.example/new",
+                            "status": "waiting",
+                            "message": "Waiting for an AI slot.",
+                            "progress_percent": 2,
+                            "subject_key": None,
+                        },
+                        {
+                            "task_id": "manual:reevaluate-1",
+                            "kind": "re-evaluate",
+                            "label": "Backend Engineer at Acme",
+                            "status": "running",
+                            "message": "Reviewing this job...",
+                            "progress_percent": 65,
+                            "subject_key": "global-saved",
+                        },
+                        {
+                            "task_id": "ats:ats-1",
+                            "kind": "ats-run",
+                            "label": "ATS Run · 2 jobs",
+                            "status": "running",
+                            "message": "Checking selected jobs...",
+                            "progress_percent": 25,
+                            "subject_key": None,
+                        },
+                    ]
+                }
+            ),
+        ),
+    )
+    setup_page.reload()
+
+    toggle = setup_page.locator("[data-background-task-toggle]")
+    playwright.expect(toggle.locator("[data-background-task-count]")).to_have_text(
+        "4"
+    )
+    toggle.click()
+
+    panel = setup_page.locator("#background-task-panel")
+    assert panel.is_visible()
+    assert panel.locator("[data-background-task-item]").count() == 4
+    assert "Waiting" in panel.locator('[data-task-id="manual:add-1"]').inner_text()
+    assert "ATS Run" in panel.inner_text()
+    assert toggle.get_attribute("aria-expanded") == "true"
+
+    toggle.click()
+
+    assert panel.is_hidden()
+    assert toggle.get_attribute("aria-expanded") == "false"
+
+
+def test_running_reevaluation_disables_the_matching_job_button(
+    setup_page: object,
+) -> None:
+    setup_page.route(
+        "**/api/background-tasks",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "task_id": "manual:reevaluate-1",
+                            "kind": "re-evaluate",
+                            "label": "Role global-saved at Company global-saved",
+                            "status": "running",
+                            "message": "Reviewing this job...",
+                            "progress_percent": 65,
+                            "subject_key": "global-saved",
+                        }
+                    ]
+                }
+            ),
+        ),
+    )
+    setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    )
+    detail = open_job_details(card)
+
+    playwright.expect(detail.locator("[data-job-resume-reevaluate]")).to_be_disabled()
 
 
 def test_job_tracker_tab_shows_global_jobs_outside_review(setup_page: object) -> None:
@@ -1037,7 +1156,7 @@ def test_source_filter_uses_summary_control_and_checkbox_dropdown(
     setup_page: object,
 ) -> None:
     setup_page.locator('[data-nav-step="review"]').click()
-    wrapper = setup_page.locator(".source-filter")
+    wrapper = setup_page.locator("#review-view .source-filter")
     control = wrapper.locator(".ts-control")
     selected_tags = control.locator(":scope > .item")
 
@@ -1275,7 +1394,9 @@ def test_source_filter_does_not_overlap_posted_filter_at_narrow_width(
         """
     )
 
-    source_control = setup_page.locator(".source-filter .ts-wrapper").bounding_box()
+    source_control = setup_page.locator(
+        "#review-view .source-filter .ts-wrapper"
+    ).bounding_box()
     posted_filter = setup_page.locator(".posted-within-filter").bounding_box()
 
     assert source_control is not None
@@ -1295,7 +1416,9 @@ def test_review_filter_controls_keep_fixed_width(
     setup_page.set_viewport_size({"width": viewport_width, "height": 900})
     setup_page.locator('[data-nav-step="review"]').click()
 
-    source = setup_page.locator(".source-filter .ts-wrapper").bounding_box()
+    source = setup_page.locator(
+        "#review-view .source-filter .ts-wrapper"
+    ).bounding_box()
     posted = setup_page.locator("#review-posted-within-days").bounding_box()
     company = setup_page.locator("#review-company-size").bounding_box()
 
@@ -2058,6 +2181,7 @@ def test_job_tracker_resume_upload_posts_without_page_navigation(
                 update={
                     "application_resume_id": resume_id,
                     "application_resume_filename": "backend.pdf",
+                    "last_evaluated_resume_id": resume_id,
                 }
             )
         ],
@@ -2103,7 +2227,7 @@ def test_job_tracker_resume_upload_posts_without_page_navigation(
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     card = setup_page.locator(
-        '[data-review-block="global"] [data-job-key="global-saved"]'
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
     )
     ats_checkbox = card.locator("[data-ats-select-job]")
     ats_checkbox.check()
@@ -2127,7 +2251,602 @@ def test_job_tracker_resume_upload_posts_without_page_navigation(
     assert navigations == []
     assert detail.is_visible()
     assert detail.locator("[data-job-resume-name]").inner_text() == "updated.pdf"
+    prompt = detail.locator("[data-job-reevaluate-progress]")
+    assert prompt.is_hidden()
+    assert prompt.text_content() == ""
     assert ats_checkbox.is_checked()
+
+
+def test_job_tracker_reevaluation_shows_running_and_completed_card_states(
+    setup_page: object,
+) -> None:
+    import_id = "job-reevaluation-1"
+    refreshed = GLOBAL_STATUS_SNAPSHOT.model_copy(deep=True)
+    refreshed.jobs[0].score = 97
+    refreshed.jobs[0].reason = "Updated resume is a stronger match."
+    refreshed.jobs[0].reevaluation_notice = ReevaluationNotice(
+        status="succeeded",
+        finished_at=NOW + timedelta(minutes=1),
+    )
+    visible_snapshot = [GLOBAL_STATUS_SNAPSHOT]
+    started: list[str] = []
+
+    def start_reevaluation(route: object) -> None:
+        started.append(route.request.method)
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "running",
+                    "step": "queued",
+                    "message": "Preparing re-evaluation...",
+                    "progress_percent": 2,
+                    "job_key": None,
+                    "result_status": None,
+                    "resume_id": None,
+                    "error": None,
+                }
+            ),
+        )
+
+    def complete_reevaluation(route: object) -> None:
+        visible_snapshot[0] = refreshed
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": import_id,
+                    "status": "complete",
+                    "step": "complete",
+                    "message": "Re-evaluation complete.",
+                    "progress_percent": 100,
+                    "job_key": "global-saved",
+                    "result_status": "saved",
+                    "resume_id": ATS_RESUME_ID,
+                    "error": None,
+                }
+            ),
+        )
+
+    def refresh_tracker(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=visible_snapshot[0],
+            ),
+        )
+
+    setup_page.route(
+        "**/api/global-jobs/global-saved/re-evaluate",
+        start_reevaluation,
+    )
+    setup_page.route(
+        f"**/api/manual-job-imports/{import_id}",
+        complete_reevaluation,
+    )
+    setup_page.route("**/setup?re-evaluate=1", refresh_tracker)
+    setup_page.goto("http://draft.test/setup?re-evaluate=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    )
+    detail = open_job_details(card)
+    progress = detail.locator("[data-job-reevaluate-progress]")
+
+    detail.locator("[data-job-resume-reevaluate]").click()
+
+    progress.wait_for(state="visible")
+    assert progress.text_content() == "Preparing re-evaluation... (queued)"
+    assert card.evaluate(
+        "card => getComputedStyle(card, '::before').animationName"
+    ) == "reevaluation-border-lap"
+    detail.locator("[data-close-job-detail]").click()
+    assert detail.is_hidden()
+    playwright.expect(card).to_have_attribute("data-reevaluation-status", "succeeded")
+    playwright.expect(detail.locator(".score strong")).to_have_text("97")
+    assert card.locator(".reason").count() == 1
+    assert started == ["POST"]
+
+
+def test_job_tracker_shows_persisted_reevaluation_overlays_and_group_badge(
+    setup_page: object,
+) -> None:
+    snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            source_job(
+                "notice-success",
+                (SourceKind.LINKEDIN,),
+                score=85,
+            ).model_copy(
+                update={
+                    "user_status": UserStatus.SAVED,
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="succeeded",
+                        finished_at=NOW,
+                    ),
+                },
+                deep=True,
+            ),
+            source_job(
+                "notice-failure",
+                (SourceKind.LINKEDIN,),
+                score=85,
+            ).model_copy(
+                update={
+                    "user_status": UserStatus.SAVED,
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="failed",
+                        finished_at=NOW + timedelta(minutes=1),
+                    ),
+                },
+                deep=True,
+            ),
+        ],
+    )
+
+    def serve_notices(route: object) -> None:
+        if "reevaluation-notices=1" not in route.request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=snapshot,
+            ),
+        )
+
+    setup_page.route("**/*", serve_notices)
+    setup_page.goto("http://draft.test/setup?reevaluation-notices=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_review = setup_page.locator('[data-review-block="global"]')
+    badge = global_review.locator('[data-review-group-notice-count="saved"]')
+    group_count = global_review.locator('[data-review-group-count="saved"]')
+    success = global_review.locator('article[data-job-key="notice-success"]')
+    failure = global_review.locator('article[data-job-key="notice-failure"]')
+    group_tab = global_review.locator('[data-review-group-tab="saved"]')
+    group_label = group_tab.locator(".review-group-label")
+
+    assert badge.is_visible()
+    assert badge.text_content() == "2"
+    assert badge.evaluate("node => getComputedStyle(node).backgroundColor") == (
+        "rgb(220, 38, 38)"
+    )
+    assert badge.evaluate("node => getComputedStyle(node).color") == (
+        "rgb(255, 255, 255)"
+    )
+    assert badge.evaluate("node => getComputedStyle(node).position") == "absolute"
+    badge_box = badge.bounding_box()
+    group_tab_box = group_tab.bounding_box()
+    group_count_box = group_count.bounding_box()
+    group_label_box = group_label.bounding_box()
+    assert badge_box is not None
+    assert group_tab_box is not None
+    assert group_count_box is not None
+    assert group_label_box is not None
+    assert badge_box["x"] < group_tab_box["x"]
+    assert badge_box["y"] < group_tab_box["y"]
+    assert group_count.text_content() == "2"
+    assert group_count_box["x"] > group_label_box["x"]
+    assert success.evaluate(
+        "card => getComputedStyle(card, '::after').backgroundColor"
+    ) == "rgba(34, 197, 94, 0.18)"
+    assert failure.evaluate(
+        "card => getComputedStyle(card, '::after').backgroundColor"
+    ) == "rgba(220, 38, 38, 0.18)"
+
+
+def test_job_tracker_acknowledges_result_when_card_details_open(
+    setup_page: object,
+) -> None:
+    acknowledged: list[tuple[str, dict[str, str]]] = []
+    snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="failed",
+                        finished_at=NOW,
+                    )
+                },
+                deep=True,
+            )
+        ],
+    )
+
+    def serve_acknowledgement(route: object) -> None:
+        request = route.request
+        if request.url.endswith(
+            "/api/global-jobs/global-saved/re-evaluation-result/acknowledge"
+        ):
+            acknowledged.append((request.method, request.post_data_json))
+            route.fulfill(status=204, body="")
+            return
+        if "reevaluation-ack=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=snapshot,
+            ),
+        )
+
+    setup_page.route("**/*", serve_acknowledgement)
+    setup_page.goto("http://draft.test/setup?reevaluation-ack=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_review = setup_page.locator('[data-review-block="global"]')
+    card = global_review.locator('article[data-job-key="global-saved"]')
+    badge = global_review.locator('[data-review-group-notice-count="saved"]')
+
+    card.locator("[data-ats-select-job]").click()
+
+    assert acknowledged == []
+    playwright.expect(card).to_have_attribute("data-reevaluation-status", "failed")
+
+    card.locator("[data-job-preview-open-area]").click()
+
+    card.locator("[data-job-detail-dialog]").wait_for(state="visible")
+    playwright.expect(card).not_to_have_attribute("data-reevaluation-status", "failed")
+    assert acknowledged == [
+        ("POST", {"finished_at": NOW.isoformat()})
+    ]
+    assert badge.is_hidden()
+    assert card.get_attribute("aria-label") == (
+        "View details for Role global-saved at Company global-saved"
+    )
+
+
+def test_job_tracker_preserves_a_newer_result_when_stale_card_is_opened(
+    setup_page: object,
+) -> None:
+    older_snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="succeeded",
+                        finished_at=NOW,
+                    )
+                },
+                deep=True,
+            )
+        ],
+    )
+    newer_finished_at = NOW + timedelta(minutes=1)
+    newer_snapshot = Snapshot(
+        meta=StoreMeta(data_revision=46),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="failed",
+                        finished_at=newer_finished_at,
+                    )
+                },
+                deep=True,
+            )
+        ],
+    )
+    visible_snapshot = [older_snapshot]
+
+    def serve_stale_acknowledgement(route: object) -> None:
+        request = route.request
+        if request.url.endswith(
+            "/api/global-jobs/global-saved/re-evaluation-result/acknowledge"
+        ):
+            visible_snapshot[0] = newer_snapshot
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                headers={
+                    "X-Job-Scan-Conflict": "re-evaluation-result-changed"
+                },
+                body=json.dumps(
+                    {"detail": "A newer re-evaluation result is available."}
+                ),
+            )
+            return
+        if "reevaluation-stale-ack=1" not in request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=visible_snapshot[0],
+            ),
+        )
+
+    setup_page.route("**/*", serve_stale_acknowledgement)
+    setup_page.goto("http://draft.test/setup?reevaluation-stale-ack=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_review = setup_page.locator('[data-review-block="global"]')
+    card = global_review.locator('article[data-job-key="global-saved"]')
+    badge = global_review.locator('[data-review-group-notice-count="saved"]')
+
+    card.locator("[data-job-preview-open-area]").click()
+
+    card.locator("[data-job-detail-dialog]").wait_for(state="visible")
+    playwright.expect(card).to_have_attribute("data-reevaluation-status", "failed")
+    playwright.expect(card).to_have_attribute(
+        "data-reevaluation-finished-at",
+        newer_finished_at.isoformat(),
+    )
+    assert badge.is_visible()
+    assert badge.text_content() == "1"
+
+
+def test_job_tracker_old_ack_response_does_not_clear_newer_dom_result(
+    setup_page: object,
+) -> None:
+    snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="succeeded",
+                        finished_at=NOW,
+                    )
+                },
+                deep=True,
+            )
+        ],
+    )
+
+    def serve_notice(route: object) -> None:
+        if "reevaluation-dom-race=1" not in route.request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=snapshot,
+            ),
+        )
+
+    setup_page.route("**/*", serve_notice)
+    setup_page.goto("http://draft.test/setup?reevaluation-dom-race=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.evaluate(
+        """() => {
+          const originalFetch = window.fetch.bind(window);
+          window.__resolveReevaluationAck = null;
+          window.fetch = (resource, options) => {
+            const url = String(resource);
+            if (!url.includes('/re-evaluation-result/acknowledge')) {
+              return originalFetch(resource, options);
+            }
+            return new Promise((resolve) => {
+              window.__resolveReevaluationAck = () => resolve(
+                new Response(null, {status: 204}),
+              );
+            });
+          };
+        }"""
+    )
+    global_review = setup_page.locator('[data-review-block="global"]')
+    card = global_review.locator('article[data-job-key="global-saved"]')
+    badge = global_review.locator('[data-review-group-notice-count="saved"]')
+    newer_finished_at = NOW + timedelta(minutes=1)
+
+    card.locator("[data-job-preview-open-area]").click()
+    setup_page.wait_for_function("window.__resolveReevaluationAck !== null")
+    card.evaluate(
+        """(node, finishedAt) => {
+          node.dataset.reevaluationStatus = 'failed';
+          node.dataset.reevaluationFinishedAt = finishedAt;
+          document.dispatchEvent(new CustomEvent('job-scan:review-updated'));
+        }""",
+        newer_finished_at.isoformat(),
+    )
+    setup_page.evaluate("window.__resolveReevaluationAck()")
+
+    playwright.expect(card).to_have_attribute("data-reevaluation-status", "failed")
+    playwright.expect(card).to_have_attribute(
+        "data-reevaluation-finished-at",
+        newer_finished_at.isoformat(),
+    )
+    assert badge.is_visible()
+    assert badge.text_content() == "1"
+
+
+def test_job_tracker_group_double_click_focuses_latest_unread_result(
+    setup_page: object,
+) -> None:
+    snapshot = Snapshot(
+        meta=StoreMeta(data_revision=45),
+        jobs=[
+            source_job(
+                "notice-older",
+                (SourceKind.LINKEDIN,),
+                score=85,
+            ).model_copy(
+                update={
+                    "user_status": UserStatus.SAVED,
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="succeeded",
+                        finished_at=NOW,
+                    ),
+                },
+                deep=True,
+            ),
+            source_job(
+                "notice-newer",
+                (SourceKind.STEPSTONE,),
+                score=85,
+            ).model_copy(
+                update={
+                    "user_status": UserStatus.SAVED,
+                    "reevaluation_notice": ReevaluationNotice(
+                        status="failed",
+                        finished_at=NOW + timedelta(minutes=5),
+                    ),
+                },
+                deep=True,
+            ),
+        ],
+    )
+
+    def serve_notices(route: object) -> None:
+        if "reevaluation-jump=1" not in route.request.url:
+            route.fallback()
+            return
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=snapshot,
+            ),
+        )
+
+    setup_page.route("**/*", serve_notices)
+    setup_page.goto("http://draft.test/setup?reevaluation-jump=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_review = setup_page.locator('[data-review-block="global"]')
+    older = global_review.locator('article[data-job-key="notice-older"]')
+    newer = global_review.locator('article[data-job-key="notice-newer"]')
+    url_filter = setup_page.locator("#global-url-filter")
+
+    setup_page.evaluate(
+        "document.querySelector('#global-source-filter').tomselect.setValue(['linkedin'])"
+    )
+    url_filter.fill("notice-older")
+
+    assert older.is_visible()
+    assert newer.is_hidden()
+
+    global_review.locator('[data-review-group-tab="saved"]').dblclick()
+
+    assert url_filter.input_value() == ""
+    assert sorted(
+        setup_page.evaluate(
+            "document.querySelector('#global-source-filter').tomselect.items"
+        )
+    ) == ["linkedin", "stepstone"]
+    assert newer.is_visible()
+    assert setup_page.evaluate("document.activeElement.dataset.jobKey") == (
+        "notice-newer"
+    )
+
+    group_tab = global_review.locator('[data-review-group-tab="saved"]')
+    group_tab.focus()
+    setup_page.keyboard.press("Enter")
+    assert setup_page.evaluate("document.activeElement.dataset.jobKey") == (
+        "notice-newer"
+    )
+
+    group_tab.focus()
+    touch_pointer = {
+        "pointerId": 9,
+        "pointerType": "touch",
+        "isPrimary": True,
+        "bubbles": True,
+        "cancelable": True,
+    }
+    group_tab.dispatch_event("pointerup", touch_pointer)
+    group_tab.dispatch_event("pointerup", touch_pointer)
+    assert setup_page.evaluate("document.activeElement.dataset.jobKey") == (
+        "notice-newer"
+    )
+
+
+def test_job_tracker_confirms_before_forcing_unchanged_resume_reevaluation(
+    setup_page: object,
+) -> None:
+    requests: list[str] = []
+    confirmations: list[str] = []
+
+    def reevaluate(route: object) -> None:
+        requests.append(route.request.url)
+        if "force=1" not in route.request.url:
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                headers={"X-Job-Scan-Conflict": "resume-unchanged"},
+                body=json.dumps(
+                    {
+                        "detail": (
+                            "The resume has not changed since the last evaluation."
+                        )
+                    }
+                ),
+            )
+            return
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "import_id": "forced-reevaluation",
+                    "status": "complete",
+                    "step": "complete",
+                    "message": "Re-evaluation complete.",
+                    "progress_percent": 100,
+                    "job_key": "global-saved",
+                    "result_status": "saved",
+                    "resume_id": ATS_RESUME_ID,
+                    "error": None,
+                }
+            ),
+        )
+
+    def refresh_tracker(route: object) -> None:
+        route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=render_console(
+                SOURCE_FILTER_SNAPSHOT,
+                global_snapshot=GLOBAL_STATUS_SNAPSHOT,
+            ),
+        )
+
+    setup_page.route(
+        "**/api/global-jobs/global-saved/re-evaluate*",
+        reevaluate,
+    )
+    setup_page.route("**/setup?unchanged=1", refresh_tracker)
+    setup_page.on(
+        "dialog",
+        lambda dialog: (confirmations.append(dialog.message), dialog.accept()),
+    )
+    setup_page.goto("http://draft.test/setup?unchanged=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
+    )
+    detail = open_job_details(card)
+
+    detail.locator("[data-job-resume-reevaluate]").click()
+    playwright.expect(
+        detail.locator("[data-job-reevaluate-progress]")
+    ).to_have_text("Re-evaluation complete. (complete)")
+
+    assert confirmations == [
+        (
+            "The resume has not changed since the last evaluation. "
+            "Re-evaluate anyway?"
+        )
+    ]
+    assert len(requests) == 2
+    assert "force=1" not in requests[0]
+    assert "force=1" in requests[1]
 
 
 def test_job_tracker_notes_add_edit_and_delete_without_closing_details(
@@ -2301,7 +3020,12 @@ def test_job_detail_save_buttons_show_saving_animation(setup_page: object) -> No
         '[data-review-block="global"] [data-job-key="global-saved"]'
     )
     detail = open_job_details(card)
-    setup_page.evaluate("window.fetch = () => new Promise(() => {});")
+    setup_page.evaluate(
+        """() => {
+          window.__pendingSaveRequest = new Promise(() => {});
+          window.fetch = () => window.__pendingSaveRequest;
+        }"""
+    )
 
     for action in ("status", "salary"):
         button = detail.locator(
@@ -2310,7 +3034,7 @@ def test_job_detail_save_buttons_show_saving_animation(setup_page: object) -> No
         button.click()
         assert button.is_disabled()
         assert button.get_attribute("class") == "is-saving"
-        assert button.get_text() == "Saving..."
+        assert button.text_content() == "Saving..."
         assert button.evaluate(
             "button => getComputedStyle(button, '::before').animationName"
         ) == "job-save-spin"
@@ -4415,7 +5139,45 @@ def test_ats_run_restores_current_progress_after_page_load(setup_page: object) -
     assert setup_page.locator("#ats-run-percent").text_content() == "50%"
 
 
-def test_delayed_idle_lookup_cannot_overwrite_a_new_ats_run(setup_page: object) -> None:
+def test_restored_ats_run_keeps_the_start_button_disabled(
+    setup_page: object,
+) -> None:
+    current = ats_state(
+        status="running",
+        stage="jobs",
+        progress_percent=50,
+        tasks=[task("linkedin-only", "job", "running")],
+    )
+    setup_page.route(
+        "**/api/ats-runs/current",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(current),
+        ),
+    )
+    setup_page.route(
+        "**/api/ats-runs/ats-1",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(current),
+        ),
+    )
+    setup_page.goto(
+        "http://draft.test/setup?active-ats-button=1&ats-jobs=1#job-tracker"
+    )
+    setup_page.locator(
+        '[data-ats-task="linkedin-only"][data-state="active"]'
+    ).wait_for(state="attached")
+    setup_page.locator("[data-ats-select-job]").first.check()
+
+    playwright.expect(setup_page.locator("[data-open-ats]")).to_be_disabled()
+
+
+def test_pending_current_ats_lookup_blocks_new_run_until_idle_is_known(
+    setup_page: object,
+) -> None:
     pending_current: list[object] = []
     running = ats_state(
         status="running",
@@ -4450,11 +5212,13 @@ def test_delayed_idle_lookup_cannot_overwrite_a_new_ats_run(setup_page: object) 
         '[data-ats-select-job][value="linkedin-only"]'
     ).check()
 
-    setup_page.locator("[data-open-ats]").click()
-    setup_page.locator('[data-ats-task="resume"][data-state="active"]').wait_for()
+    playwright.expect(setup_page.locator("[data-open-ats]")).to_be_disabled()
     assert len(pending_current) == 1
     pending_current[0].fulfill(status=204, body="")
-    setup_page.wait_for_timeout(100)
+    playwright.expect(setup_page.locator("[data-open-ats]")).to_be_enabled()
+
+    setup_page.locator("[data-open-ats]").click()
+    setup_page.locator('[data-ats-task="resume"][data-state="active"]').wait_for()
 
     assert setup_page.locator("#ats-run-badge").text_content() == "Running"
     assert setup_page.locator("#ats-run-percent").text_content() == "10%"

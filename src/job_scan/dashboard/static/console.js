@@ -30,6 +30,13 @@
   const scanHistory = document.querySelector("#scan-history");
   const reviewLink = document.querySelector("#review-link");
   const headerStatus = document.querySelector("#header-status");
+  const backgroundTaskMenu = document.querySelector("[data-background-task-menu]");
+  const backgroundTaskToggle = document.querySelector("[data-background-task-toggle]");
+  const backgroundTaskPanel = document.querySelector("#background-task-panel");
+  const backgroundTaskCount = document.querySelector("[data-background-task-count]");
+  const backgroundTaskSummary = document.querySelector("[data-background-task-summary]");
+  const backgroundTaskList = document.querySelector("[data-background-task-list]");
+  const backgroundTaskEmpty = document.querySelector("[data-background-task-empty]");
   const formError = document.querySelector("#form-error");
   const progressBar = document.querySelector("#progress-bar");
   const progress = progressBar.closest(".progress");
@@ -126,6 +133,8 @@
   let activeAtsRunId = null;
   let completedAtsRunId = null;
   let atsCurrentRequestVersion = 0;
+  let atsCurrentLookupPending = true;
+  let backgroundAtsRunActive = false;
   let activeRunId = null;
   let runAiRuntime = null;
   let runAiRuntimeName = null;
@@ -133,6 +142,122 @@
   let aiConfigurationPoll = null;
   let codexLoginPolling = false;
   let codexLoginBusy = false;
+  let backgroundTaskRequestInFlight = false;
+
+  const backgroundTaskKindLabels = {
+    scan: "Scan",
+    "add-job": "Add job from URL",
+    "re-evaluate": "Re-evaluate",
+    "ats-run": "ATS Run",
+  };
+
+  const syncBackgroundTaskControls = (tasks) => {
+    const runningReevaluations = new Set(
+      tasks
+        .filter((task) => task.kind === "re-evaluate" && task.subject_key)
+        .map((task) => task.subject_key),
+    );
+    document.querySelectorAll('form[data-job-action="re-evaluate"]').forEach((form) => {
+      const button = form.querySelector("[data-job-resume-reevaluate]");
+      if (!button) return;
+      const active = runningReevaluations.has(form.dataset.jobKey);
+      if (active) {
+        button.disabled = true;
+        button.dataset.backgroundTaskActive = "true";
+        button.textContent = "Re-evaluating...";
+      } else if (button.dataset.backgroundTaskActive === "true") {
+        button.disabled = false;
+        button.textContent = "Re-evaluate";
+        delete button.dataset.backgroundTaskActive;
+      }
+    });
+
+    const addJobActive = tasks.some((task) => task.kind === "add-job");
+    document.querySelectorAll("[data-open-manual-job], [data-submit-manual-job]").forEach((button) => {
+      if (addJobActive) {
+        button.disabled = true;
+        button.dataset.backgroundTaskActive = "true";
+      } else if (button.dataset.backgroundTaskActive === "true") {
+        button.disabled = false;
+        delete button.dataset.backgroundTaskActive;
+      }
+    });
+
+    backgroundAtsRunActive = tasks.some((task) => task.kind === "ats-run");
+    syncAtsSelection();
+  };
+
+  const renderBackgroundTasks = (tasks) => {
+    const activeTasks = Array.isArray(tasks) ? tasks : [];
+    backgroundTaskMenu.classList.toggle("has-active-tasks", activeTasks.length > 0);
+    backgroundTaskCount.textContent = String(activeTasks.length);
+    backgroundTaskSummary.textContent = activeTasks.length === 0
+      ? "No active tasks"
+      : `${activeTasks.length} active`;
+    backgroundTaskToggle.setAttribute(
+      "aria-label",
+      activeTasks.length === 0 ? "Tasks, none active" : `Tasks, ${activeTasks.length} active`,
+    );
+    backgroundTaskList.replaceChildren();
+    backgroundTaskEmpty.hidden = activeTasks.length > 0;
+
+    const fragment = document.createDocumentFragment();
+    activeTasks.forEach((task) => {
+      const item = document.createElement("li");
+      item.className = "background-task-item";
+      item.dataset.backgroundTaskItem = "";
+      item.dataset.taskId = String(task.task_id || "");
+
+      const heading = document.createElement("div");
+      heading.className = "background-task-item-heading";
+      const kind = document.createElement("strong");
+      kind.className = "background-task-kind";
+      kind.textContent = backgroundTaskKindLabels[task.kind] || "Task";
+      const taskStatus = document.createElement("span");
+      taskStatus.className = "background-task-status";
+      taskStatus.textContent = task.status === "waiting" ? "Waiting" : "Running";
+      heading.append(kind, taskStatus);
+
+      const label = document.createElement("p");
+      label.className = "background-task-label";
+      label.textContent = String(task.label || "Background task");
+      const message = document.createElement("p");
+      message.className = "background-task-message";
+      message.textContent = String(task.message || "Task is running.");
+      const progress = document.createElement("div");
+      progress.className = "background-task-progress";
+      progress.setAttribute("role", "progressbar");
+      const percent = Math.min(100, Math.max(0, Number(task.progress_percent) || 0));
+      progress.setAttribute("aria-valuemin", "0");
+      progress.setAttribute("aria-valuemax", "100");
+      progress.setAttribute("aria-valuenow", String(percent));
+      const progressFill = document.createElement("span");
+      progressFill.style.width = `${percent}%`;
+      progress.append(progressFill);
+
+      item.append(heading, label, message, progress);
+      fragment.append(item);
+    });
+    backgroundTaskList.append(fragment);
+    syncBackgroundTaskControls(activeTasks);
+  };
+
+  const loadBackgroundTasks = async () => {
+    if (backgroundTaskRequestInFlight) return;
+    backgroundTaskRequestInFlight = true;
+    try {
+      const response = await fetch("/api/background-tasks", {
+        credentials: "same-origin",
+      });
+      if (!response.ok) return;
+      const payload = await response.json();
+      renderBackgroundTasks(payload.tasks);
+    } catch (_error) {
+      // Keep the last known state through a transient local connection failure.
+    } finally {
+      backgroundTaskRequestInFlight = false;
+    }
+  };
 
   const placeholders = {
     "german-level": "Search or type a level",
@@ -1089,7 +1214,11 @@
     const count = selectedAtsJobKeys().length;
     atsStartButton.textContent = `Check ${count} selected jobs`;
     atsStartButton.removeAttribute("aria-disabled");
-    atsStartButton.disabled = atsStartInFlight || count === 0;
+    atsStartButton.disabled = atsStartInFlight
+      || atsCurrentLookupPending
+      || backgroundAtsRunActive
+      || activeAtsRunId !== null
+      || count === 0;
     atsJobSelectors().forEach((control) => {
       control.closest(".job-card").classList.toggle("is-ats-selected", control.checked);
     });
@@ -1126,6 +1255,7 @@
     } else {
       headerStatus.textContent = "ATS running";
     }
+    syncAtsSelection();
   };
 
   const showIdleAts = () => {
@@ -1143,6 +1273,7 @@
     atsRunProgress.setAttribute("aria-valuenow", "0");
     atsRunProgress.setAttribute("aria-valuetext", "No ATS check is running");
     atsResultsLink.hidden = true;
+    syncAtsSelection();
   };
 
   const failAts = (message) => {
@@ -1153,6 +1284,7 @@
     atsRunProgressBar.classList.add("bg-danger");
     atsResultsLink.hidden = true;
     headerStatus.textContent = "Failed";
+    syncAtsSelection();
   };
 
   const pollAts = async (runId, initialState) => {
@@ -1184,19 +1316,27 @@
 
   const loadCurrentAts = async () => {
     const requestVersion = ++atsCurrentRequestVersion;
+    atsCurrentLookupPending = true;
+    syncAtsSelection();
     try {
       const response = await fetch("/api/ats-runs/current", {
         credentials: "same-origin",
         signal: AbortSignal.timeout(10_000),
       });
       if (requestVersion !== atsCurrentRequestVersion) return;
+      atsCurrentLookupPending = false;
       if (response.status === 204) {
         if (activeAtsRunId === null && window.location.hash === "#ats-run") {
           showIdleAts();
+        } else {
+          syncAtsSelection();
         }
         return;
       }
-      if (!response.ok) return;
+      if (!response.ok) {
+        syncAtsSelection();
+        return;
+      }
       const state = await response.json();
       if (requestVersion !== atsCurrentRequestVersion) return;
       activeAtsRunId = state.run_id;
@@ -1204,11 +1344,21 @@
       await pollAts(state.run_id, state);
     } catch (_error) {
       // ATS Run remains usable in its idle state when current-run lookup is unavailable.
+    } finally {
+      if (requestVersion === atsCurrentRequestVersion && atsCurrentLookupPending) {
+        atsCurrentLookupPending = false;
+        syncAtsSelection();
+      }
     }
   };
 
   const startAts = async (button) => {
-    if (atsStartInFlight) return;
+    if (
+      atsStartInFlight
+      || atsCurrentLookupPending
+      || backgroundAtsRunActive
+      || activeAtsRunId !== null
+    ) return;
     const searchRunId = button.dataset.searchRunId;
     const jobKeys = selectedAtsJobKeys();
     if (jobKeys.length === 0) return;
@@ -1224,7 +1374,10 @@
         credentials: "same-origin",
         body: payload,
       });
-      if (!response.ok) throw new Error(await responseError(response));
+      if (!response.ok) {
+        if (response.status === 409) void loadCurrentAts();
+        throw new Error(await responseError(response));
+      }
       const state = await response.json();
       activeAtsRunId = state.run_id;
       setView("ats-run");
@@ -1686,6 +1839,12 @@
     }
   };
 
+  backgroundTaskToggle.addEventListener("click", () => {
+    const expanded = backgroundTaskToggle.getAttribute("aria-expanded") === "true";
+    backgroundTaskToggle.setAttribute("aria-expanded", String(!expanded));
+    backgroundTaskPanel.hidden = expanded;
+  });
+
   document.querySelectorAll("[data-local-datetime]").forEach((time) => {
     const instant = new Date(time.dateTime);
     if (!Number.isNaN(instant.getTime())) {
@@ -1803,6 +1962,8 @@
   };
   window.addEventListener("hashchange", applyHashView);
   applyHashView();
+  loadBackgroundTasks();
+  window.setInterval(loadBackgroundTasks, 750);
   loadCurrentRun();
   loadCurrentAts();
 })();

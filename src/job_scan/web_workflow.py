@@ -212,17 +212,12 @@ class WebWorkflow:
             previous_config = load_config(self._paths.config_toml)
         except (OSError, ValueError):
             previous_config = None
-        resume_path, created = store_uploaded_resume(
+        resume_path, _created = store_uploaded_resume(
             self._paths,
             resume_filename,
             resume_bytes,
         )
-        try:
-            setup_result = self._setup_service.run(resume_path, answers)
-        except BaseException:
-            if created:
-                resume_path.unlink(missing_ok=True)
-            raise
+        setup_result = self._setup_service.run(resume_path, answers)
 
         try:
             return self._complete_locked(
@@ -233,15 +228,11 @@ class WebWorkflow:
                 progress,
             )
         except BaseException:
-            try:
-                self._setup_service.restore_pair(
-                    previous_profile_bytes,
-                    previous_config_bytes,
-                )
-                self._restore_previous_schedule(previous_config)
-            finally:
-                if created:
-                    resume_path.unlink(missing_ok=True)
+            self._setup_service.restore_pair(
+                previous_profile_bytes,
+                previous_config_bytes,
+            )
+            self._restore_previous_schedule(previous_config)
             raise
 
     def _complete_locked(
@@ -433,7 +424,17 @@ def store_uploaded_resume(
                 output.write(payload)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, target)
+            try:
+                os.link(temporary, target)
+                created = True
+            except FileExistsError:
+                if target.read_bytes() != payload:
+                    raise ResumeReadError(
+                        "Stored resume does not match its content hash."
+                    ) from None
+                created = False
+            finally:
+                temporary.unlink(missing_ok=True)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
@@ -441,7 +442,7 @@ def store_uploaded_resume(
         raise
     except OSError:
         raise ResumeReadError("Could not save uploaded resume.") from None
-    return target.resolve(), True
+    return target.resolve(), created
 
 
 def read_resume_upload(stream: BinaryIO) -> bytes:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock, Thread
@@ -12,6 +13,7 @@ from job_scan.domain import UserStatus
 
 ManualImportProgress = Callable[[str, str], None]
 ManualImportStep = str
+ManualTaskKind = Literal["add-job", "re-evaluate"]
 
 
 class ManualImportBusy(RuntimeError):
@@ -33,6 +35,9 @@ class ManualImportState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     import_id: str
+    task_kind: ManualTaskKind = "add-job"
+    task_label: str = "Add job from URL"
+    subject_key: str | None = None
     status: Literal["running", "complete", "failed"]
     step: ManualImportStep
     message: str
@@ -45,6 +50,7 @@ class ManualImportState(BaseModel):
 
 _RUN_STEPS: dict[str, float] = {
     "queued": 2,
+    "starting": 5,
     "validate": 10,
     "read-page": 25,
     "extract": 45,
@@ -67,39 +73,49 @@ def _safe_status_message(
 class ManualJobImportWorkflow:
     """Run one background manual-import flow and publish in-memory progress."""
 
-    def __init__(self) -> None:
-        self._run_lock = Lock()
+    def __init__(self, *, max_concurrent: int = 3) -> None:
+        if max_concurrent <= 0:
+            raise ValueError("max_concurrent must be greater than zero")
+        self._max_concurrent = max_concurrent
         self._state_lock = Lock()
         self._runs: dict[str, ManualImportState] = {}
+        self._active_task_keys: dict[str, str] = {}
+        self._task_keys_by_run: dict[str, str] = {}
+        self._pending: deque[
+            tuple[str, Callable[[ManualImportProgress], ManualImportResult]]
+        ] = deque()
+        self._active_count = 0
 
     def start(
         self,
         run: Callable[[ManualImportProgress], ManualImportResult],
+        *,
+        task_kind: ManualTaskKind = "add-job",
+        task_label: str = "Add job from URL",
+        task_key: str | None = None,
+        subject_key: str | None = None,
     ) -> ManualImportState:
         """Start one manual import run and return its first visible state."""
-        if not self._run_lock.acquire(blocking=False):
-            raise ManualImportBusy("A manual job import is already running.")
         run_id = str(uuid.uuid4())
         initial = ManualImportState(
             import_id=run_id,
+            task_kind=task_kind,
+            task_label=task_label,
+            subject_key=subject_key,
             status="running",
             step="queued",
             message="Preparing manual import...",
             progress_percent=_RUN_STEPS["queued"],
         )
         with self._state_lock:
+            if task_key is not None and task_key in self._active_task_keys:
+                raise ManualImportBusy("A task for this item is already running.")
             self._runs[run_id] = initial
-        thread = Thread(
-            target=self._run,
-            args=(run_id, run),
-            name=f"job-scan-manual-import-{run_id}",
-            daemon=True,
-        )
-        try:
-            thread.start()
-        except BaseException:
-            self._run_lock.release()
-            raise
+            if task_key is not None:
+                self._active_task_keys[task_key] = run_id
+                self._task_keys_by_run[run_id] = task_key
+            self._pending.append((run_id, run))
+        self._launch_ready_tasks(propagate_run_id=run_id)
         return initial.model_copy(deep=True)
 
     def read_run(self, import_id: str) -> ManualImportState | None:
@@ -108,10 +124,19 @@ class ManualJobImportWorkflow:
             state = self._runs.get(import_id)
             return state.model_copy(deep=True) if state is not None else None
 
-    def _set_state(self, import_id: str, state: ManualImportState) -> None:
-        """Publish one immutable snapshot."""
+    def read_active_runs(self) -> list[ManualImportState]:
+        """Return queued and running task snapshots in submission order."""
         with self._state_lock:
-            self._runs[import_id] = state
+            return [
+                state.model_copy(deep=True)
+                for state in self._runs.values()
+                if state.status == "running"
+            ]
+
+    def is_busy(self) -> bool:
+        """Return whether any manual task is queued or running."""
+        with self._state_lock:
+            return any(state.status == "running" for state in self._runs.values())
 
     def _record_progress(
         self,
@@ -185,12 +210,80 @@ class ManualJobImportWorkflow:
         run: Callable[[ManualImportProgress], ManualImportResult],
     ) -> None:
         """Call one importer under isolation and record terminal state."""
+        self._record_progress(import_id, "starting", "Preparing manual import...")
         try:
             result = run(
                 lambda step, message: self._record_progress(import_id, step, message),
             )
             self._set_complete(import_id, result)
         except BaseException as error:  # noqa: BLE001 - background worker must report terminal state
-            self._set_failed(import_id, str(error) if str(error) else "Manual import failed.")
+            self._set_failed(
+                import_id,
+                str(error) if str(error) else "Manual import failed.",
+            )
         finally:
-            self._run_lock.release()
+            with self._state_lock:
+                self._active_count -= 1
+                self._release_task_key_locked(import_id)
+            self._launch_ready_tasks()
+
+    def _release_task_key_locked(self, import_id: str) -> None:
+        """Release one caller-owned deduplication key while the state lock is held."""
+        active_key = self._task_keys_by_run.pop(import_id, None)
+        if active_key is not None:
+            self._active_task_keys.pop(active_key, None)
+
+    def _claim_ready_tasks(
+        self,
+    ) -> list[tuple[str, Callable[[ManualImportProgress], ManualImportResult]]]:
+        """Claim queued work in submission order without exceeding the active limit."""
+        with self._state_lock:
+            claimed = []
+            while self._pending and self._active_count < self._max_concurrent:
+                claimed.append(self._pending.popleft())
+                self._active_count += 1
+            return claimed
+
+    def _launch_ready_tasks(self, *, propagate_run_id: str | None = None) -> None:
+        """Start only claimed work, leaving excess submissions in the FIFO queue."""
+        propagated_error: RuntimeError | None = None
+        while True:
+            claimed = self._claim_ready_tasks()
+            if not claimed:
+                break
+            start_failed = False
+            for import_id, run in claimed:
+                thread = Thread(
+                    target=self._run,
+                    args=(import_id, run),
+                    name=f"job-scan-manual-import-{import_id}",
+                    daemon=True,
+                )
+                try:
+                    thread.start()
+                except RuntimeError as error:
+                    start_failed = True
+                    with self._state_lock:
+                        self._active_count -= 1
+                        if import_id == propagate_run_id:
+                            self._runs.pop(import_id, None)
+                        else:
+                            current = self._runs.get(import_id)
+                            if current is not None:
+                                self._runs[import_id] = current.model_copy(
+                                    update={
+                                        "status": "failed",
+                                        "step": "failed",
+                                        "message": str(error) or "Manual import failed.",
+                                        "progress_percent": 100,
+                                        "error": str(error),
+                                    },
+                                    deep=True,
+                                )
+                        self._release_task_key_locked(import_id)
+                    if import_id == propagate_run_id:
+                        propagated_error = error
+            if not start_failed:
+                break
+        if propagated_error is not None:
+            raise propagated_error

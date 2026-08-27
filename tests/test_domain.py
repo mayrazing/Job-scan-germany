@@ -215,14 +215,18 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
         "global_status_deleted_at",
         "application_resume_id",
         "application_resume_filename",
-            "expected_salary",
-            "offer_salary",
-            "manual_posted_at",
-            "manual_company_size",
-            "manual_company_industry",
-            "resume_matches",
-            "user_status_history",
-        }
+        "last_evaluated_resume_id",
+        "reevaluation_notice",
+        "reevaluation_acknowledged_at",
+        "expected_salary",
+        "offer_salary",
+        "notes",
+        "manual_posted_at",
+        "manual_company_size",
+        "manual_company_industry",
+        "manual_import_errors",
+        "user_status_history",
+    }
     assert set(dumped_occurrence) == set(SourceOccurrence.model_fields)
     assert "source_job_key" not in dumped_occurrence
     assert "source_occurrence_key" not in dumped_occurrence
@@ -234,6 +238,64 @@ def test_snapshot_round_trip_dump_keeps_facts_and_rebuilds_computed_keys() -> No
     assert restored_occurrence.source_occurrence_key == (
         "linkedin:acme/jobs:canonical-1@2"
     )
+
+
+def test_job_record_migrates_the_latest_review_when_current_resume_has_no_match() -> None:
+    raw = job("legacy").model_dump(mode="json")
+    raw["application_resume_id"] = "sha256:" + "3" * 64
+    raw["application_resume_filename"] = "current.pdf"
+    raw["resume_matches"] = [
+        {
+            "resume_id": "sha256:" + "1" * 64,
+            "profile_hash": "sha256:" + "a" * 64,
+            "machine_status": "eligible",
+            "score": 91,
+            "reason": "Older evaluation",
+            "reviewed_at": "2026-08-01T10:00:00Z",
+        },
+        {
+            "resume_id": "sha256:" + "2" * 64,
+            "profile_hash": "sha256:" + "b" * 64,
+            "machine_status": "eligible",
+            "score": 63,
+            "reason": "Latest evaluation",
+            "reviewed_at": "2026-08-02T10:00:00Z",
+        },
+    ]
+
+    migrated = JobRecord.model_validate(raw)
+
+    assert migrated.last_evaluated_resume_id == "sha256:" + "2" * 64
+    assert migrated.score == 63
+    assert migrated.reason == "Latest evaluation"
+
+
+def test_job_record_migrates_legacy_reviews_with_mixed_timestamp_timezones() -> None:
+    raw = job("legacy-mixed-timezones").model_dump(mode="json")
+    raw["resume_matches"] = [
+        {
+            "resume_id": "sha256:" + "1" * 64,
+            "profile_hash": "sha256:" + "a" * 64,
+            "machine_status": "eligible",
+            "score": 91,
+            "reason": "Latest naive legacy evaluation",
+            "reviewed_at": "2026-08-03T10:00:00",
+        },
+        {
+            "resume_id": "sha256:" + "2" * 64,
+            "profile_hash": "sha256:" + "b" * 64,
+            "machine_status": "eligible",
+            "score": 63,
+            "reason": "Older aware legacy evaluation",
+            "reviewed_at": "2026-08-02T10:00:00Z",
+        },
+    ]
+
+    migrated = JobRecord.model_validate(raw)
+
+    assert migrated.last_evaluated_resume_id == "sha256:" + "1" * 64
+    assert migrated.reason == "Latest naive legacy evaluation"
+    assert migrated.reviewed_at == datetime(2026, 8, 3, 10, 0, tzinfo=UTC)
 
 
 def test_snapshot_round_trip_preserves_company_industry_evidence_and_source_locator() -> None:

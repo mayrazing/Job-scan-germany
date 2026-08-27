@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime
 from inspect import Parameter, signature
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self, cast
 from urllib.parse import quote, urlsplit
 
 from fastapi import (
@@ -117,7 +117,7 @@ from job_scan.manual_job_import_workflow import (
 )
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
-from job_scan.resume import ResumeError
+from job_scan.resume import ResumeError, UnsupportedResumeFormat
 from job_scan.resume_suggestions import (
     ResumeSuggestionError,
     ResumeSuggestions,
@@ -162,6 +162,17 @@ class _StatusMutation(BaseModel):
 
 class _LifecycleDateMutation(BaseModel):
     changed_on: date
+
+
+class _ReevaluationAcknowledgement(BaseModel):
+    finished_at: datetime
+
+    @field_validator("finished_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("finished_at must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class _ManualFactMutation(BaseModel):
@@ -245,8 +256,20 @@ class _CodexAuthState(BaseModel):
     login: CodexLoginSnapshot
 
 
-class _ManualJobImportStartResponse(ManualImportState):
-    pass
+class _BackgroundTaskState(BaseModel):
+    """Expose one active task in the sticky console task list."""
+
+    task_id: str
+    kind: Literal["scan", "add-job", "re-evaluate", "ats-run"]
+    label: str
+    status: Literal["waiting", "running"]
+    message: str
+    progress_percent: float = Field(ge=0, le=100)
+    subject_key: str | None = None
+
+
+class _BackgroundTaskCollection(BaseModel):
+    tasks: list[_BackgroundTaskState]
 
 
 class _JobDisappeared(RuntimeError):
@@ -359,7 +382,8 @@ def create_review_app(
             callbacks["on_progress"] = progress
         if _supports_callback(manual_job_importer, "on_job_extracted"):
             callbacks["on_job_extracted"] = job_extracted
-        return manual_job_importer(
+        importer = cast(Callable[..., JobRecord], manual_job_importer)
+        return importer(
             source_url,
             config_obj,
             profile_text,
@@ -367,16 +391,6 @@ def create_review_app(
             **callbacks,
         )
 
-    def _ensure_scan_available() -> None:
-        """Reject immediately when the scan lock is currently held."""
-        try:
-            with FileRWLock(repository.paths.scan_lock_file).exclusive(blocking=False):
-                pass
-        except LockUnavailable:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "A scan is running; retry the job import after it completes.",
-            ) from None
     if manual_resume_preparer is None:
         setup_service = SetupService(repository.paths)
 
@@ -440,31 +454,19 @@ def create_review_app(
                 "The resume for this review is unavailable.",
             )
         config, filename, resume_bytes = context
-        resume_path, created = store_uploaded_resume(
+        resume_path, _created = store_uploaded_resume(
             repository.paths,
             filename,
             resume_bytes,
         )
         resume_id = f"sha256:{resume_path.stem}"
-        try:
-            global_jobs.set_status(
-                job,
-                selected_status,
-                resume_id=resume_id,
-                profile_hash=config.profile_sha256,
-                application_resume_filename=filename,
-            )
-        except BaseException:
-            try:
-                resume_was_committed = any(
-                    tracked.application_resume_id == resume_id
-                    for tracked in global_jobs.load().jobs
-                )
-            except (OSError, ValueError):
-                resume_was_committed = True
-            if created and not resume_was_committed:
-                resume_path.unlink(missing_ok=True)
-            raise
+        global_jobs.set_status(
+            job,
+            selected_status,
+            resume_id=resume_id,
+            profile_hash=config.profile_sha256,
+            application_resume_filename=filename,
+        )
 
     def selected_ats_jobs(
         keys: list[str],
@@ -603,8 +605,8 @@ def create_review_app(
             raise HTTPException(status.HTTP_403_FORBIDDEN)
 
     def ai_work_is_running() -> bool:
-        """Return whether a scan or ATS workflow currently owns AI configuration."""
-        for owner in (workflow, ats_workflow):
+        """Return whether a running workflow owns AI configuration."""
+        for owner in (workflow, manual_import_workflow, ats_workflow):
             if owner is None:
                 continue
             is_busy = getattr(owner, "is_busy", None)
@@ -739,11 +741,57 @@ def create_review_app(
     @app.get("/api/manual-job-imports/{import_id}")
     def read_manual_job_import(
         import_id: str,
-    ) -> _ManualJobImportStartResponse:
+    ) -> ManualImportState:
         state = manual_import_workflow.read_run(import_id)
         if state is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND)
         return state
+
+    @app.get("/api/background-tasks")
+    def read_background_tasks() -> _BackgroundTaskCollection:
+        tasks: list[_BackgroundTaskState] = []
+        scan_reader = getattr(workflow, "read_current_run", None)
+        scan_state = scan_reader() if callable(scan_reader) else None
+        if scan_state is not None and scan_state.status == "running":
+            tasks.append(
+                _BackgroundTaskState(
+                    task_id=f"scan:{scan_state.run_id}",
+                    kind="scan",
+                    label="Save and run scan",
+                    status="running",
+                    message=scan_state.message,
+                    progress_percent=scan_state.progress_percent,
+                )
+            )
+        for state in manual_import_workflow.read_active_runs():
+            tasks.append(
+                _BackgroundTaskState(
+                    task_id=f"manual:{state.import_id}",
+                    kind=state.task_kind,
+                    label=state.task_label,
+                    status="waiting" if state.step == "queued" else "running",
+                    message=state.message,
+                    progress_percent=state.progress_percent,
+                    subject_key=state.subject_key,
+                )
+            )
+        ats_reader = getattr(ats_workflow, "read_current_run", None)
+        ats_state = ats_reader() if callable(ats_reader) else None
+        if ats_state is not None and ats_state.status == "running":
+            job_count = sum(
+                getattr(task, "kind", None) == "job" for task in ats_state.tasks
+            )
+            tasks.append(
+                _BackgroundTaskState(
+                    task_id=f"ats:{ats_state.run_id}",
+                    kind="ats-run",
+                    label=f"ATS Run · {job_count} jobs",
+                    status="running",
+                    message=ats_state.message,
+                    progress_percent=ats_state.progress_percent,
+                )
+            )
+        return _BackgroundTaskCollection(tasks=tasks)
 
     @app.post(
         "/api/global-jobs/import-with-resume",
@@ -753,7 +801,7 @@ def create_review_app(
     def import_global_job_with_resume(
         url: Annotated[str, Form(min_length=1, max_length=2083)],
         resume: Annotated[UploadFile, File()],
-    ) -> _ManualJobImportStartResponse:
+    ) -> ManualImportState:
         try:
             job_url = require_public_job_url(url)
         except ManualJobImportError as error:
@@ -762,82 +810,94 @@ def create_review_app(
                 str(error),
             ) from None
 
-        resume_path: Path | None = None
-        stored_resume_created = False
-        resume_id = f"sha256:{'0'*64}"
-        completed = False
         try:
             filename = Path(resume.filename or "").name
             resume_bytes = read_resume_upload(resume.file)
-            resume_path, stored_resume_created = store_uploaded_resume(
-                repository.paths,
-                filename,
-                resume_bytes,
-            )
-            resume_id = f"sha256:{resume_path.stem}"
-            base_config = load_job_tracker_config()
-            prepared = manual_resume_preparer(
-                resume_path,
-                uploaded_resume_answers(base_config, filename),
-            )
-            if prepared.config.resume_sha256 != resume_id:
-                raise ValueError("prepared resume hash does not match upload")
-            config = apply_ai_selection_to_config(
-                prepared.config,
-                current_ai_selection(base_config),
-                provider_store,
-            )
-            profile_bytes = prepared.profile_bytes
-
-            profile = profile_bytes.decode("utf-8")
-            imported_at = datetime.now(UTC)
-            company_size_future: Future[CompanySizeEvidence | None] = Future()
-            company_size_start_lock = Lock()
-            company_size_started = False
-
-            def start_company_size_lookup(extracted_job: JobRecord) -> None:
-                """Start one company lookup at extraction time, at most once."""
-                nonlocal company_size_started
-                with company_size_start_lock:
-                    if company_size_started:
-                        return
-                    company_size_started = True
-
-                def lookup_company_size() -> None:
-                    try:
-                        lookup_job = extracted_job.model_copy(
-                            update={"machine_status": MachineStatus.ELIGIBLE},
-                            deep=True,
-                        )
-                        lookup_snapshot = Snapshot(
-                            meta=StoreMeta(data_revision=0),
-                            jobs=[lookup_job],
-                        )
-                        company_sizes().apply(lookup_snapshot, config, imported_at)
-                        company_size_future.set_result(
-                            lookup_snapshot.jobs[0].company_size
-                        )
-                    except Exception as error:  # noqa: BLE001 - lookup failure must not hide the saved job
-                        company_size_future.set_exception(error)
-
-                thread = Thread(
-                    target=lookup_company_size,
-                    name="job-scan-manual-company-size",
-                    daemon=True,
+            suffix = Path(filename).suffix.lower()
+            if suffix not in {".pdf", ".docx"}:
+                raise UnsupportedResumeFormat(
+                    f"Unsupported resume format {suffix or '(none)'}; "
+                    "use a .pdf or .docx file."
                 )
-                try:
-                    thread.start()
-                except RuntimeError as error:
-                    company_size_future.set_exception(error)
 
             def run_import(progress: Callable[[str, str], None]) -> ManualImportResult:
-                nonlocal completed
                 try:
-                    with FileRWLock(repository.paths.workflow_lock_file).exclusive(
-                        blocking=False
-                    ), FileRWLock(repository.paths.scan_lock_file).exclusive(
-                        blocking=False
-                    ):
+                    resume_path, _created = store_uploaded_resume(
+                        repository.paths,
+                        filename,
+                        resume_bytes,
+                    )
+                    resume_id = f"sha256:{resume_path.stem}"
+                    with FileRWLock(repository.paths.ai_usage_lock_file).shared():
+                        progress("validate", "Preparing the uploaded resume for review.")
+                        base_config = load_job_tracker_config()
+                        prepared = manual_resume_preparer(
+                            resume_path,
+                            uploaded_resume_answers(base_config, filename),
+                        )
+                        if prepared.config.resume_sha256 != resume_id:
+                            raise ValueError("prepared resume hash does not match upload")
+                        config = apply_ai_selection_to_config(
+                            prepared.config,
+                            current_ai_selection(base_config),
+                            provider_store,
+                        )
+                        profile = prepared.profile_bytes.decode("utf-8")
+                        imported_at = datetime.now(UTC)
+                        manual_company_sizes = company_sizes(
+                            f"manual-{resume_id.removeprefix('sha256:')}"
+                        )
+                        company_size_future: Future[
+                            CompanySizeEvidence | None
+                        ] = Future()
+                        company_size_start_lock = Lock()
+                        company_size_started = False
+                        existing_job_at_extraction: JobRecord | None = None
+
+                        def start_company_size_lookup(
+                            extracted_job: JobRecord,
+                        ) -> None:
+                            """Start one company lookup at extraction time, at most once."""
+                            nonlocal company_size_started, existing_job_at_extraction
+                            with company_size_start_lock:
+                                if company_size_started:
+                                    return
+                                company_size_started = True
+                                existing_job_at_extraction = global_jobs.find(
+                                    extracted_job.canonical_job_key
+                                )
+
+                            def lookup_company_size() -> None:
+                                try:
+                                    lookup_job = extracted_job.model_copy(
+                                        update={"machine_status": MachineStatus.ELIGIBLE},
+                                        deep=True,
+                                    )
+                                    lookup_snapshot = Snapshot(
+                                        meta=StoreMeta(data_revision=0),
+                                        jobs=[lookup_job],
+                                    )
+                                    manual_company_sizes.apply(
+                                        lookup_snapshot,
+                                        config,
+                                        imported_at,
+                                    )
+                                    company_size_future.set_result(
+                                        lookup_snapshot.jobs[0].company_size
+                                    )
+                                except Exception as error:  # noqa: BLE001 - lookup failure must not hide the saved job
+                                    company_size_future.set_exception(error)
+
+                            thread = Thread(
+                                target=lookup_company_size,
+                                name="job-scan-manual-company-size",
+                                daemon=True,
+                            )
+                            try:
+                                thread.start()
+                            except RuntimeError as error:
+                                company_size_future.set_exception(error)
+
                         job = _import_job_with_progress(
                             job_url,
                             config,
@@ -853,11 +913,8 @@ def create_review_app(
                             UserStatus.SAVED,
                             resume_id=resume_id,
                             profile_hash=config.profile_sha256,
-                        )
-                        global_jobs.set_application_resume(
-                            saved_job,
-                            resume_id,
-                            filename,
+                            application_resume_filename=filename,
+                            expected_job=existing_job_at_extraction,
                         )
 
                         def update_company_size() -> None:
@@ -865,24 +922,18 @@ def create_review_app(
                                 result = company_size_future.result()
                                 if result is None:
                                     return
-                                with FileRWLock(
-                                    repository.paths.workflow_lock_file
-                                ).exclusive(), FileRWLock(
-                                    repository.paths.scan_lock_file
-                                ).exclusive():
-                                    _mutate_global_or_conflict(
-                                        global_jobs,
-                                        _company_size_mutator(
-                                            company_sizes(),
-                                            saved_job.canonical_job_key,
-                                            result,
-                                            config,
-                                        ),
-                                    )
+                                _mutate_global_or_conflict(
+                                    global_jobs,
+                                    _company_size_mutator(
+                                        manual_company_sizes,
+                                        saved_job.canonical_job_key,
+                                        result,
+                                        config,
+                                    ),
+                                )
                             except Exception:  # noqa: BLE001 - background enrichment is best-effort
                                 return
 
-                        completed = True
                         updater = Thread(
                             target=update_company_size,
                             name="job-scan-manual-company-size-save",
@@ -897,14 +948,15 @@ def create_review_app(
                             result_status=saved_job.user_status,
                             resume_id=resume_id,
                         )
-                except BaseException:
-                    if stored_resume_created and resume_path is not None:
-                        resume_path.unlink(missing_ok=True)
+                except BaseException:  # noqa: TRY203 - preserve task failure for workflow state
                     raise
 
-            _ensure_scan_available()
-            state = manual_import_workflow.start(run_import)
-            completed = True
+            state = manual_import_workflow.start(
+                run_import,
+                task_kind="add-job",
+                task_label=job_url,
+                task_key="add-job",
+            )
             return state
         except ManualJobImportError as error:
             raise HTTPException(
@@ -918,9 +970,146 @@ def create_review_app(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 str(error) or "Could not prepare the uploaded resume.",
             ) from None
-        finally:
-            if not completed and stored_resume_created and resume_path is not None:
-                resume_path.unlink(missing_ok=True)
+
+    @app.post(
+        "/api/global-jobs/{key}/re-evaluate",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def reevaluate_global_job(key: str, force: bool = False) -> ManualImportState:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        if (
+            job.application_resume_id is None
+            or job.application_resume_filename is None
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Attach a resume before re-evaluating this job.",
+            )
+        if (
+            not force
+            and job.application_resume_id == job.last_evaluated_resume_id
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "The resume has not changed since the last evaluation.",
+                headers={"X-Job-Scan-Conflict": "resume-unchanged"},
+            )
+        resume_id = job.application_resume_id
+        filename = job.application_resume_filename
+
+        def execute_reevaluation(
+            progress: Callable[[str, str], None],
+        ) -> ManualImportResult:
+            with FileRWLock(repository.paths.ai_usage_lock_file).shared():
+                current_job = global_jobs.find(key)
+                if current_job is None:
+                    raise ManualJobImportError(
+                        "This job was removed before re-evaluation started."
+                    )
+                if (
+                    current_job.application_resume_id != resume_id
+                    or current_job.application_resume_filename != filename
+                ):
+                    raise ManualJobImportError(
+                        "The attached resume changed before re-evaluation started."
+                    )
+                progress("validate", "Preparing the attached resume for review.")
+                resume_bytes = read_stored_resume(
+                    repository.paths,
+                    resume_id,
+                    filename,
+                )
+                resume_path, _created = store_uploaded_resume(
+                    repository.paths,
+                    filename,
+                    resume_bytes,
+                )
+                base_config = load_job_tracker_config()
+                prepared = manual_resume_preparer(
+                    resume_path,
+                    uploaded_resume_answers(base_config, filename),
+                )
+                if prepared.config.resume_sha256 != resume_id:
+                    raise ValueError("prepared resume hash does not match stored resume")
+                config = apply_ai_selection_to_config(
+                    prepared.config,
+                    current_ai_selection(base_config),
+                    provider_store,
+                )
+                profile = prepared.profile_bytes.decode("utf-8")
+                imported_at = datetime.now(UTC)
+                evaluated = _import_job_with_progress(
+                    str(current_job.url),
+                    config,
+                    profile,
+                    imported_at,
+                    progress,
+                    lambda _job: None,
+                )
+                if evaluated.last_error is not None:
+                    raise ManualJobImportError(evaluated.last_error)
+                progress("save", "Saving this job's new evaluation.")
+                saved_job = global_jobs.save_reevaluation(
+                    key,
+                    evaluated,
+                    resume_id=resume_id,
+                    expected_job=job,
+                )
+                return ManualImportResult(
+                    job_key=saved_job.canonical_job_key,
+                    result_status=saved_job.user_status,
+                    resume_id=resume_id,
+                )
+
+        def run_reevaluation(
+            progress: Callable[[str, str], None],
+        ) -> ManualImportResult:
+            try:
+                return execute_reevaluation(progress)
+            except BaseException:
+                try:
+                    global_jobs.record_reevaluation_result(key, "failed")
+                except (KeyError, OSError, ValueError):
+                    pass
+                raise
+
+        try:
+            return manual_import_workflow.start(
+                run_reevaluation,
+                task_kind="re-evaluate",
+                task_label=f"{job.title} at {job.company}",
+                task_key=f"re-evaluate:{job.canonical_job_key}",
+                subject_key=job.canonical_job_key,
+            )
+        except ManualImportBusy as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from None
+
+    @app.post(
+        "/api/global-jobs/{key}/re-evaluation-result/acknowledge",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def acknowledge_global_job_reevaluation_result(
+        key: str,
+        acknowledgement: _ReevaluationAcknowledgement,
+    ) -> Response:
+        try:
+            saved_job = global_jobs.acknowledge_reevaluation_result(
+                key,
+                acknowledgement.finished_at,
+            )
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        if saved_job.reevaluation_notice is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "A newer re-evaluation result is available.",
+                headers={"X-Job-Scan-Conflict": "re-evaluation-result-changed"},
+            )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(
         "/api/ats-runs",
@@ -1097,7 +1286,7 @@ def create_review_app(
         discovery = ai_model_discovery or AiModelDiscovery()
         codex_process = CodexProcess(home=repository.paths.codex_home)
         codex_login = CodexLoginWorkflow(repository.paths.codex_home)
-        app.add_event_handler("shutdown", codex_login.close)
+        app.router.add_event_handler("shutdown", codex_login.close)
         discover_codex_models = (
             codex_model_discovery
             or codex_process.models
@@ -1818,7 +2007,6 @@ def create_review_app(
         resume: Annotated[UploadFile, File()],
     ) -> Response:
         resume_path: Path | None = None
-        stored_resume_created = False
         resume_id: str | None = None
         try:
             filename = Path(resume.filename or "").name
@@ -1829,7 +2017,7 @@ def create_review_app(
                 job = global_jobs.find(key)
                 if job is None:
                     raise HTTPException(status.HTTP_404_NOT_FOUND)
-                resume_path, stored_resume_created = store_uploaded_resume(
+                resume_path, _created = store_uploaded_resume(
                     repository.paths,
                     filename,
                     resume_bytes,
@@ -1844,8 +2032,6 @@ def create_review_app(
         except HTTPException:
             raise
         except (ResumeError, OSError, ValueError) as error:
-            if stored_resume_created and resume_path is not None:
-                resume_path.unlink(missing_ok=True)
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 str(error) or "Could not save the uploaded resume.",

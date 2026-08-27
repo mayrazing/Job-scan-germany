@@ -14,6 +14,7 @@ from job_scan.domain import (
     JobRecord,
     MachineStatus,
     PrimaryView,
+    ReevaluationNotice,
     SalaryPeriod,
     SalaryValue,
     Snapshot,
@@ -363,7 +364,66 @@ def test_job_tracker_saved_job_shows_download_and_resume_replacement() -> None:
     replace = card.select_one("[data-job-resume-replace]")
     assert replace is not None
     assert replace.get_text(" ", strip=True) == "Replace"
+    reevaluate = card.select_one(
+        'form[data-job-action="re-evaluate"] '
+        'button[data-job-resume-reevaluate][type="submit"]'
+    )
+    assert reevaluate is not None
+    assert reevaluate.get_text(" ", strip=True) == "Re-evaluate"
+    assert card.select_one("[data-job-reevaluate-progress][role=status]") is not None
     assert "Use saved resume" not in card.get_text(" ", strip=True)
+
+
+def test_job_tracker_marks_the_score_stale_after_resume_replacement() -> None:
+    current_resume_id = "sha256:" + "b" * 64
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "application_resume_id": current_resume_id,
+                "application_resume_filename": "updated.pdf",
+                "last_evaluated_resume_id": "sha256:" + "a" * 64,
+            }
+        )
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+
+    progress = page.select_one(
+        '[data-job-key="saved"] [data-job-reevaluate-progress]'
+    )
+    assert progress is not None
+    assert not progress.has_attr("hidden")
+    assert progress.get_text(" ", strip=True) == (
+        "Current resume has not been evaluated. Re-evaluate to update this score."
+    )
+
+
+def test_job_tracker_renders_persisted_reevaluation_result_state() -> None:
+    finished_at = NOW + timedelta(minutes=8)
+    tracked = _snapshot(
+        _job("saved", user=UserStatus.SAVED).model_copy(
+            update={
+                "reevaluation_notice": ReevaluationNotice(
+                    status="succeeded",
+                    finished_at=finished_at,
+                )
+            }
+        )
+    )
+
+    page = BeautifulSoup(render_console(global_snapshot=tracked), "html.parser")
+
+    card = page.select_one('[data-review-block="global"] [data-job-key="saved"]')
+    assert card is not None
+    assert card.get("data-reevaluation-status") == "succeeded"
+    assert card.get("data-reevaluation-finished-at") == finished_at.isoformat()
+    assert card.get("aria-label") == (
+        "View details for Role saved at Company saved. "
+        "Re-evaluation succeeded; open to acknowledge"
+    )
+    assert page.select_one(
+        '[data-review-block="global"] [data-review-group-notice-count="saved"]'
+    ) is not None
 
 
 def test_job_tracker_renders_dated_notes_with_add_edit_and_delete_controls() -> None:

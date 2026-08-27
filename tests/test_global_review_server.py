@@ -4,9 +4,9 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -60,6 +60,10 @@ from job_scan.domain import (
 )
 from job_scan.global_jobs import GlobalJobStore
 from job_scan.locking import FileRWLock, LockUnavailable
+from job_scan.manual_job_import_workflow import (
+    ManualImportResult,
+    ManualJobImportWorkflow,
+)
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
 from job_scan.review_server import create_review_app
@@ -1389,6 +1393,15 @@ def test_job_tracker_resume_can_be_replaced_by_upload(tmp_path: Path) -> None:
         "old.pdf",
         b"OLD RESUME",
     )
+    tracked = global_jobs.find("tracked")
+    assert tracked is not None
+    global_jobs.set_status(
+        tracked,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=old_resume_id,
+        profile_hash="sha256:" + "a" * 64,
+    )
     uploaded_bytes = SAMPLE_RESUME.read_bytes()
     uploaded_resume_id = "sha256:" + hashlib.sha256(uploaded_bytes).hexdigest()
 
@@ -1422,6 +1435,7 @@ def test_job_tracker_resume_can_be_replaced_by_upload(tmp_path: Path) -> None:
     assert saved is not None
     assert saved.application_resume_id == uploaded_resume_id
     assert saved.application_resume_filename == "updated.docx"
+    assert saved.last_evaluated_resume_id == old_resume_id
     assert old_resume_id != uploaded_resume_id
     digest = uploaded_resume_id.removeprefix("sha256:")
     assert (paths.root / "resumes" / f"{digest}.docx").read_bytes() == uploaded_bytes
@@ -2460,6 +2474,8 @@ def test_manual_job_import_saves_before_company_size_lookup_finishes(
             state = _wait_manual_import_completion(client, started["import_id"])
             assert state["status"] == "complete"
             assert lookup.started.wait(timeout=1)
+            with FileRWLock(paths.scan_lock_file).exclusive(blocking=False):
+                pass
             saved = global_jobs.find("manual")
             assert saved is not None
             assert saved.company_size is None
@@ -2648,7 +2664,7 @@ def test_delete_unknown_global_job_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_manual_job_import_rejects_while_scan_is_running(tmp_path: Path) -> None:
+def test_manual_job_import_runs_while_scan_is_running(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     _save_config(paths)
@@ -2674,15 +2690,18 @@ def test_manual_job_import_rejects_while_scan_is_running(tmp_path: Path) -> None
     ) as client:
         _open_session(client)
         response = _post_job_with_resume(client)
+        if response.status_code == 202:
+            state = _wait_manual_import_completion(
+                client,
+                response.json()["import_id"],
+            )
 
-    assert response.status_code == 409
-    assert response.json() == {
-        "detail": "A scan is running; retry the job import after it completes."
-    }
-    assert calls == []
+    assert response.status_code == 202
+    assert state["status"] == "complete"
+    assert len(calls) == 1
 
 
-def test_manual_job_import_holds_scan_lock_until_import_finishes(tmp_path: Path) -> None:
+def test_manual_job_import_does_not_claim_the_scan_lock(tmp_path: Path) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     _save_config(paths)
@@ -2709,9 +2728,237 @@ def test_manual_job_import_holds_scan_lock_until_import_finishes(tmp_path: Path)
     with TestClient(app, base_url=ORIGIN) as client:
         _open_session(client)
         response = _post_job_with_resume(client)
+        if response.status_code == 202:
+            _wait_manual_import_completion(
+                client,
+                response.json()["import_id"],
+            )
 
     assert response.status_code == 202
-    assert lock_available_during_import == [False]
+    assert lock_available_during_import == [True]
+
+
+def test_manual_job_import_rejects_a_second_add_job_request(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    started = Event()
+    release = Event()
+
+    def import_job(*_inputs: object) -> JobRecord:
+        started.set()
+        if not release.wait(timeout=5):
+            raise AssertionError("test did not release manual import")
+        return _job("manual", external_id="manual")
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        first = _post_job_with_resume(client)
+        try:
+            assert first.status_code == 202
+            assert started.wait(timeout=1)
+            second_resume = b"different resume payload"
+            second = client.post(
+                "/api/global-jobs/import-with-resume",
+                data={"url": "https://careers.example/jobs/second"},
+                files={"resume": ("second.docx", second_resume)},
+                headers=HEADERS,
+            )
+            assert second.status_code == 409
+            second_digest = hashlib.sha256(second_resume).hexdigest()
+            assert not (paths.root / "resumes" / f"{second_digest}.docx").exists()
+        finally:
+            release.set()
+
+        _wait_manual_import_completion(client, first.json()["import_id"])
+
+
+def test_manual_job_import_claims_task_before_preparing_profile(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    workflow = ManualJobImportWorkflow()
+    preparation_started = Event()
+    release_preparation = Event()
+    prepare_resume = _prepare_uploaded_resume(paths)
+
+    def prepare_current_resume(
+        resume_path: Path,
+        answers: SetupAnswers,
+    ) -> SetupPreparation:
+        preparation_started.set()
+        if not release_preparation.wait(timeout=5):
+            raise AssertionError("test did not release profile preparation")
+        return prepare_resume(resume_path, answers)
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        manual_job_importer=lambda *_inputs: _job("manual", external_id="manual"),
+        manual_resume_preparer=prepare_current_resume,
+        manual_import_workflow=workflow,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+    responses: list[Response] = []
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+
+        request_thread = Thread(
+            target=lambda: responses.append(_post_job_with_resume(client)),
+        )
+        request_thread.start()
+        assert preparation_started.wait(timeout=1)
+        request_thread.join(timeout=1)
+        try:
+            assert not request_thread.is_alive()
+            assert len(responses) == 1
+            assert responses[0].status_code == 202
+            assert workflow.is_busy()
+        finally:
+            release_preparation.set()
+            request_thread.join(timeout=5)
+
+        state = _wait_manual_import_completion(
+            client,
+            responses[0].json()["import_id"],
+        )
+
+    assert state["status"] == "complete"
+
+
+def test_background_tasks_endpoint_lists_every_active_task_type(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    release = Event()
+    manual_workflow = ManualJobImportWorkflow()
+    add_started = Event()
+    reevaluation_started = Event()
+
+    def block(
+        job_key: str,
+        started: Event,
+    ) -> Callable[[object], ManualImportResult]:
+        def run(_progress: object) -> ManualImportResult:
+            started.set()
+            if not release.wait(timeout=5):
+                raise AssertionError(f"test did not release {job_key}")
+            return ManualImportResult(job_key, UserStatus.SAVED)
+
+        return run
+
+    add_job = manual_workflow.start(
+        block("added", add_started),
+        task_kind="add-job",
+        task_label="https://jobs.example/added",
+        task_key="add-job",
+    )
+    reevaluation = manual_workflow.start(
+        block("tracked", reevaluation_started),
+        task_kind="re-evaluate",
+        task_label="Backend Engineer at Acme",
+        task_key="re-evaluate:tracked",
+        subject_key="tracked",
+    )
+    scan_workflow = SimpleNamespace(
+        load_setup_answers=lambda: None,
+        read_current_run=lambda: SimpleNamespace(
+            run_id="scan-1",
+            status="running",
+            message="Reviewing complete job descriptions...",
+            progress_percent=60,
+        ),
+        is_busy=lambda: True,
+    )
+    ats_workflow = SimpleNamespace(
+        read_current_run=lambda: SimpleNamespace(
+            run_id="ats-1",
+            status="running",
+            message="Checking selected jobs...",
+            progress_percent=25,
+            tasks=[
+                SimpleNamespace(kind="resume"),
+                SimpleNamespace(kind="job"),
+                SimpleNamespace(kind="job"),
+            ],
+        ),
+        is_busy=lambda: True,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=scan_workflow,
+        manual_import_workflow=manual_workflow,
+        ats_workflow=ats_workflow,
+    )
+
+    try:
+        assert add_started.wait(timeout=1)
+        assert reevaluation_started.wait(timeout=1)
+        with TestClient(app, base_url=ORIGIN) as client:
+            _open_session(client)
+            response = client.get("/api/background-tasks")
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tasks": [
+            {
+                "task_id": "scan:scan-1",
+                "kind": "scan",
+                "label": "Save and run scan",
+                "status": "running",
+                "message": "Reviewing complete job descriptions...",
+                "progress_percent": 60.0,
+                "subject_key": None,
+            },
+            {
+                "task_id": f"manual:{add_job.import_id}",
+                "kind": "add-job",
+                "label": "https://jobs.example/added",
+                "status": "running",
+                "message": "Preparing manual import...",
+                "progress_percent": 5.0,
+                "subject_key": None,
+            },
+            {
+                "task_id": f"manual:{reevaluation.import_id}",
+                "kind": "re-evaluate",
+                "label": "Backend Engineer at Acme",
+                "status": "running",
+                "message": "Preparing manual import...",
+                "progress_percent": 5.0,
+                "subject_key": "tracked",
+            },
+            {
+                "task_id": "ats:ats-1",
+                "kind": "ats-run",
+                "label": "ATS Run · 2 jobs",
+                "status": "running",
+                "message": "Checking selected jobs...",
+                "progress_percent": 25.0,
+                "subject_key": None,
+            },
+        ]
+    }
 
 
 def test_reimported_manual_job_preserves_existing_global_status(tmp_path: Path) -> None:
@@ -2751,3 +2998,632 @@ def test_reimported_manual_job_preserves_existing_global_status(tmp_path: Path) 
     saved = global_jobs.find("manual")
     assert saved is not None
     assert saved.user_status is UserStatus.APPLIED
+
+
+def test_manual_job_reevaluation_uses_attached_resume_and_updates_same_job(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    tracked = _job("tracked", external_id="original")
+    company_size = ReliableCompanySizeLookup().lookup(
+        tracked.company,
+        load_config(paths.config_toml),
+        NOW,
+    )
+    tracked.company_size = company_size
+    global_jobs.set_status(tracked, UserStatus.APPLIED, NOW)
+    resume_bytes = SAMPLE_RESUME.read_bytes()
+    resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "updated.docx",
+        resume_bytes,
+    )
+    saved = global_jobs.find("tracked")
+    assert saved is not None
+    global_jobs.set_salaries(
+        saved,
+        expected_salary=SalaryValue(amount="75000", period=SalaryPeriod.YEAR),
+        offer_salary=None,
+    )
+    global_jobs.add_note(saved, "Keep this note", NOW)
+    prepared_inputs: list[tuple[Path, SetupAnswers]] = []
+    import_inputs: list[tuple[str, str]] = []
+    prepare_resume = _prepare_uploaded_resume(paths)
+
+    def prepare_current_resume(
+        resume_path: Path,
+        answers: SetupAnswers,
+    ) -> SetupPreparation:
+        prepared_inputs.append((resume_path, answers))
+        return prepare_resume(resume_path, answers)
+
+    def reevaluate_job(
+        source_url: str,
+        _config: AppConfig,
+        profile: str,
+        imported_at: datetime,
+        **_callbacks: object,
+    ) -> JobRecord:
+        import_inputs.append((source_url, profile))
+        refreshed = _job("unrelated-key", external_id="unrelated-source")
+        refreshed.url = HttpUrl("https://acme.example/jobs/original")
+        refreshed.source_occurrences[0].url = refreshed.url
+        refreshed.source_occurrences[0].description = "Fresh page description."
+        refreshed.source_occurrences[0].content_hash = "sha256:fresh-page"
+        return refreshed.model_copy(
+            update={
+                "title": "Re-evaluated Backend Engineer",
+                "description": "Fresh page description.",
+                "content_hash": "sha256:fresh-page",
+                "score": 97,
+                "reason": "Updated resume is a stronger match.",
+                "first_seen": imported_at,
+                "last_seen": imported_at,
+            },
+            deep=True,
+        )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=reevaluate_job,
+        manual_resume_preparer=prepare_current_resume,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/re-evaluate",
+            headers=HEADERS,
+        )
+        assert response.status_code == 202
+        state = _wait_manual_import_completion(
+            client,
+            response.json()["import_id"],
+        )
+
+    assert state["status"] == "complete"
+    assert state["job_key"] == "tracked"
+    assert state["result_status"] == "applied"
+    assert state["resume_id"] == resume_id
+    assert len(prepared_inputs) == 1
+    assert prepared_inputs[0][0].read_bytes() == resume_bytes
+    assert prepared_inputs[0][1].candidate_name == "updated"
+    assert import_inputs == [
+        (
+            "https://acme.example/jobs/original",
+            "# Uploaded resume profile",
+        )
+    ]
+    assert len(global_jobs.load().jobs) == 1
+    reevaluated = global_jobs.find("tracked")
+    assert reevaluated is not None
+    assert reevaluated.title == "Re-evaluated Backend Engineer"
+    assert reevaluated.score == 97
+    assert reevaluated.reason == "Updated resume is a stronger match."
+    assert reevaluated.user_status is UserStatus.APPLIED
+    assert [entry.status for entry in reevaluated.user_status_history] == [
+        UserStatus.SAVED,
+        UserStatus.APPLIED,
+    ]
+    assert reevaluated.application_resume_id == resume_id
+    assert reevaluated.application_resume_filename == "updated.docx"
+    assert reevaluated.last_evaluated_resume_id == resume_id
+    assert reevaluated.reevaluation_notice is not None
+    assert reevaluated.reevaluation_notice.status == "succeeded"
+    assert reevaluated.expected_salary == SalaryValue(
+        amount="75000",
+        period=SalaryPeriod.YEAR,
+    )
+    assert [note.content for note in reevaluated.notes] == ["Keep this note"]
+    assert reevaluated.company_size == company_size
+    assert [
+        occurrence.source_job_key for occurrence in reevaluated.source_occurrences
+    ] == ["linkedin:acme/jobs:original"]
+    assert reevaluated.source_occurrences[0].description == "Fresh page description."
+    assert reevaluated.source_occurrences[0].content_hash == "sha256:fresh-page"
+
+
+def test_add_job_cannot_overwrite_a_concurrent_reevaluation_of_the_same_job(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    tracked = _job("tracked", external_id="original")
+    global_jobs.set_status(tracked, UserStatus.SAVED, NOW)
+    old_resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "old.pdf",
+        b"old resume",
+    )
+    add_extracted = Event()
+    release_add = Event()
+
+    def import_same_job(
+        _url: str,
+        config: AppConfig,
+        _profile: str,
+        imported_at: datetime,
+        on_job_extracted: Callable[[JobRecord], None] | None = None,
+        **_callbacks: object,
+    ) -> JobRecord:
+        refreshed = _job("tracked", external_id="original")
+        if on_job_extracted is not None:
+            on_job_extracted(refreshed)
+        if config.resume_sha256 != old_resume_id:
+            add_extracted.set()
+            if not release_add.wait(timeout=5):
+                raise AssertionError("test did not release Add job")
+            score = 72
+        else:
+            score = 97
+        return refreshed.model_copy(
+            update={
+                "score": score,
+                "reason": f"Evaluation score {score}",
+                "last_review_attempt_at": imported_at,
+                "last_successful_review_content_hash": refreshed.content_hash,
+                "last_successful_review_profile_hash": config.profile_sha256,
+            },
+            deep=True,
+        )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=import_same_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        add_response = _post_job_with_resume(client)
+        assert add_response.status_code == 202
+        assert add_extracted.wait(timeout=1)
+        reevaluation_response = client.post(
+            "/api/global-jobs/tracked/re-evaluate",
+            headers=HEADERS,
+        )
+        assert reevaluation_response.status_code == 202
+        reevaluation_state = _wait_manual_import_completion(
+            client,
+            reevaluation_response.json()["import_id"],
+        )
+        release_add.set()
+        add_state = _wait_manual_import_completion(
+            client,
+            add_response.json()["import_id"],
+        )
+
+    saved = global_jobs.find("tracked")
+    assert reevaluation_state["status"] == "complete"
+    assert add_state["status"] == "failed"
+    assert "changed while this task was running" in str(add_state["error"])
+    assert saved is not None
+    assert saved.score == 97
+    assert saved.application_resume_id == old_resume_id
+
+
+def test_manual_job_reevaluation_runs_while_scan_is_running(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="original"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "updated.docx",
+        SAMPLE_RESUME.read_bytes(),
+    )
+    calls: list[str] = []
+
+    def reevaluate_job(
+        source_url: str,
+        _config: AppConfig,
+        _profile: str,
+        imported_at: datetime,
+        **_callbacks: object,
+    ) -> JobRecord:
+        calls.append(source_url)
+        return _job("refreshed", external_id="original").model_copy(
+            update={"first_seen": imported_at, "last_seen": imported_at},
+            deep=True,
+        )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=reevaluate_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+    )
+
+    with FileRWLock(paths.scan_lock_file).exclusive(), TestClient(
+        app,
+        base_url=ORIGIN,
+    ) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/re-evaluate",
+            headers=HEADERS,
+        )
+        if response.status_code == 202:
+            state = _wait_manual_import_completion(
+                client,
+                response.json()["import_id"],
+            )
+
+    assert response.status_code == 202
+    assert state["status"] == "complete"
+    assert calls == ["https://acme.example/jobs/original"]
+
+
+def test_manual_job_reevaluation_requires_confirmation_for_unchanged_resume(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    tracked = _job("tracked", external_id="original")
+    global_jobs.set_status(tracked, UserStatus.SAVED, NOW)
+    resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "current.docx",
+        SAMPLE_RESUME.read_bytes(),
+    )
+    tracked = global_jobs.find("tracked")
+    assert tracked is not None
+    global_jobs.set_status(
+        tracked,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=resume_id,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    import_inputs: list[str] = []
+
+    def import_job(
+        source_url: str,
+        _config: AppConfig,
+        _profile: str,
+        _imported_at: datetime,
+        **_callbacks: object,
+    ) -> JobRecord:
+        import_inputs.append(source_url)
+        return _job("replacement", external_id="original")
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=import_job,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        unforced_response = client.post(
+            "/api/global-jobs/tracked/re-evaluate",
+            headers=HEADERS,
+        )
+        forced_response = client.post(
+            "/api/global-jobs/tracked/re-evaluate?force=1",
+            headers=HEADERS,
+        )
+        if forced_response.status_code == 202:
+            forced_state = _wait_manual_import_completion(
+                client,
+                forced_response.json()["import_id"],
+            )
+
+    assert unforced_response.status_code == 409
+    assert unforced_response.json()["detail"] == (
+        "The resume has not changed since the last evaluation."
+    )
+    assert unforced_response.headers["X-Job-Scan-Conflict"] == "resume-unchanged"
+    assert forced_response.status_code == 202
+    assert forced_state["status"] == "complete"
+    assert import_inputs == ["https://acme.example/jobs/original"]
+
+
+def test_failed_reevaluation_keeps_the_previous_result_and_resume_hash(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    tracked = _job("tracked", external_id="original")
+    tracked.score = 72
+    tracked.reason = "Previous evaluation"
+    global_jobs.set_status(tracked, UserStatus.SAVED, NOW)
+    previous_resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "previous.pdf",
+        b"PREVIOUS RESUME",
+    )
+    tracked = global_jobs.find("tracked")
+    assert tracked is not None
+    global_jobs.set_status(
+        tracked,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=previous_resume_id,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    current_resume_id = _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "current.docx",
+        SAMPLE_RESUME.read_bytes(),
+    )
+
+    def fail_import(
+        _source_url: str,
+        _config: AppConfig,
+        _profile: str,
+        imported_at: datetime,
+        **_callbacks: object,
+    ) -> JobRecord:
+        return _job("failed", external_id="original").model_copy(
+            update={
+                "first_seen": imported_at,
+                "last_seen": imported_at,
+                "machine_status": MachineStatus.PENDING,
+                "score": None,
+                "reason": "",
+                "last_error": "AI review failed",
+            },
+            deep=True,
+        )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=fail_import,
+        manual_resume_preparer=_prepare_uploaded_resume(paths),
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/re-evaluate",
+            headers=HEADERS,
+        )
+        state = _wait_manual_import_completion(
+            client,
+            response.json()["import_id"],
+        )
+
+    saved = global_jobs.find("tracked")
+    assert response.status_code == 202
+    assert state["status"] == "failed"
+    assert saved is not None
+    assert saved.application_resume_id == current_resume_id
+    assert saved.last_evaluated_resume_id == previous_resume_id
+    assert saved.score == 72
+    assert saved.reason == "Previous evaluation"
+    assert saved.reevaluation_notice is not None
+    assert saved.reevaluation_notice.status == "failed"
+
+
+def test_acknowledge_reevaluation_result_clears_the_persisted_notice(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="original"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    global_jobs.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=NOW,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/re-evaluation-result/acknowledge",
+            headers=HEADERS,
+            json={"finished_at": NOW.isoformat()},
+        )
+
+    saved = GlobalJobStore(paths).find("tracked")
+    assert response.status_code == 204
+    assert saved is not None
+    assert saved.reevaluation_notice is None
+
+
+def test_acknowledge_reevaluation_result_rejects_a_stale_result(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="original"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    global_jobs.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=NOW,
+    )
+    newer_finished_at = NOW + timedelta(minutes=1)
+    global_jobs.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=newer_finished_at,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/re-evaluation-result/acknowledge",
+            headers=HEADERS,
+            json={"finished_at": NOW.isoformat()},
+        )
+
+    saved = GlobalJobStore(paths).find("tracked")
+    assert response.status_code == 409
+    assert response.headers["X-Job-Scan-Conflict"] == "re-evaluation-result-changed"
+    assert saved is not None
+    assert saved.reevaluation_notice is not None
+    assert saved.reevaluation_notice.status == "failed"
+    assert saved.reevaluation_notice.finished_at == newer_finished_at
+
+
+def test_manual_job_reevaluation_claims_workflow_before_preparing_profile(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _save_config(paths)
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="original"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    _attach_resume(
+        paths,
+        global_jobs,
+        "tracked",
+        "updated.docx",
+        SAMPLE_RESUME.read_bytes(),
+    )
+    preparation_started = Event()
+    release_preparation = Event()
+    prepare_resume = _prepare_uploaded_resume(paths)
+    prepare_calls: list[Path] = []
+
+    def prepare_current_resume(
+        resume_path: Path,
+        answers: SetupAnswers,
+    ) -> SetupPreparation:
+        prepare_calls.append(resume_path)
+        preparation_started.set()
+        if not release_preparation.wait(timeout=5):
+            raise AssertionError("test did not release profile preparation")
+        return prepare_resume(resume_path, answers)
+
+    def reevaluate_job(
+        _source_url: str,
+        _config: AppConfig,
+        _profile: str,
+        imported_at: datetime,
+        **_callbacks: object,
+    ) -> JobRecord:
+        return _job("refreshed", external_id="refreshed").model_copy(
+            update={"first_seen": imported_at, "last_seen": imported_at},
+            deep=True,
+        )
+
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+        manual_job_importer=reevaluate_job,
+        manual_resume_preparer=prepare_current_resume,
+        company_size_service=CompanySizeService(
+            CompanySizeStore(paths.cache_dir / "company-sizes.json"),
+            UnavailableCompanySizeLookup(),
+        ),
+    )
+    first_responses: list[Response] = []
+    first_errors: list[BaseException] = []
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+
+        def post_first() -> None:
+            try:
+                first_responses.append(
+                    client.post(
+                        "/api/global-jobs/tracked/re-evaluate",
+                        headers=HEADERS,
+                    )
+                )
+            except BaseException as error:  # noqa: BLE001 - surface request-thread failure
+                first_errors.append(error)
+
+        request_thread = Thread(target=post_first)
+        request_thread.start()
+        assert preparation_started.wait(timeout=1)
+        request_thread.join(timeout=1)
+        try:
+            assert not request_thread.is_alive()
+            assert first_errors == []
+            assert len(first_responses) == 1
+            assert first_responses[0].status_code == 202
+            second = client.post(
+                "/api/global-jobs/tracked/re-evaluate",
+                headers=HEADERS,
+            )
+            assert second.status_code == 409
+            assert len(prepare_calls) == 1
+        finally:
+            release_preparation.set()
+            request_thread.join(timeout=5)
+
+        if first_responses:
+            state = _wait_manual_import_completion(
+                client,
+                first_responses[0].json()["import_id"],
+            )
+            assert state["status"] == "complete"

@@ -31,6 +31,7 @@ from job_scan.web_workflow import (
     _progress_message,
     _progress_percent,
     read_resume_upload,
+    store_uploaded_resume,
 )
 
 RESUME = Path(__file__).parent / "fixtures" / "resume" / "sample.docx"
@@ -61,6 +62,30 @@ def test_resume_upload_reader_stops_at_the_size_limit() -> None:
         read_resume_upload(stream)
 
     assert stream.tell() == MAX_RESUME_BYTES + 1
+
+
+def test_resume_storage_reports_only_one_creator_when_target_appears_during_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    payload = b"same resume"
+    original_is_file = Path.is_file
+
+    def miss_the_existing_target(path: Path) -> bool:
+        if path.parent == paths.root / "resumes":
+            return False
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", miss_the_existing_target)
+
+    first_path, first_created = store_uploaded_resume(paths, "resume.pdf", payload)
+    second_path, second_created = store_uploaded_resume(paths, "resume.pdf", payload)
+
+    assert first_path == second_path
+    assert first_created is True
+    assert second_created is False
+    assert first_path.read_bytes() == payload
 
 
 class FakeClaude:
@@ -189,7 +214,7 @@ def test_successful_browser_run_is_archived_as_one_search_history(
     assert history.read_resume(entries[0].run_id)[1] == RESUME.read_bytes()
 
 
-def test_archive_failure_restores_setup_files_and_removes_new_resume(
+def test_archive_failure_restores_setup_files_and_retains_content_addressed_resume(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_root(tmp_path / "home")
@@ -212,7 +237,9 @@ def test_archive_failure_restores_setup_files_and_removes_new_resume(
 
     assert not paths.config_toml.exists()
     assert not paths.profile_md.exists()
-    assert list((paths.root / "resumes").glob("*")) == []
+    stored = list((paths.root / "resumes").glob("*"))
+    assert len(stored) == 1
+    assert stored[0].read_bytes() == RESUME.read_bytes()
 
 
 def test_load_setup_answers_returns_the_last_saved_editable_values(
@@ -263,13 +290,17 @@ def test_remove_schedule_clears_native_entry_and_saved_time(tmp_path: Path) -> N
     assert scheduler.calls == ["install", "remove"]
 
 
-def test_failed_setup_removes_new_uploaded_resume(tmp_path: Path) -> None:
+def test_failed_setup_retains_content_addressed_resume_for_parallel_reuse(
+    tmp_path: Path,
+) -> None:
     workflow, paths, _scheduler = workflow_at(tmp_path)
 
     with pytest.raises(ResumeError):
         workflow.run("candidate.docx", b"not a docx", answers(local_time=None))
 
-    assert not list((paths.root / "resumes").glob("*"))
+    stored = list((paths.root / "resumes").glob("*"))
+    assert len(stored) == 1
+    assert stored[0].read_bytes() == b"not a docx"
 
 
 def test_second_web_run_is_rejected_while_first_setup_is_active(

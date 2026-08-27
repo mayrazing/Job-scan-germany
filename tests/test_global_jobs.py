@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -18,7 +19,7 @@ from job_scan.domain import (
     UserStatus,
     UserStatusHistoryEntry,
 )
-from job_scan.global_jobs import GlobalJobStore, filter_untracked_jobs
+from job_scan.global_jobs import GlobalJobChanged, GlobalJobStore, filter_untracked_jobs
 from job_scan.paths import AppPaths
 from job_scan.repository import parse_snapshot, serialize_snapshot
 
@@ -1026,7 +1027,83 @@ def test_reimporting_unchanged_manual_job_does_not_write_a_new_revision(
     assert second.meta == first.meta
 
 
-def test_same_job_keeps_one_status_but_distinct_resume_matches(
+def test_manual_upsert_rejects_a_stale_evaluation_snapshot(
+    store: GlobalJobStore,
+) -> None:
+    resume_id = "sha256:" + "1" * 64
+    profile_hash = "sha256:" + "a" * 64
+    original = _job("manual", external_ids=("same",))
+    store.upsert_with_default_status(
+        original,
+        UserStatus.SAVED,
+        resume_id=resume_id,
+        profile_hash=profile_hash,
+    )
+    expected = store.find("manual")
+    assert expected is not None
+    newer = original.model_copy(
+        update={
+            "last_review_attempt_at": NOW + timedelta(minutes=1),
+            "score": 91,
+        },
+        deep=True,
+    )
+    store.upsert_with_default_status(
+        newer,
+        UserStatus.SAVED,
+        resume_id=resume_id,
+        profile_hash=profile_hash,
+    )
+
+    with pytest.raises(GlobalJobChanged, match="changed while this task was running"):
+        store.upsert_with_default_status(
+            original,
+            UserStatus.SAVED,
+            resume_id=resume_id,
+            profile_hash=profile_hash,
+            expected_job=expected,
+        )
+
+
+def test_reevaluation_rejects_a_stale_evaluation_snapshot(
+    store: GlobalJobStore,
+) -> None:
+    resume_id = "sha256:" + "1" * 64
+    original = _job("manual", external_ids=("same",))
+    store.set_status(
+        original,
+        UserStatus.SAVED,
+        resume_id=resume_id,
+        profile_hash="sha256:" + "a" * 64,
+        application_resume_filename="resume.pdf",
+    )
+    tracked = store.find("manual")
+    assert tracked is not None
+    expected = tracked.model_copy(deep=True)
+    assert expected is not None
+    newer = original.model_copy(
+        update={
+            "last_review_attempt_at": NOW + timedelta(minutes=1),
+            "score": 91,
+        },
+        deep=True,
+    )
+    store.save_reevaluation(
+        tracked.canonical_job_key,
+        newer,
+        resume_id=resume_id,
+    )
+
+    with pytest.raises(GlobalJobChanged, match="changed while this task was running"):
+        store.save_reevaluation(
+            tracked.canonical_job_key,
+            original,
+            resume_id=resume_id,
+            expected_job=expected,
+        )
+
+
+def test_same_job_keeps_only_the_latest_resume_evaluation(
     store: GlobalJobStore,
 ) -> None:
     resume_a = _job("from-a", external_ids=("shared",))
@@ -1036,7 +1113,7 @@ def test_same_job_keeps_one_status_but_distinct_resume_matches(
     resume_b = _job(
         "from-b",
         external_ids=("shared",),
-        last_seen=NOW + timedelta(minutes=1),
+        last_seen=NOW - timedelta(minutes=1),
     )
     resume_b.score = 63
     resume_b.reason = "Missing Kotlin experience"
@@ -1056,24 +1133,254 @@ def test_same_job_keeps_one_status_but_distinct_resume_matches(
         resume_id="sha256:" + "2" * 64,
         profile_hash="sha256:" + "b" * 64,
     )
-    tracked = store.find("from-b")
-    assert tracked is not None
+    tracked = store.load().jobs[0]
     store.set_application_resume(
         tracked,
         "sha256:" + "1" * 64,
         "resume-a.pdf",
     )
 
-    shown_for_a = store.load_for_resume("sha256:" + "1" * 64)
-    shown_for_b = store.load_for_resume("sha256:" + "2" * 64)
     shown_in_tracker = store.load_for_tracker()
 
     assert len(store.load().jobs) == 1
-    assert shown_for_a.jobs[0].user_status is UserStatus.APPLIED
-    assert shown_for_a.jobs[0].score == 91
-    assert shown_for_a.jobs[0].reason == "Strong Java match"
-    assert shown_for_b.jobs[0].user_status is UserStatus.APPLIED
-    assert shown_for_b.jobs[0].score == 63
-    assert shown_for_b.jobs[0].reason == "Missing Kotlin experience"
-    assert shown_in_tracker.jobs[0].score == 91
-    assert shown_in_tracker.jobs[0].reason == "Strong Java match"
+    assert shown_in_tracker.jobs[0].user_status is UserStatus.APPLIED
+    assert shown_in_tracker.jobs[0].last_evaluated_resume_id == (
+        "sha256:" + "2" * 64
+    )
+    assert shown_in_tracker.jobs[0].score == 63
+    assert shown_in_tracker.jobs[0].reason == "Missing Kotlin experience"
+
+
+def test_legacy_resume_history_keeps_the_result_currently_shown_in_tracker(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    resume_a = _job("from-a", external_ids=("shared",))
+    resume_a.score = 91
+    resume_a.reason = "Strong Java match"
+    resume_b = _job(
+        "from-b",
+        external_ids=("shared",),
+        last_seen=NOW + timedelta(minutes=1),
+    )
+    resume_b.score = 63
+    resume_b.reason = "Missing Kotlin experience"
+    resume_a_id = "sha256:" + "1" * 64
+    resume_b_id = "sha256:" + "2" * 64
+
+    store.set_status(
+        resume_a,
+        UserStatus.SAVED,
+        NOW,
+        resume_id=resume_a_id,
+        profile_hash="sha256:" + "a" * 64,
+    )
+    store.set_status(
+        resume_b,
+        UserStatus.APPLIED,
+        NOW + timedelta(minutes=2),
+        resume_id=resume_b_id,
+        profile_hash="sha256:" + "b" * 64,
+    )
+    tracked = store.find("from-b")
+    assert tracked is not None
+    store.set_application_resume(tracked, resume_a_id, "resume-a.pdf")
+
+    records = [
+        json.loads(line)
+        for line in paths.global_jobs_jsonl.read_text(encoding="utf-8").splitlines()
+    ]
+    records[1].pop("last_evaluated_resume_id")
+    records[1]["resume_matches"] = [
+        {
+            "resume_id": resume_a_id,
+            "profile_hash": "sha256:" + "a" * 64,
+            "machine_status": "pending",
+            "score": 91,
+            "reason": "Strong Java match",
+            "reviewed_at": NOW.isoformat(),
+        },
+        {
+            "resume_id": resume_b_id,
+            "profile_hash": "sha256:" + "b" * 64,
+            "machine_status": "pending",
+            "score": 63,
+            "reason": "Missing Kotlin experience",
+            "reviewed_at": (NOW + timedelta(minutes=1)).isoformat(),
+        },
+    ]
+    paths.global_jobs_jsonl.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    migrated = GlobalJobStore(paths).load()
+
+    assert migrated.jobs[0].last_evaluated_resume_id == resume_a_id
+    assert migrated.jobs[0].score == 91
+    assert migrated.jobs[0].reason == "Strong Java match"
+    persisted = paths.global_jobs_jsonl.read_text(encoding="utf-8")
+    assert '"resume_matches"' not in persisted
+
+
+def test_record_reevaluation_result_persists_terminal_notice(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    store.set_status(_job("tracked"), UserStatus.SAVED, NOW)
+    finished_at = NOW + timedelta(minutes=3)
+
+    recorded = store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=finished_at,
+    )
+    reloaded = GlobalJobStore(paths).find("tracked")
+
+    assert recorded.reevaluation_notice is not None
+    assert recorded.reevaluation_notice.status == "succeeded"
+    assert recorded.reevaluation_notice.finished_at == finished_at
+    assert reloaded is not None
+    assert reloaded.reevaluation_notice == recorded.reevaluation_notice
+
+
+def test_acknowledge_reevaluation_result_clears_persisted_notice(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    store.set_status(_job("tracked"), UserStatus.SAVED, NOW)
+    notice = store.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=NOW + timedelta(minutes=4),
+    ).reevaluation_notice
+    assert notice is not None
+
+    acknowledged = store.acknowledge_reevaluation_result(
+        "tracked",
+        notice.finished_at,
+    )
+    reloaded = GlobalJobStore(paths).find("tracked")
+
+    assert acknowledged.reevaluation_notice is None
+    assert reloaded is not None
+    assert reloaded.reevaluation_notice is None
+
+
+def test_acknowledging_stale_result_preserves_newer_result(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    store.set_status(_job("tracked"), UserStatus.SAVED, NOW)
+    older = store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=NOW + timedelta(minutes=4),
+    ).reevaluation_notice
+    assert older is not None
+    newer = store.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=NOW + timedelta(minutes=5),
+    ).reevaluation_notice
+    assert newer is not None
+
+    acknowledged = store.acknowledge_reevaluation_result(
+        "tracked",
+        older.finished_at,
+    )
+    reloaded = GlobalJobStore(paths).find("tracked")
+
+    assert acknowledged.reevaluation_notice == newer
+    assert reloaded is not None
+    assert reloaded.reevaluation_notice == newer
+
+
+def test_latest_reevaluation_result_overwrites_previous_result(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    store = GlobalJobStore(paths)
+    store.set_status(_job("tracked"), UserStatus.SAVED, NOW)
+    store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=NOW + timedelta(minutes=4),
+    )
+
+    updated = store.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=NOW + timedelta(minutes=5),
+    )
+
+    assert updated.reevaluation_notice is not None
+    assert updated.reevaluation_notice.status == "failed"
+    assert updated.reevaluation_notice.finished_at == NOW + timedelta(minutes=5)
+
+
+def test_import_preserves_unacknowledged_reevaluation_result(
+    store: GlobalJobStore,
+) -> None:
+    tracked = _job("tracked", external_ids=("shared",))
+    store.set_status(tracked, UserStatus.SAVED, NOW)
+    store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=NOW + timedelta(minutes=2),
+    )
+    refreshed = _job(
+        "refreshed",
+        external_ids=("shared",),
+        last_seen=NOW + timedelta(minutes=5),
+    )
+
+    store.import_snapshots([_snapshot(refreshed)])
+    saved = store.load().jobs[0]
+
+    assert saved.reevaluation_notice is not None
+    assert saved.reevaluation_notice.status == "succeeded"
+
+
+def test_import_does_not_restore_an_acknowledged_reevaluation_result(
+    store: GlobalJobStore,
+) -> None:
+    tracked = _job("tracked", external_ids=("shared",))
+    store.set_status(tracked, UserStatus.SAVED, NOW)
+    finished_at = NOW + timedelta(minutes=2)
+    store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=finished_at,
+    )
+    stale_snapshot = store.load().model_copy(deep=True)
+    store.acknowledge_reevaluation_result("tracked", finished_at)
+
+    store.import_snapshots([stale_snapshot])
+    saved = store.load().jobs[0]
+
+    assert saved.reevaluation_notice is None
+    assert saved.reevaluation_acknowledged_at == finished_at
+
+
+def test_newer_reevaluation_result_is_visible_after_previous_acknowledgement(
+    store: GlobalJobStore,
+) -> None:
+    store.set_status(_job("tracked"), UserStatus.SAVED, NOW)
+    acknowledged_at = NOW + timedelta(minutes=2)
+    store.record_reevaluation_result(
+        "tracked",
+        "succeeded",
+        finished_at=acknowledged_at,
+    )
+    store.acknowledge_reevaluation_result("tracked", acknowledged_at)
+
+    updated = store.record_reevaluation_result(
+        "tracked",
+        "failed",
+        finished_at=acknowledged_at + timedelta(minutes=1),
+    )
+
+    assert updated.reevaluation_notice is not None
+    assert updated.reevaluation_notice.status == "failed"
+    assert updated.reevaluation_notice.finished_at == acknowledged_at + timedelta(
+        minutes=1
+    )

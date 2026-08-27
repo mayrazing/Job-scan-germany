@@ -12,6 +12,7 @@ from job_scan.domain import (
     JobRecord,
     MachineStatus,
     PrimaryView,
+    ReevaluationNotice,
     SalaryValue,
     Snapshot,
     UserStatus,
@@ -108,6 +109,8 @@ class JobCard:
     user_status_history: tuple[JobStatusEvent, ...]
     application_resume_id: str | None
     application_resume_filename: str | None
+    resume_evaluation_outdated: bool
+    reevaluation_notice: ReevaluationNotice | None
     expected_salary: SalaryValue | None
     offer_salary: SalaryValue | None
     notes: tuple[JobNote, ...]
@@ -282,6 +285,15 @@ def _card(job: JobRecord) -> JobCard:
         ),
         application_resume_id=job.application_resume_id,
         application_resume_filename=job.application_resume_filename,
+        resume_evaluation_outdated=(
+            job.application_resume_id is not None
+            and job.application_resume_id != job.last_evaluated_resume_id
+        ),
+        reevaluation_notice=(
+            job.reevaluation_notice.model_copy(deep=True)
+            if job.reevaluation_notice is not None
+            else None
+        ),
         expected_salary=(
             job.expected_salary.model_copy(deep=True)
             if job.expected_salary is not None

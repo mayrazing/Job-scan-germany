@@ -154,6 +154,181 @@
   background: var(--paper);
 }
 
+.workflow-toolbar {
+  position: relative;
+  display: flex;
+  width: min(92rem, calc(100% - 2rem));
+  margin-inline: auto;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.workflow-toolbar .group-nav {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  margin-inline: 0;
+}
+
+.background-task-menu {
+  position: relative;
+  flex: 0 0 auto;
+  padding-block: 1rem;
+}
+
+.background-task-toggle {
+  display: inline-flex;
+  gap: 0.55rem;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.background-task-dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--paper);
+}
+
+.background-task-count {
+  display: inline-grid;
+  min-width: 1.6rem;
+  min-height: 1.6rem;
+  place-items: center;
+  padding-inline: 0.35rem;
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.background-task-menu.has-active-tasks .background-task-toggle {
+  border-color: var(--action);
+}
+
+.background-task-menu.has-active-tasks .background-task-dot {
+  border-color: var(--action);
+  background: var(--action);
+  box-shadow: 0 0 0 0 rgb(23 107 91 / 34%);
+  animation: background-task-pulse 1.35s ease-out infinite;
+}
+
+.background-task-panel {
+  position: absolute;
+  top: calc(100% - 0.5rem);
+  right: 0;
+  z-index: 30;
+  width: min(28rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - 10rem));
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--surface);
+  box-shadow: 0 0.8rem 2rem rgb(23 33 43 / 18%);
+}
+
+.background-task-panel-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.background-task-panel-header span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.background-task-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.background-task-item {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.background-task-item:last-child {
+  border-bottom: 0;
+}
+
+.background-task-item-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.background-task-kind {
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.background-task-status {
+  color: var(--action);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.background-task-label,
+.background-task-message {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.background-task-label {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.background-task-message {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.background-task-progress {
+  height: 0.35rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--paper);
+}
+
+.background-task-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--action);
+}
+
+.background-task-empty {
+  margin: 0;
+  padding: 1.25rem 1rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+@keyframes background-task-pulse {
+  70%,
+  100% {
+    box-shadow: 0 0 0 0.65rem rgb(23 107 91 / 0%);
+  }
+}
+
 .page-header {
   padding-block: 0.4rem;
 }
@@ -1230,6 +1405,10 @@ label > small {
   .progress-bar {
     transition: none;
   }
+
+  .background-task-menu.has-active-tasks .background-task-dot {
+    animation: none;
+  }
 }
 
 @media (max-width: 50rem) {
@@ -1248,6 +1427,18 @@ label > small {
   .console-header-actions {
     align-items: stretch;
     margin-top: 1rem;
+  }
+
+  .workflow-toolbar {
+    align-items: stretch;
+  }
+
+  .background-task-menu {
+    display: flex;
+  }
+
+  .background-task-toggle {
+    padding-inline: 0.7rem;
   }
 
   .review-ats-controls {

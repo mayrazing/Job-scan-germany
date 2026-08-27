@@ -23,14 +23,31 @@
         </div>
       </header>
 
-      <nav class="group-nav flow-nav" aria-label="Workflow">
-        <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
-        <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
-        <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
-        <a class="btn btn-outline-secondary" href="#job-tracker" data-nav-step="job-tracker">Job Tracker <span>4</span></a>
-        <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
-        <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
-      </nav>
+      <div class="workflow-toolbar">
+        <nav class="group-nav flow-nav" aria-label="Workflow">
+          <a class="btn btn-primary" href="#setup" data-nav-step="setup" aria-current="step">Setup <span>1</span></a>
+          <a class="btn btn-outline-secondary" href="#run" data-nav-step="run">Run <span>2</span></a>
+          <a class="btn btn-outline-secondary" href="#review" data-nav-step="review">Review <span>3</span></a>
+          <a class="btn btn-outline-secondary" href="#job-tracker" data-nav-step="job-tracker">Job Tracker <span>4</span></a>
+          <a class="btn btn-outline-secondary" href="#ats-run" data-nav-step="ats-run">ATS Run <span>5</span></a>
+          <a class="btn btn-outline-secondary" href="#ats-check" data-nav-step="ats">ATS Check <span>6</span></a>
+        </nav>
+        <div class="background-task-menu" data-background-task-menu>
+          <button class="btn btn-outline-secondary background-task-toggle" type="button" data-background-task-toggle aria-expanded="false" aria-controls="background-task-panel">
+            <span class="background-task-dot" aria-hidden="true"></span>
+            <span>Tasks</span>
+            <span class="background-task-count" data-background-task-count>0</span>
+          </button>
+          <section class="background-task-panel" id="background-task-panel" aria-label="Running tasks" hidden>
+            <header class="background-task-panel-header">
+              <strong>Running tasks</strong>
+              <span data-background-task-summary>No active tasks</span>
+            </header>
+            <ol class="background-task-list" data-background-task-list aria-live="polite"></ol>
+            <p class="background-task-empty" data-background-task-empty>No tasks are running.</p>
+          </section>
+        </div>
+      </div>
     </div>
 
     <div class="modal fade" id="ai-config-modal" tabindex="-1" aria-labelledby="ai-config-modal-title" aria-hidden="true">

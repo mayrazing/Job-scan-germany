@@ -24,7 +24,7 @@
       {% endif %}
     {% endfor %}
   {% endif %}
-  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}">
+  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
     <div class="job-preview-status" aria-label="Job status">
       <span><strong>User status</strong><small>{{ job.user_status.value | replace('_', ' ') }}</small></span>
       <span><strong>Machine</strong><small>{{ job.machine_status.value | replace('_', ' ') }}</small></span>
@@ -352,7 +352,15 @@
                 <input type="file" name="resume" accept=".pdf,.docx" required hidden data-job-resume-input>
                 <button class="btn btn-outline-secondary" type="button" data-job-resume-replace>Replace</button>
               </form>
+              {% if job.application_resume_id and job.application_resume_filename %}
+                <form data-job-action="re-evaluate" data-job-key="{{ job.canonical_key }}">
+                  <button class="btn btn-primary" type="submit" data-job-resume-reevaluate>Re-evaluate</button>
+                </form>
+              {% endif %}
             </div>
+            {% if job.application_resume_id and job.application_resume_filename %}
+              <p class="job-reevaluate-progress" data-job-reevaluate-progress role="status"{% if not job.resume_evaluation_outdated %} hidden{% endif %}>{% if job.resume_evaluation_outdated %}Current resume has not been evaluated. Re-evaluate to update this score.{% endif %}</p>
+            {% endif %}
           </section>
 
           <section class="job-action-group job-notes" data-job-notes>
@@ -464,6 +472,7 @@
         <i class="review-group-drag-handle" data-review-group-drag-handle aria-hidden="true">⠿</i>
         <strong class="review-group-label">{{ group.title }}</strong>
         <span data-review-group-count="{{ group.id }}">{{ group.count }}</span>
+        <span class="review-group-notice-count" data-review-group-notice-count="{{ group.id }}" hidden></span>
       </a>
     {% endfor %}
     <span class="review-group-announcement" aria-live="polite"></span>

@@ -749,6 +749,23 @@ def test_console_is_self_contained_for_local_server_use() -> None:
     assert not page.select("script[src]")
 
 
+def test_console_renders_collapsible_background_task_menu_in_workflow_bar() -> None:
+    page = BeautifulSoup(render_console(), "html.parser")
+
+    toolbar = page.select_one(".workflow-toolbar")
+    assert toolbar is not None
+    assert toolbar.select_one("nav.flow-nav") is not None
+    toggle = toolbar.select_one(
+        '[data-background-task-toggle][aria-controls="background-task-panel"]'
+    )
+    assert toggle is not None
+    assert toggle.get("aria-expanded") == "false"
+    panel = toolbar.select_one("#background-task-panel[hidden]")
+    assert panel is not None
+    assert panel.select_one("[data-background-task-list]") is not None
+    assert panel.select_one("[data-background-task-empty]") is not None
+
+
 def test_console_renders_real_ai_configuration_controls() -> None:
     page = BeautifulSoup(render_console(), "html.parser")
 

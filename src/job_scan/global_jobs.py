@@ -5,13 +5,14 @@ import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from job_scan.domain import (
     GlobalJobDeletion,
     JobNote,
     JobRecord,
-    ResumeMatch,
+    ReevaluationNotice,
     SalaryValue,
     Snapshot,
     SourceOccurrence,
@@ -34,6 +35,44 @@ GLOBAL_USER_STATUSES = frozenset(
         UserStatus.IGNORED,
     }
 )
+_EVALUATION_FIELDS = (
+    "machine_status",
+    "manual_override",
+    "manual_override_content_hash",
+    "manual_override_profile_hash",
+    "ai_review",
+    "score",
+    "reason",
+    "review_model",
+    "reviewed_at",
+    "last_review_attempt_content_hash",
+    "last_review_attempt_profile_hash",
+    "last_review_attempt_at",
+    "last_successful_review_content_hash",
+    "last_successful_review_profile_hash",
+    "exclusion_reasons",
+    "labels",
+    "last_error",
+)
+
+
+class GlobalJobChanged(RuntimeError):
+    """Report that an AI result is stale relative to the tracked job."""
+
+
+def _evaluation_state(job: JobRecord | None) -> tuple[object, ...] | None:
+    """Return only fields that identify the current source and AI evaluation."""
+    if job is None:
+        return None
+    return (
+        job.content_hash,
+        job.application_resume_id,
+        job.application_resume_filename,
+        job.last_evaluated_resume_id,
+        *(getattr(job, field) for field in _EVALUATION_FIELDS),
+    )
+
+
 class GlobalJobStore:
     """Persist user-selected job states across independent search snapshots."""
 
@@ -57,41 +96,9 @@ class GlobalJobStore:
             current, _migration_needed = self._read_unlocked()
         return _visible_snapshot(current)
 
-    def load_for_resume(self, resume_id: str) -> Snapshot:
-        """Load global jobs associated with one resume and show its match result."""
-        current = self.load()
-        jobs: list[JobRecord] = []
-        for job in current.jobs:
-            match = next(
-                (item for item in job.resume_matches if item.resume_id == resume_id),
-                None,
-            )
-            if match is None:
-                continue
-            shown = job.model_copy(deep=True)
-            _apply_resume_match(shown, match)
-            jobs.append(shown)
-        return Snapshot(meta=current.meta.model_copy(deep=True), jobs=jobs)
-
     def load_for_tracker(self) -> Snapshot:
-        """Load every global job with the review for its associated resume."""
-        current = self.load()
-        jobs: list[JobRecord] = []
-        for job in current.jobs:
-            shown = job.model_copy(deep=True)
-            if job.application_resume_id is not None:
-                match = next(
-                    (
-                        item
-                        for item in job.resume_matches
-                        if item.resume_id == job.application_resume_id
-                    ),
-                    None,
-                )
-                if match is not None:
-                    _apply_resume_match(shown, match)
-            jobs.append(shown)
-        return Snapshot(meta=current.meta.model_copy(deep=True), jobs=jobs)
+        """Load every global job with only its latest review result."""
+        return self.load()
 
     def mutate_details(self, mutator: Callable[[Snapshot], Snapshot]) -> Snapshot:
         """Update global job details without changing membership or user decisions."""
@@ -197,8 +204,11 @@ class GlobalJobStore:
             )
             candidate.global_status_deleted_at = None
             if resume_id is not None and profile_hash is not None:
-                _save_resume_match(candidate, resume_id, profile_hash)
+                candidate.last_evaluated_resume_id = resume_id
             merged, _changed = _merge_into(jobs, candidate)
+            if resume_id is not None and profile_hash is not None:
+                _replace_evaluation(merged, candidate)
+                merged.last_evaluated_resume_id = resume_id
             if application_resume_filename is not None:
                 merged.application_resume_id = resume_id
                 merged.application_resume_filename = application_resume_filename
@@ -232,6 +242,72 @@ class GlobalJobStore:
             for index in reversed(matches[1:]):
                 del jobs[index]
             return self._persist_unlocked(current, jobs).jobs[first].model_copy(
+                deep=True
+            )
+
+    def record_reevaluation_result(
+        self,
+        key: str,
+        result: Literal["succeeded", "failed"],
+        *,
+        finished_at: datetime | None = None,
+    ) -> JobRecord:
+        """Persist one terminal re-evaluation result until the user acknowledges it."""
+        notice = ReevaluationNotice(
+            status=result,
+            finished_at=finished_at if finished_at is not None else datetime.now(UTC),
+        )
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(jobs)
+                    if item.canonical_job_key == key
+                ),
+                None,
+            )
+            if index is None:
+                raise KeyError(key)
+            previous = jobs[index].model_copy(deep=True)
+            _set_reevaluation_notice(jobs[index], notice)
+            if jobs[index] == previous:
+                return previous
+            return self._persist_unlocked(current, jobs).jobs[index].model_copy(
+                deep=True
+            )
+
+    def acknowledge_reevaluation_result(
+        self,
+        key: str,
+        finished_at: datetime,
+    ) -> JobRecord:
+        """Clear only the re-evaluation result the user actually opened."""
+        acknowledged_at = _utc_timestamp(finished_at)
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(jobs)
+                    if item.canonical_job_key == key
+                ),
+                None,
+            )
+            if index is None:
+                raise KeyError(key)
+            notice = jobs[index].reevaluation_notice
+            if notice is None or notice.finished_at != acknowledged_at:
+                return jobs[index].model_copy(deep=True)
+            previous_acknowledgement = jobs[index].reevaluation_acknowledged_at
+            jobs[index].reevaluation_acknowledged_at = max(
+                acknowledged_at,
+                previous_acknowledgement or acknowledged_at,
+            )
+            jobs[index].reevaluation_notice = None
+            return self._persist_unlocked(current, jobs).jobs[index].model_copy(
                 deep=True
             )
 
@@ -480,6 +556,8 @@ class GlobalJobStore:
         *,
         resume_id: str | None = None,
         profile_hash: str | None = None,
+        application_resume_filename: str | None = None,
+        expected_job: JobRecord | None = None,
     ) -> JobRecord:
         """Insert with a default state, but preserve an existing user decision."""
         try:
@@ -503,8 +581,15 @@ class GlobalJobStore:
                 candidate.user_status_history = []
             candidate.global_status_deleted_at = None
             if resume_id is not None and profile_hash is not None:
-                _save_resume_match(candidate, resume_id, profile_hash)
+                candidate.last_evaluated_resume_id = resume_id
             existing_status = _newest_status_job(_matching_jobs(jobs, candidate))
+            if (
+                expected_job is not None
+                and _evaluation_state(existing_status) != _evaluation_state(expected_job)
+            ):
+                raise GlobalJobChanged(
+                    "This job changed while this task was running. Run it again."
+                )
             if existing_status is None:
                 candidate.user_status_history = []
                 candidate.user_status = selected_default
@@ -520,7 +605,16 @@ class GlobalJobStore:
                 candidate.application_resume_filename = (
                     existing_status.application_resume_filename
                 )
+            if application_resume_filename is not None:
+                candidate.application_resume_id = resume_id
+                candidate.application_resume_filename = application_resume_filename
             merged, _changed = _merge_into(jobs, candidate)
+            if resume_id is not None and profile_hash is not None:
+                _replace_evaluation(merged, candidate)
+                merged.last_evaluated_resume_id = resume_id
+            if application_resume_filename is not None:
+                merged.application_resume_id = resume_id
+                merged.application_resume_filename = application_resume_filename
             _record_status(
                 merged,
                 candidate.user_status,
@@ -530,6 +624,116 @@ class GlobalJobStore:
             if jobs != current.jobs or restored:
                 self._persist_unlocked(current, jobs, deletions=deletions)
             return merged.model_copy(deep=True)
+
+    def save_reevaluation(
+        self,
+        key: str,
+        evaluated: JobRecord,
+        *,
+        resume_id: str,
+        expected_job: JobRecord | None = None,
+    ) -> JobRecord:
+        """Replace one tracked job's AI result while preserving user-owned data."""
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(jobs)
+                    if item.canonical_job_key == key
+                ),
+                None,
+            )
+            if index is None:
+                raise KeyError(key)
+            existing = jobs[index]
+            if (
+                expected_job is not None
+                and _evaluation_state(existing) != _evaluation_state(expected_job)
+            ):
+                raise GlobalJobChanged(
+                    "This job changed while this task was running. Run it again."
+                )
+            candidate = evaluated.model_copy(
+                update={
+                    "canonical_job_key": existing.canonical_job_key,
+                    "primary_source_occurrence_key": (
+                        existing.primary_source_occurrence_key
+                    ),
+                },
+                deep=True,
+            )
+            existing_occurrences = [
+                occurrence.model_copy(deep=True)
+                for occurrence in existing.source_occurrences
+            ]
+            existing_primary_index = next(
+                (
+                    index
+                    for index, occurrence in enumerate(existing_occurrences)
+                    if occurrence.source_occurrence_key
+                    == existing.primary_source_occurrence_key
+                ),
+                None,
+            )
+            evaluated_primary = next(
+                (
+                    occurrence
+                    for occurrence in evaluated.source_occurrences
+                    if occurrence.source_occurrence_key
+                    == evaluated.primary_source_occurrence_key
+                ),
+                None,
+            )
+            if existing_primary_index is not None and evaluated_primary is not None:
+                existing_occurrences[existing_primary_index] = existing_occurrences[
+                    existing_primary_index
+                ].model_copy(
+                    update={
+                        "url": evaluated_primary.url,
+                        "company": evaluated_primary.company,
+                        "title": evaluated_primary.title,
+                        "location": evaluated_primary.location,
+                        "description": evaluated_primary.description,
+                        "posted_at": evaluated_primary.posted_at,
+                        "content_hash": evaluated_primary.content_hash,
+                        "availability_status": evaluated_primary.availability_status,
+                        "detail_complete": evaluated_primary.detail_complete,
+                        "last_fetch_error_code": evaluated_primary.last_fetch_error_code,
+                        "job_snapshot": evaluated_primary.job_snapshot,
+                        "job_snapshot_error_code": (
+                            evaluated_primary.job_snapshot_error_code
+                        ),
+                        "closed_at": evaluated_primary.closed_at,
+                    },
+                    deep=True,
+                )
+            candidate.source_occurrences = existing_occurrences
+            candidate.last_evaluated_resume_id = resume_id
+            merged = _merge_jobs((existing, candidate))
+            merged.source_occurrences = [
+                occurrence.model_copy(deep=True)
+                for occurrence in candidate.source_occurrences
+            ]
+            merged.primary_source_occurrence_key = (
+                existing.primary_source_occurrence_key
+            )
+            _replace_evaluation(merged, candidate)
+            merged.last_evaluated_resume_id = resume_id
+            _set_reevaluation_notice(
+                merged,
+                ReevaluationNotice(
+                    status="succeeded",
+                    finished_at=datetime.now(UTC),
+                ),
+            )
+            if existing.company_size is not None:
+                merged.company_size = existing.company_size.model_copy(deep=True)
+            jobs[index] = merged
+            return self._persist_unlocked(current, jobs).jobs[index].model_copy(
+                deep=True
+            )
 
     def delete(self, key: str, now: datetime | None = None) -> None:
         """Delete one tracked job while retaining only re-import identifiers."""
@@ -587,12 +791,13 @@ class GlobalJobStore:
     def _read_unlocked(self) -> tuple[Snapshot, bool]:
         if not self._paths.global_jobs_jsonl.exists():
             return Snapshot(meta=StoreMeta(data_revision=0)), False
-        loaded = parse_snapshot(self._paths.global_jobs_jsonl.read_bytes())
+        contents = self._paths.global_jobs_jsonl.read_bytes()
+        loaded = parse_snapshot(contents)
         deletions = [
             item.model_copy(deep=True) for item in loaded.meta.global_job_deletions
         ]
         jobs: list[JobRecord] = []
-        migration_needed = False
+        migration_needed = b'"resume_matches"' in contents
         for loaded_job in loaded.jobs:
             job = loaded_job.model_copy(deep=True)
             if job.global_status_deleted_at is not None:
@@ -813,6 +1018,38 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         if application_job is not None
         else None
     )
+    acknowledgement_times = [
+        job.reevaluation_acknowledged_at
+        for job in candidates
+        if job.reevaluation_acknowledged_at is not None
+    ]
+    profile.reevaluation_acknowledged_at = max(
+        acknowledgement_times,
+        default=None,
+    )
+    notice_job = max(
+        (
+            job
+            for job in candidates
+            if job.reevaluation_notice is not None
+            and (
+                profile.reevaluation_acknowledged_at is None
+                or job.reevaluation_notice.finished_at
+                > profile.reevaluation_acknowledged_at
+            )
+        ),
+        key=lambda job: (
+            job.reevaluation_notice.finished_at
+            if job.reevaluation_notice is not None
+            else datetime.min.replace(tzinfo=UTC)
+        ),
+        default=None,
+    )
+    profile.reevaluation_notice = (
+        notice_job.reevaluation_notice.model_copy(deep=True)
+        if notice_job is not None and notice_job.reevaluation_notice is not None
+        else None
+    )
     salary_job = max(
         (
             job
@@ -864,8 +1101,17 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
             getattr(fact_job, field_name) if fact_job is not None else None,
         )
     profile.source_occurrences = _merged_occurrences(candidates)
-    profile.resume_matches = _merged_resume_matches(candidates)
     return profile
+
+
+def _set_reevaluation_notice(job: JobRecord, notice: ReevaluationNotice) -> None:
+    acknowledged_at = job.reevaluation_acknowledged_at
+    if acknowledged_at is not None and notice.finished_at <= acknowledged_at:
+        return
+    current_notice = job.reevaluation_notice
+    if current_notice is not None and notice.finished_at < current_notice.finished_at:
+        return
+    job.reevaluation_notice = notice.model_copy(deep=True)
 
 
 def _newest_status_job(candidates: Sequence[JobRecord]) -> JobRecord | None:
@@ -923,60 +1169,11 @@ def _merged_occurrences(candidates: Sequence[JobRecord]) -> list[SourceOccurrenc
     return list(occurrences.values())
 
 
-def _save_resume_match(job: JobRecord, resume_id: str, profile_hash: str) -> None:
-    match = ResumeMatch(
-        resume_id=resume_id,
-        profile_hash=profile_hash,
-        machine_status=job.machine_status,
-        manual_override=job.manual_override,
-        manual_override_content_hash=job.manual_override_content_hash,
-        manual_override_profile_hash=job.manual_override_profile_hash,
-        ai_review=job.ai_review.model_copy(deep=True) if job.ai_review else None,
-        score=job.score,
-        reason=job.reason,
-        review_model=job.review_model,
-        reviewed_at=job.reviewed_at,
-        last_review_attempt_content_hash=job.last_review_attempt_content_hash,
-        last_review_attempt_profile_hash=job.last_review_attempt_profile_hash,
-        last_review_attempt_at=job.last_review_attempt_at,
-        last_successful_review_content_hash=job.last_successful_review_content_hash,
-        last_successful_review_profile_hash=job.last_successful_review_profile_hash,
-        exclusion_reasons=list(job.exclusion_reasons),
-        labels=list(job.labels),
-        last_error=job.last_error,
-    )
-    for index, existing in enumerate(job.resume_matches):
-        if existing.resume_id != resume_id:
-            continue
-        if existing == match:
-            return
-        updated = list(job.resume_matches)
-        updated[index] = match
-        job.resume_matches = updated
-        return
-    job.resume_matches = [*job.resume_matches, match]
-
-
-def _apply_resume_match(job: JobRecord, match: ResumeMatch) -> None:
-    for field_name in ResumeMatch.model_fields:
-        if field_name in {"resume_id", "profile_hash"}:
-            continue
-        value = getattr(match, field_name)
-        setattr(
-            job,
-            field_name,
-            value.model_copy(deep=True) if hasattr(value, "model_copy") else value,
-        )
-    job.exclusion_reasons = list(match.exclusion_reasons)
-    job.labels = list(match.labels)
-
-
-def _merged_resume_matches(candidates: Sequence[JobRecord]) -> list[ResumeMatch]:
-    matches: dict[str, ResumeMatch] = {}
-    for candidate in candidates:
-        for match in candidate.resume_matches:
-            matches[match.resume_id] = match.model_copy(deep=True)
-    return list(matches.values())
+def _replace_evaluation(target: JobRecord, source: JobRecord) -> None:
+    """Copy one review result and its status fields as an atomic bundle."""
+    source_copy = source.model_copy(deep=True)
+    for field_name in _EVALUATION_FIELDS:
+        setattr(target, field_name, getattr(source_copy, field_name))
 
 
 def _visible_snapshot(snapshot: Snapshot) -> Snapshot:
