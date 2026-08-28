@@ -655,17 +655,6 @@
                     </label>
                   </div>
                 </div>
-                <div class="job-batch-toolbar" data-job-batch-toolbar role="toolbar" aria-label="Selected Job Tracker jobs" hidden>
-                  <div>
-                    <strong data-batch-selected-count>0 selected</strong>
-                    <span>Click a card to add or remove it.</span>
-                  </div>
-                  <div class="job-batch-actions">
-                    <button class="btn btn-primary" type="button" data-batch-move>Move</button>
-                    <button class="btn btn-outline-danger" type="button" data-batch-delete>Delete</button>
-                    <button class="btn btn-outline-secondary" type="button" data-exit-batch>Exit</button>
-                  </div>
-                </div>
                 <div class="review-workspace" data-review-workspace data-review-order-key="job-scan.global-review-group-order.v1">
                   {{ navigation(global_dashboard, 'Job Tracker groups') }}
                   <div class="review-groups">{{ groups(global_dashboard, true, true, 'global', tracker_groups) }}</div>
@@ -705,6 +694,18 @@
                     <div class="manual-job-actions">
                       <button class="btn btn-outline-secondary" type="button" data-cancel-batch-delete>Cancel</button>
                       <button class="btn btn-outline-danger" type="button" data-confirm-batch-delete disabled>Delete jobs</button>
+                    </div>
+                  </form>
+                </dialog>
+                <dialog class="manual-job-dialog job-batch-dialog" data-ats-skip-dialog aria-labelledby="ats-skip-dialog-title">
+                  <form method="dialog">
+                    <header>
+                      <h4 id="ats-skip-dialog-title">Some selected jobs cannot enter ATS</h4>
+                      <p data-ats-skip-message></p>
+                    </header>
+                    <div class="manual-job-actions">
+                      <button class="btn btn-outline-secondary" type="submit" value="cancel" data-cancel-ats-skip>Cancel</button>
+                      <button class="btn btn-primary" type="button" data-confirm-ats-skip>Continue</button>
                     </div>
                   </form>
                 </dialog>
@@ -768,7 +769,17 @@
             <div class="review-ats-controls">
               <button id="new-run-button" class="btn btn-outline-secondary secondary-button" type="button">Start another run</button>
               <a class="btn btn-primary primary-button" href="#job-tracker" data-back-to-job-tracker data-review-only>Job Tracker</a>
-              <button class="btn btn-primary primary-button" type="button" data-open-ats data-job-tracker-only disabled>Check 0 selected jobs</button>
+              <div class="job-tracker-batch-controls" data-job-tracker-only>
+                <div class="job-batch-toolbar" data-job-batch-toolbar role="toolbar" aria-label="Selected Job Tracker jobs" hidden>
+                  <strong data-batch-selected-count>0 selected</strong>
+                  <div class="job-batch-actions">
+                    <button class="btn btn-primary" type="button" data-batch-move>Move</button>
+                    <button class="btn btn-outline-danger" type="button" data-batch-delete>Delete</button>
+                    <button class="btn btn-outline-secondary" type="button" data-exit-batch>Exit</button>
+                  </div>
+                </div>
+                <button class="btn btn-primary primary-button" type="button" data-open-ats disabled>Check 0 selected jobs</button>
+              </div>
             </div>
           </footer>
 

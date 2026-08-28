@@ -29,12 +29,7 @@
       {% endif %}
     {% endfor %}
   {% endif %}
-  <article class="job-card" data-applied-at="{{ applied_event.entry.changed_at.isoformat() if applied_event.entry else '' }}" data-availability="{{ job.availability_status.value }}" data-added-at="{{ saved_event.entry.changed_at.isoformat() if saved_event.entry else '' }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
-    {% if status_scope == 'global' %}
-      <button class="job-batch-toggle" type="button" data-job-batch-toggle aria-label="Select {{ job.title }} at {{ job.company }}" aria-pressed="false" hidden>
-        <span aria-hidden="true">✓</span>
-      </button>
-    {% endif %}
+  <article class="job-card" data-applied-at="{{ applied_event.entry.changed_at.isoformat() if applied_event.entry else '' }}" data-availability="{{ job.availability_status.value }}" data-added-at="{{ saved_event.entry.changed_at.isoformat() if saved_event.entry else '' }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-ats-resume-available="{{ 'true' if job.application_resume_id and job.application_resume_filename else 'false' }}" data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
     <div class="job-preview-status" aria-label="Job status">
       <span><strong>User status</strong><small data-tracker-status-name="{{ job.user_status_id }}">{{ job.user_status_name }}</small></span>
       <span><strong>Machine</strong><small>{{ job.machine_status.value | replace('_', ' ') }}</small></span>
@@ -96,18 +91,8 @@
         </form>
       {% endif %}
       <footer class="job-preview-footer">
-        {% if ats_selectable %}
-          <label class="form-check ats-job-selector">
-            <input
-              class="form-check-input"
-              type="checkbox"
-              value="{{ job.canonical_key }}"
-              data-ats-select-job
-              aria-label="Select {{ job.title }} at {{ job.company }} for ATS Check"
-              {% if not job.application_resume_filename %}disabled{% endif %}
-            >
-            <span class="form-check-label">{{ 'ATS Check' if job.application_resume_filename else 'No resume' }}</span>
-          </label>
+        {% if ats_selectable and not (job.application_resume_id and job.application_resume_filename) %}
+          <span class="ats-resume-missing" data-ats-resume-missing>No resume</span>
         {% else %}
           <span aria-hidden="true"></span>
         {% endif %}

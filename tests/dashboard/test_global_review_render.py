@@ -347,11 +347,13 @@ def test_console_places_ats_start_after_job_tracker_navigation() -> None:
     controls = footer.select_one(".review-ats-controls")
     assert controls is not None
     assert footer.select_one("#ats-ai-choice") is None
-    assert [child.name for child in controls.find_all(recursive=False)] == [
-        "button",
-        "a",
-        "button",
-    ]
+    children = controls.find_all(recursive=False)
+    assert [child.name for child in children] == ["button", "a", "div"]
+    batch_controls = children[2]
+    assert "job-tracker-batch-controls" in batch_controls.get("class", [])
+    assert batch_controls.select_one(
+        "[data-job-batch-toolbar] + [data-open-ats]"
+    ) is not None
 
 
 def test_console_job_tracker_has_manual_job_url_dialog() -> None:

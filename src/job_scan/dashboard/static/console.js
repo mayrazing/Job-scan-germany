@@ -17,9 +17,10 @@
   const jobTrackerOnlyControls = [
     ...document.querySelectorAll("[data-job-tracker-only]"),
   ];
-  const atsJobSelectors = () => [
-    ...document.querySelectorAll("[data-ats-select-job]"),
-  ];
+  const atsSkipDialog = document.querySelector("[data-ats-skip-dialog]");
+  const atsSkipMessage = atsSkipDialog.querySelector("[data-ats-skip-message]");
+  const atsSkipConfirm = atsSkipDialog.querySelector("[data-confirm-ats-skip]");
+  const atsSkipCancel = atsSkipDialog.querySelector("[data-cancel-ats-skip]");
   const atsRunBadge = document.querySelector("#ats-run-badge");
   const atsRunProgress = document.querySelector("#ats-run-progress");
   const atsRunProgressBar = document.querySelector("#ats-run-progress-bar");
@@ -1226,14 +1227,18 @@
     });
   };
 
-  const selectedAtsJobKeys = () => [...new Set(
-    atsJobSelectors()
-      .filter((control) => control.checked)
-      .map((control) => control.value),
-  )];
+  const selectedAtsJobCards = () => [
+    ...document.querySelectorAll(
+      '[data-review-block="global"] article.job-card.is-batch-selected[data-job-key]',
+    ),
+  ];
+
+  const selectedAtsJobKeys = (cards = selectedAtsJobCards()) => cards
+    .filter((card) => card.dataset.atsResumeAvailable === "true")
+    .map((card) => card.dataset.jobKey);
 
   const syncAtsSelection = () => {
-    const count = selectedAtsJobKeys().length;
+    const count = selectedAtsJobCards().length;
     atsStartButton.textContent = `Check ${count} selected jobs`;
     atsStartButton.removeAttribute("aria-disabled");
     atsStartButton.disabled = atsStartInFlight
@@ -1241,10 +1246,28 @@
       || backgroundAtsRunActive
       || activeAtsRunId !== null
       || count === 0;
-    atsJobSelectors().forEach((control) => {
-      control.closest(".job-card").classList.toggle("is-ats-selected", control.checked);
+  };
+
+  const confirmSkippingJobsWithoutResumes = (selectedCount, eligibleCount) => {
+    const missingCount = selectedCount - eligibleCount;
+    const selectedLabel = missingCount === 1 ? "job has" : "jobs have";
+    atsSkipMessage.textContent = eligibleCount === 0
+      ? `${missingCount} selected ${selectedLabel} no resume. No selected jobs can enter ATS.`
+      : `${missingCount} selected ${selectedLabel} no resume and will be skipped. ${eligibleCount} ${eligibleCount === 1 ? "job" : "jobs"} will continue.`;
+    atsSkipConfirm.hidden = eligibleCount === 0;
+    atsSkipCancel.textContent = eligibleCount === 0 ? "Close" : "Cancel";
+    atsSkipDialog.showModal();
+    if (eligibleCount === 0) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const finish = () => {
+        atsSkipDialog.removeEventListener("close", finish);
+        resolve(atsSkipDialog.returnValue === "confirm");
+      };
+      atsSkipDialog.addEventListener("close", finish);
     });
   };
+
+  atsSkipConfirm.addEventListener("click", () => atsSkipDialog.close("confirm"));
 
   const renderAtsState = (state) => {
     const percent = Number.isFinite(state.progress_percent)
@@ -1382,8 +1405,16 @@
       || activeAtsRunId !== null
     ) return;
     const searchRunId = button.dataset.searchRunId;
-    const jobKeys = selectedAtsJobKeys();
-    if (jobKeys.length === 0) return;
+    const selectedCards = selectedAtsJobCards();
+    if (selectedCards.length === 0) return;
+    const jobKeys = selectedAtsJobKeys(selectedCards);
+    if (
+      jobKeys.length < selectedCards.length
+      && !await confirmSkippingJobsWithoutResumes(
+        selectedCards.length,
+        jobKeys.length,
+      )
+    ) return;
     atsCurrentRequestVersion += 1;
     atsStartInFlight = true;
     syncAtsSelection();
@@ -1402,6 +1433,7 @@
       }
       const state = await response.json();
       activeAtsRunId = state.run_id;
+      document.dispatchEvent(new CustomEvent("job-scan:ats-started"));
       setView("ats-run");
       window.history.replaceState(null, "", "#ats-run");
       renderAtsState(state);
@@ -1490,11 +1522,7 @@
 
   initializeSearchSelects();
   initializeTooltips();
-  [reviewView, jobTrackerView].forEach((view) => {
-    view.addEventListener("change", (event) => {
-      if (event.target.matches("[data-ats-select-job]")) syncAtsSelection();
-    });
-  });
+  document.addEventListener("job-scan:batch-selection-changed", syncAtsSelection);
   document.addEventListener("job-scan:review-updated", () => {
     initializeTooltips(reviewView);
     initializeTooltips(jobTrackerView);

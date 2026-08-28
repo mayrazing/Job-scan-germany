@@ -292,9 +292,7 @@ def test_console_renders_job_tracker_as_own_workflow_step_after_review() -> None
     assert not start.has_attr("data-search-run-id")
     assert start.get_text(" ", strip=True) == "Check 0 selected jobs"
     assert review_view.select("[data-ats-select-job]") == []
-    assert job_tracker_view.select_one(
-        '#saved [data-ats-select-job][value="saved"]'
-    )
+    assert job_tracker_view.select("[data-ats-select-job]") == []
     assert "Step 1 of 6" in page.select_one("#setup").get_text(" ", strip=True)
     assert "Step 3 of 6" in review_view.get_text(" ", strip=True)
     assert "Step 4 of 6" in job_tracker_view.get_text(" ", strip=True)
@@ -311,7 +309,7 @@ def test_console_uses_top_workflow_navigation_without_a_duplicate_step_rail() ->
     assert console_card.select_one(":scope > .console-body") is not None
 
 
-def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
+def test_console_uses_job_tracker_cards_without_separate_ats_selectors() -> None:
     snapshot = review_snapshot(
         review_job("recommended", MachineStatus.ELIGIBLE),
         review_job("pending", MachineStatus.PENDING),
@@ -337,16 +335,11 @@ def test_console_places_ats_selectors_only_in_job_tracker_cards() -> None:
     assert len(page.select(".review-groups > section.job-group")) == 10
     assert page.select(".review-groups > .job-group > summary") == []
     assert current_block.select("[data-ats-select-job]") == []
-    assert global_block.select_one(
-        '#saved [data-job-key="saved"] [data-ats-select-job][value="saved"]'
-    )
-    assert global_block.select_one(
-        '#applied [data-job-key="applied"] [data-ats-select-job][value="applied"]'
-    )
+    assert global_block.select("[data-ats-select-job]") == []
     assert global_block.select_one("#saved .card-body > .ats-job-selector") is None
 
 
-def test_job_without_a_saved_resume_cannot_be_selected_for_ats() -> None:
+def test_job_without_a_saved_resume_keeps_no_resume_text_without_checkbox() -> None:
     tracked = review_job("saved").model_copy(
         update={"user_status": UserStatus.SAVED}
     )
@@ -355,12 +348,12 @@ def test_job_without_a_saved_resume_cannot_be_selected_for_ats() -> None:
         "html.parser",
     )
 
-    selector = page.select_one(
-        '[data-job-key="saved"] [data-ats-select-job][value="saved"]'
-    )
-    assert selector is not None
-    assert selector.has_attr("disabled")
-    assert selector.parent.get_text(" ", strip=True) == "No resume"
+    card = page.select_one('[data-job-key="saved"]')
+    assert card is not None
+    assert card.select_one("[data-ats-select-job]") is None
+    assert card.select_one("[data-ats-resume-missing]").get_text(
+        " ", strip=True
+    ) == "No resume"
 
 
 def test_job_tracker_shows_each_resume_with_download_and_replace() -> None:

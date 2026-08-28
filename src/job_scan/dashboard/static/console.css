@@ -1059,28 +1059,15 @@ label > small {
   color: #FFFFFF;
 }
 
+.job-tracker-batch-controls,
 .job-batch-toolbar {
   display: flex;
-  justify-content: space-between;
-  gap: 1rem;
   align-items: center;
-  margin-bottom: 1rem;
-  padding: 0.8rem 1rem;
-  border: 1px solid var(--action);
-  border-left: 4px solid var(--action);
-  border-radius: 0.45rem;
-  background: #F9FBFA;
+  gap: 0.75rem;
 }
 
-.job-batch-toolbar > div:first-child {
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
-}
-
-.job-batch-toolbar span {
-  color: var(--muted);
-  font-size: 0.78rem;
+.job-tracker-batch-controls {
+  margin-left: auto;
 }
 
 .job-batch-actions {
@@ -1120,8 +1107,10 @@ label > small {
     flex: 1 1 0;
   }
 
+  .job-tracker-batch-controls,
   .job-batch-toolbar,
   .job-batch-actions {
+    width: 100%;
     align-items: stretch;
     flex-direction: column;
   }
@@ -1174,16 +1163,6 @@ label > small {
   scrollbar-gutter: stable;
 }
 
-.ats-job-selector {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  margin: 0 0 0.65rem;
-  padding: 0;
-  color: var(--ink);
-  font-weight: 700;
-}
-
 .review-ats-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1195,20 +1174,6 @@ label > small {
 
 .review-ats-controls > .btn {
   margin-top: 0;
-}
-
-.ats-job-selector .form-check-input {
-  float: none;
-  margin: 0;
-}
-
-.ats-job-selector .form-check-input:not(:checked):not(:indeterminate) {
-  border-color: var(--muted);
-}
-
-.job-card.is-ats-selected {
-  outline: 2px solid var(--action);
-  outline-offset: -2px;
 }
 
 .ats-running-card {

@@ -671,6 +671,33 @@
       requestedReviewGroupId(availableIds, navigation),
     );
 
+    container.addEventListener("wheel", (event) => {
+      if (event.ctrlKey || event.deltaY === 0) return;
+      const atTop = container.scrollTop <= 0;
+      const atBottom = (
+        container.scrollTop + container.clientHeight >= container.scrollHeight - 1
+      );
+      const scrollingUpPastTop = event.deltaY < 0 && atTop;
+      const scrollingDownPastBottom = event.deltaY > 0 && atBottom;
+      if (!scrollingUpPastTop && !scrollingDownPastBottom) return;
+
+      const page = document.scrollingElement || document.documentElement;
+      const pageScrollTop = window.scrollY;
+      const maxPageScrollTop = Math.max(0, page.scrollHeight - window.innerHeight);
+      const pageCanScroll = scrollingUpPastTop
+        ? pageScrollTop > 0
+        : pageScrollTop < maxPageScrollTop;
+      if (!pageCanScroll) return;
+
+      const pageDelta = event.deltaMode === 1
+        ? event.deltaY * 16
+        : event.deltaMode === 2
+          ? event.deltaY * window.innerHeight
+          : event.deltaY;
+      event.preventDefault();
+      window.scrollBy({ top: pageDelta, behavior: "auto" });
+    }, { passive: false });
+
     let draggedTab = null;
     let draggedJobCard = null;
     const jobDragPreviewScale = 0.6;
@@ -1024,7 +1051,7 @@
     syncReviewGroupEmptyState(liveGroup);
   };
 
-  const refreshOpenJobCard = (liveCard, refreshedCard, selectedForAts) => {
+  const refreshOpenJobCard = (liveCard, refreshedCard) => {
     const liveDialog = liveCard.querySelector(
       ":scope > [data-job-detail-dialog]",
     );
@@ -1054,8 +1081,6 @@
         (node) => document.importNode(node, true),
       ),
     );
-    const atsCheckbox = liveCard.querySelector("[data-ats-select-job]");
-    if (atsCheckbox) atsCheckbox.checked = selectedForAts;
     return true;
   };
 
@@ -1064,13 +1089,6 @@
     jobKey,
     { preserveOpenDetail = false } = {},
   ) => {
-    const selectedForAts = [
-      ...document.querySelectorAll("article.job-card[data-job-key]"),
-    ].some(
-      (card) =>
-        card.dataset.jobKey === jobKey
-        && card.querySelector("[data-ats-select-job]")?.checked,
-    );
     document.querySelectorAll("[data-review-block]").forEach((liveBlock) => {
       const blockName = liveBlock.dataset.reviewBlock;
       const refreshedBlock = [
@@ -1088,13 +1106,11 @@
       if (
         preserveOpenDetail
         && liveCard
-        && refreshOpenJobCard(liveCard, refreshedCard, selectedForAts)
+        && refreshOpenJobCard(liveCard, refreshedCard)
       ) {
         return;
       }
       const replacement = document.importNode(refreshedCard, true);
-      const replacementAts = replacement.querySelector("[data-ats-select-job]");
-      if (replacementAts) replacementAts.checked = selectedForAts;
       liveCard?.remove();
       insertRefreshedCard(liveBlock, refreshedCard, replacement);
       if (previousGroup) syncReviewGroupEmptyState(previousGroup);
@@ -1177,11 +1193,6 @@
       throw new Error("Could not refresh Job Tracker.");
     }
 
-    const selectedForAts = new Set(
-      [...liveBlock.querySelectorAll("[data-ats-select-job]:checked")]
-        .map((checkbox) => checkbox.closest("[data-job-key]")?.dataset.jobKey)
-        .filter(Boolean),
-    );
     const refreshedPanels = new Map(
       reviewGroupPanels(refreshedGroups).map((panel) => [panel.id, panel]),
     );
@@ -1194,10 +1205,6 @@
       }
       const replacement = document.importNode(refreshedPanel, true);
       replacement.hidden = livePanel.hidden;
-      replacement.querySelectorAll("[data-ats-select-job]").forEach((checkbox) => {
-        const jobKey = checkbox.closest("[data-job-key]")?.dataset.jobKey;
-        checkbox.checked = selectedForAts.has(jobKey);
-      });
       livePanel.replaceWith(replacement);
       refreshedPanels.delete(livePanel.id);
     });
@@ -1222,7 +1229,7 @@
 
   const initializeJobBatchMode = () => {
     const reviewBlock = document.querySelector('[data-review-block="global"]');
-    const toolbar = reviewBlock?.querySelector("[data-job-batch-toolbar]");
+    const toolbar = document.querySelector("[data-job-batch-toolbar]");
     const selectedCount = toolbar?.querySelector("[data-batch-selected-count]");
     const moveDialog = reviewBlock?.querySelector("[data-job-batch-move-dialog]");
     const moveMessage = moveDialog?.querySelector("[data-batch-move-message]");
@@ -1292,18 +1299,30 @@
       selectedCount.textContent = `${selectedKeys.size} selected`;
       cards().forEach((card) => {
         const selected = selectedKeys.has(card.dataset.jobKey);
-        const toggle = card.querySelector("[data-job-batch-toggle]");
         card.classList.toggle("is-batch-selected", selected);
         if (active) {
-          card.setAttribute("aria-selected", String(selected));
+          const originalLabel = card.dataset.jobBatchOriginalLabel
+            ?? card.getAttribute("aria-label")
+            ?? "";
+          const selectionAction = selected
+            ? "remove it from the selection"
+            : "add it to the selection";
+          card.dataset.jobBatchOriginalLabel = originalLabel;
+          card.setAttribute(
+            "aria-label",
+            `${selected ? "Selected" : "Not selected"}. ${originalLabel}. Press Enter or Space to ${selectionAction}.`,
+          );
+          card.removeAttribute("aria-haspopup");
         } else {
-          card.removeAttribute("aria-selected");
-        }
-        if (toggle) {
-          toggle.hidden = !active;
-          toggle.setAttribute("aria-pressed", String(selected));
+          const originalLabel = card.dataset.jobBatchOriginalLabel;
+          if (originalLabel !== undefined) {
+            card.setAttribute("aria-label", originalLabel);
+            delete card.dataset.jobBatchOriginalLabel;
+          }
+          card.setAttribute("aria-haspopup", "dialog");
         }
       });
+      document.dispatchEvent(new CustomEvent("job-scan:batch-selection-changed"));
     };
     const closeDialog = (dialog) => {
       if (dialog.open) dialog.close("cancel");
@@ -1565,6 +1584,7 @@
       if (selectedKeys.size === 0) sourceGroupId = null;
       render();
     });
+    document.addEventListener("job-scan:ats-started", exit);
 
     return {
       exit,

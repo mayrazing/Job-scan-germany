@@ -396,6 +396,12 @@ GLOBAL_BATCH_SNAPSHOT = Snapshot(
         ).model_copy(
             update={
                 "user_status": UserStatus.SAVED,
+                "application_resume_id": (
+                    ATS_RESUME_ID if suffix != "three" else None
+                ),
+                "application_resume_filename": (
+                    "Ada CV.pdf" if suffix != "three" else None
+                ),
                 "user_status_history": [
                     UserStatusHistoryEntry(
                         status=UserStatus.SAVED,
@@ -1382,7 +1388,9 @@ def test_job_tracker_tab_shows_global_jobs_outside_review(setup_page: object) ->
     assert job_tracker.is_visible()
 
 
-def test_ats_selection_is_available_only_in_job_tracker(setup_page: object) -> None:
+def test_ats_batch_selection_is_available_only_in_job_tracker(
+    setup_page: object,
+) -> None:
     setup_page.goto("http://draft.test/setup?global-status=1#review")
     setup_page.wait_for_load_state("networkidle")
 
@@ -1402,11 +1410,19 @@ def test_ats_selection_is_available_only_in_job_tracker(setup_page: object) -> N
 
     assert setup_page.locator(
         '[data-review-block="global"] [data-ats-select-job]'
-    ).count() == 1
+    ).count() == 0
     assert setup_page.locator("#new-run-button").is_visible()
     assert job_tracker_button.is_hidden()
     assert setup_page.locator("#ats-resume").count() == 0
     assert setup_page.locator("[data-open-ats]").is_visible()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-saved"]'
+    )
+    _long_press_job_card(setup_page, card)
+    assert setup_page.locator("[data-open-ats]").is_enabled()
+    assert setup_page.locator("[data-open-ats]").inner_text() == (
+        "Check 1 selected jobs"
+    )
 
 
 def test_idle_ats_run_points_back_to_job_tracker(setup_page: object) -> None:
@@ -2263,7 +2279,7 @@ def test_job_tracker_detail_status_change_updates_review_without_page_navigation
         '[data-review-group-count="interviewing"]'
     ).text_content() == "1"
     global_review.locator('[data-review-group-tab="interviewing"]').click()
-    interviewing_card.locator("[data-ats-select-job]").check()
+    _long_press_job_card(setup_page, interviewing_card)
     assert setup_page.locator("[data-open-ats]").text_content() == (
         "Check 1 selected jobs"
     )
@@ -2696,6 +2712,19 @@ def _long_press_job_card(page: object, card: object) -> None:
     card.dispatch_event("pointerup", pointer)
 
 
+def _select_job_cards(page: object, *job_keys: str) -> list[object]:
+    cards = [
+        page.locator(
+            f'[data-review-block="global"] article[data-job-key="{job_key}"]'
+        )
+        for job_key in job_keys
+    ]
+    _long_press_job_card(page, cards[0])
+    for card in cards[1:]:
+        card.click()
+    return cards
+
+
 def test_job_tracker_long_press_enters_batch_mode_and_card_clicks_toggle(
     setup_page: object,
 ) -> None:
@@ -2709,13 +2738,42 @@ def test_job_tracker_long_press_enters_batch_mode_and_card_clicks_toggle(
     )
     assert first.count() == 1
     assert second.count() == 1
+    first_default_label = first.get_attribute("aria-label")
+    second_default_label = second.get_attribute("aria-label")
+    assert first_default_label is not None
+    assert second_default_label is not None
 
     _long_press_job_card(setup_page, first)
 
     toolbar = setup_page.locator("[data-job-batch-toolbar]")
     assert toolbar.is_visible()
+    assert setup_page.locator(
+        "#review-actions [data-job-batch-toolbar] + [data-open-ats]"
+    ).count() == 1
+    assert first.locator("[data-job-batch-toggle]").count() == 0
     assert toolbar.locator("[data-batch-selected-count]").inner_text() == "1 selected"
-    assert first.get_attribute("aria-selected") == "true"
+    toolbar_box = toolbar.bounding_box()
+    ats_button_box = setup_page.locator("[data-open-ats]").bounding_box()
+    assert toolbar_box is not None
+    assert ats_button_box is not None
+    assert toolbar_box["x"] + toolbar_box["width"] < ats_button_box["x"]
+    assert toolbar_box["y"] + toolbar_box["height"] / 2 == pytest.approx(
+        ats_button_box["y"] + ats_button_box["height"] / 2,
+        abs=0.1,
+    )
+    assert first.get_attribute("aria-selected") is None
+    assert first.get_attribute("aria-haspopup") is None
+    assert first.get_attribute("aria-label") == (
+        f"Selected. {first_default_label}. "
+        "Press Enter or Space to remove it from the selection."
+    )
+    assert second.get_attribute("aria-label") == (
+        f"Not selected. {second_default_label}. "
+        "Press Enter or Space to add it to the selection."
+    )
+    first.hover()
+    setup_page.wait_for_timeout(180)
+    assert "inset" in first.evaluate("card => getComputedStyle(card).boxShadow")
     assert not first.locator("[data-job-detail-dialog]").is_visible()
 
     second.click()
@@ -2724,6 +2782,10 @@ def test_job_tracker_long_press_enters_batch_mode_and_card_clicks_toggle(
     assert toolbar.locator("[data-batch-selected-count]").inner_text() == "1 selected"
     second.click()
     assert not toolbar.is_visible()
+    assert first.get_attribute("aria-label") == first_default_label
+    assert second.get_attribute("aria-label") == second_default_label
+    assert first.get_attribute("aria-haspopup") == "dialog"
+    assert second.get_attribute("aria-haspopup") == "dialog"
 
 
 def test_job_tracker_pointer_movement_cancels_long_press_batch_mode(
@@ -2732,6 +2794,8 @@ def test_job_tracker_pointer_movement_cancels_long_press_batch_mode(
     setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
     card = setup_page.locator('article[data-job-key="batch-one"]')
+    default_label = card.get_attribute("aria-label")
+    assert default_label is not None
     pointer = {
         "pointerId": 92,
         "pointerType": "touch",
@@ -2748,6 +2812,25 @@ def test_job_tracker_pointer_movement_cancels_long_press_batch_mode(
 
     assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
     assert card.get_attribute("aria-selected") is None
+    assert card.get_attribute("aria-label") == default_label
+    assert card.get_attribute("aria-haspopup") == "dialog"
+
+
+def test_job_tracker_batch_controls_stack_on_narrow_screens(setup_page: object) -> None:
+    setup_page.set_viewport_size({"width": 600, "height": 900})
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="batch-one"]')
+
+    _long_press_job_card(setup_page, card)
+
+    toolbar_box = setup_page.locator("[data-job-batch-toolbar]").bounding_box()
+    ats_button_box = setup_page.locator("[data-open-ats]").bounding_box()
+    assert toolbar_box is not None
+    assert ats_button_box is not None
+    assert toolbar_box["y"] + toolbar_box["height"] <= ats_button_box["y"]
+    assert toolbar_box["x"] == pytest.approx(ats_button_box["x"], abs=0.1)
+    assert toolbar_box["width"] == pytest.approx(ats_button_box["width"], abs=0.1)
 
 
 def test_job_tracker_group_switch_exits_batch_mode(
@@ -2756,12 +2839,89 @@ def test_job_tracker_group_switch_exits_batch_mode(
     setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
     card = setup_page.locator('article[data-job-key="batch-one"]')
+    default_label = card.get_attribute("aria-label")
+    assert default_label is not None
     _long_press_job_card(setup_page, card)
 
     setup_page.locator('[data-review-group-tab="applied"]').click()
 
     assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
     assert card.get_attribute("aria-selected") is None
+    assert card.get_attribute("aria-label") == default_label
+    assert card.get_attribute("aria-haspopup") == "dialog"
+
+
+def test_ats_skips_selected_jobs_without_resumes_and_clears_batch_on_success(
+    setup_page: object,
+) -> None:
+    posted: list[dict[str, object]] = []
+
+    def complete_ats(route: object) -> None:
+        posted.append(ats_form_data(route.request.post_data or ""))
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                ats_state(
+                    status="complete",
+                    stage="archive",
+                    progress_percent=100,
+                    tasks=[
+                        task("resume", "resume", "complete"),
+                        task("batch-one", "job", "complete"),
+                    ],
+                )
+            ),
+        )
+
+    setup_page.route("**/api/ats-runs", complete_ats)
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    resumeful, missing = _select_job_cards(
+        setup_page,
+        "batch-one",
+        "batch-three",
+    )
+    start = setup_page.locator("[data-open-ats]")
+    assert start.inner_text() == "Check 2 selected jobs"
+
+    start.click()
+
+    dialog = setup_page.locator("[data-ats-skip-dialog]")
+    assert dialog.is_visible()
+    assert "1 selected job has no resume" in dialog.inner_text()
+    assert posted == []
+    dialog.locator("[data-confirm-ats-skip]").click()
+    setup_page.locator("#ats-results-link").wait_for(state="visible")
+
+    assert posted == [{"job_keys": ["batch-one"]}]
+    assert not setup_page.locator("[data-job-batch-toolbar]").is_visible()
+    assert "is-batch-selected" not in (resumeful.get_attribute("class") or "")
+    assert "is-batch-selected" not in (missing.get_attribute("class") or "")
+
+
+def test_ats_does_not_start_when_every_selected_job_has_no_resume(
+    setup_page: object,
+) -> None:
+    posted: list[dict[str, object]] = []
+
+    def reject_unexpected_ats(route: object) -> None:
+        posted.append(ats_form_data(route.request.post_data or ""))
+        route.fulfill(status=500, body="unexpected")
+
+    setup_page.route("**/api/ats-runs", reject_unexpected_ats)
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    missing = _select_job_cards(setup_page, "batch-three")[0]
+
+    setup_page.locator("[data-open-ats]").click()
+
+    dialog = setup_page.locator("[data-ats-skip-dialog]")
+    assert dialog.is_visible()
+    assert "No selected jobs can enter ATS" in dialog.inner_text()
+    assert dialog.locator("[data-confirm-ats-skip]").is_hidden()
+    assert posted == []
+    assert "is-batch-selected" in (missing.get_attribute("class") or "")
 
 
 def test_job_tracker_batch_move_button_moves_every_selected_job_without_reload(
@@ -2990,8 +3150,6 @@ def test_job_tracker_resume_upload_posts_without_page_navigation(
     card = setup_page.locator(
         '[data-review-block="global"] article[data-job-key="global-saved"]'
     )
-    ats_checkbox = card.locator("[data-ats-select-job]")
-    ats_checkbox.check()
     detail = open_job_details(card)
     form = detail.locator('[data-job-action="resume"]')
 
@@ -3015,7 +3173,6 @@ def test_job_tracker_resume_upload_posts_without_page_navigation(
     prompt = detail.locator("[data-job-reevaluate-progress]")
     assert prompt.is_hidden()
     assert prompt.text_content() == ""
-    assert ats_checkbox.is_checked()
 
 
 def test_job_tracker_reevaluation_shows_running_and_completed_card_states(
@@ -3249,11 +3406,6 @@ def test_job_tracker_acknowledges_result_when_card_details_open(
     global_review = setup_page.locator('[data-review-block="global"]')
     card = global_review.locator('article[data-job-key="global-saved"]')
     badge = global_review.locator('[data-review-group-notice-count="saved"]')
-
-    card.locator("[data-ats-select-job]").click()
-
-    assert acknowledged == []
-    playwright.expect(card).to_have_attribute("data-reevaluation-status", "failed")
 
     card.locator("[data-job-preview-open-area]").click()
 
@@ -3809,7 +3961,7 @@ def test_job_tracker_omits_global_resume_selection(setup_page: object) -> None:
     assert global_review.locator(".global-resume-section").count() == 0
 
 
-def test_status_change_requires_resume_upload_before_ats_selection(
+def test_status_change_keeps_no_resume_job_available_for_batch_selection(
     setup_page: object,
 ) -> None:
     current_job = source_job(
@@ -3858,7 +4010,7 @@ def test_status_change_requires_resume_upload_before_ats_selection(
         '[data-review-block="current"] '
         'article[data-job-key="current-status-local"]'
     )
-    assert current_card.locator("[data-ats-select-job]").count() == 0
+    assert current_card.locator("[data-ats-resume-missing]").count() == 0
     status_form = current_card.locator(".job-preview-status-form")
     status_form.locator('select[name="status"]').select_option("saved")
 
@@ -3871,10 +4023,13 @@ def test_status_change_requires_resume_upload_before_ats_selection(
     setup_page.locator('[data-nav-step="job-tracker"]').click()
     global_card.wait_for(state="visible")
     assert current_card.count() == 0
-    selector = global_card.locator("[data-ats-select-job]")
-    assert not selector.is_checked()
-    assert selector.is_disabled()
+    assert global_card.locator("[data-ats-select-job]").count() == 0
     assert global_card.get_by_text("No resume").count() == 1
+    _long_press_job_card(setup_page, global_card)
+    assert global_card.get_attribute("class").find("is-batch-selected") >= 0
+    assert setup_page.locator("[data-open-ats]").text_content() == (
+        "Check 1 selected jobs"
+    )
 
 
 def test_restore_updates_only_the_affected_review_card(
@@ -4987,12 +5142,7 @@ def test_ats_start_polls_common_then_parallel_job_states(setup_page: object) -> 
     open_ats_jobs_in_tracker(setup_page)
     start = setup_page.locator("[data-open-ats]")
     assert start.is_disabled()
-    setup_page.locator(
-        '[data-ats-select-job][value="linkedin-only"]'
-    ).check()
-    setup_page.locator(
-        '[data-ats-select-job][value="stepstone-only"]'
-    ).check()
+    _select_job_cards(setup_page, "linkedin-only", "stepstone-only")
     assert start.text_content() == "Check 2 selected jobs"
     assert "linkedin-only" not in (
         setup_page.evaluate(
@@ -5032,15 +5182,15 @@ def test_ats_start_polls_common_then_parallel_job_states(setup_page: object) -> 
     assert states == []
 
 
-def test_ats_job_checkbox_uses_a_visible_unchecked_border(setup_page: object) -> None:
-    open_ats_jobs_in_tracker(setup_page)
-    job_checkbox = setup_page.locator(
-        '[data-review-block="global"] #saved [data-ats-select-job]'
-    ).first
+def test_job_tracker_no_resume_is_plain_text_without_ats_checkbox(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?batch=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="batch-three"]')
 
-    assert job_checkbox.evaluate(
-        "control => getComputedStyle(control).borderTopColor"
-    ) == "rgb(81, 97, 90)"
+    assert card.locator("[data-ats-select-job]").count() == 0
+    assert card.locator("[data-ats-resume-missing]").inner_text() == "No resume"
 
 
 def test_review_job_list_row_has_fixed_sections_and_opens_full_details(
@@ -5087,7 +5237,7 @@ def test_review_job_list_row_has_fixed_sections_and_opens_full_details(
     assert dialog.is_hidden()
 
 
-def test_job_tracker_list_row_omits_status_picker_and_keeps_ats_outside_dialog(
+def test_job_tracker_list_row_omits_status_picker_and_ats_checkbox(
     setup_page: object,
 ) -> None:
     setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
@@ -5099,9 +5249,7 @@ def test_job_tracker_list_row_omits_status_picker_and_keeps_ats_outside_dialog(
     assert card.locator(
         ":scope > .job-preview-body > .job-preview-status-form"
     ).count() == 0
-    assert card.locator(
-        ":scope > .job-preview-body > .job-preview-footer [data-ats-select-job]"
-    ).count() == 1
+    assert card.locator("[data-ats-select-job]").count() == 0
     card.locator("[data-job-preview-open-area]").click()
     dialog = card.locator("[data-job-detail-dialog]")
     assert dialog.is_visible()
@@ -5259,7 +5407,7 @@ def test_review_jobs_scroll_without_moving_the_page(setup_page: object) -> None:
         ),
     ],
 )
-def test_job_cards_chain_scroll_to_the_page_at_both_boundaries(
+def test_job_cards_continue_scrolling_the_page_at_both_boundaries(
     setup_page: object,
     page_url: str,
     groups_selector: str,
@@ -5272,54 +5420,69 @@ def test_job_cards_chain_scroll_to_the_page_at_both_boundaries(
     setup_page.evaluate(
         """() => {
           document.documentElement.style.scrollBehavior = "auto";
-          const spacer = document.createElement("div");
-          spacer.style.height = "1000px";
-          document.body.append(spacer);
+          const topSpacer = document.createElement("div");
+          topSpacer.style.height = "1000px";
+          document.body.prepend(topSpacer);
+          const bottomSpacer = document.createElement("div");
+          bottomSpacer.style.height = "1000px";
+          document.body.append(bottomSpacer);
         }"""
     )
     groups = setup_page.locator(groups_selector)
     assert groups.evaluate("node => node.scrollHeight > node.clientHeight") is True
-    assert groups.evaluate(
-        "node => getComputedStyle(node).overscrollBehaviorY"
-    ) == "auto"
+    cdp = setup_page.context.new_cdp_session(setup_page)
 
     groups.evaluate(
         """node => {
-          const top = node.getBoundingClientRect().top + window.scrollY;
-          window.scrollTo(0, Math.max(1, top - 100));
+          node.scrollIntoView({block: "center"});
           node.scrollTop = 0;
         }"""
     )
     setup_page.wait_for_timeout(100)
     groups_box = groups.bounding_box()
     assert groups_box is not None
-    setup_page.mouse.move(groups_box["x"] + 10, groups_box["y"] + 10)
     page_scroll_before = setup_page.evaluate("window.scrollY")
-    setup_page.mouse.wheel(0, -900)
-    setup_page.wait_for_timeout(100)
+    cdp.send(
+        "Input.synthesizeScrollGesture",
+        {
+            "x": groups_box["x"] + 10,
+            "y": groups_box["y"] + 10,
+            "yDistance": -2200,
+            "speed": 900,
+            "gestureSourceType": "mouse",
+        },
+    )
+    setup_page.wait_for_timeout(150)
 
-    assert groups.evaluate("node => node.scrollTop") == 0
-    assert setup_page.evaluate("window.scrollY") < page_scroll_before
+    assert groups.evaluate(
+        "node => node.scrollTop + node.clientHeight >= node.scrollHeight"
+    ) is True
+    assert setup_page.evaluate("window.scrollY") > page_scroll_before
 
     groups.evaluate(
         """node => {
-          const top = node.getBoundingClientRect().top + window.scrollY;
-          window.scrollTo(0, Math.max(1, top - 100));
+          node.scrollIntoView({block: "center"});
           node.scrollTop = node.scrollHeight;
         }"""
     )
     setup_page.wait_for_timeout(100)
     groups_box = groups.bounding_box()
     assert groups_box is not None
-    setup_page.mouse.move(groups_box["x"] + 10, groups_box["y"] + 10)
     page_scroll_before = setup_page.evaluate("window.scrollY")
-    setup_page.mouse.wheel(0, 900)
-    setup_page.wait_for_timeout(100)
+    cdp.send(
+        "Input.synthesizeScrollGesture",
+        {
+            "x": groups_box["x"] + 10,
+            "y": groups_box["y"] + 10,
+            "yDistance": 2200,
+            "speed": 900,
+            "gestureSourceType": "mouse",
+        },
+    )
+    setup_page.wait_for_timeout(150)
 
-    assert groups.evaluate(
-        "node => node.scrollTop + node.clientHeight >= node.scrollHeight"
-    ) is True
-    assert setup_page.evaluate("window.scrollY") > page_scroll_before
+    assert groups.evaluate("node => node.scrollTop") == 0
+    assert setup_page.evaluate("window.scrollY") < page_scroll_before
 
 
 def test_review_group_tabs_switch_the_visible_panel(setup_page: object) -> None:
@@ -5640,12 +5803,7 @@ def test_ats_failed_state_maps_error_and_skipped_without_polling_again(
 
     setup_page.route("**/api/ats-runs/ats-1", respond_failed)
     open_ats_jobs_in_tracker(setup_page)
-    setup_page.locator(
-        '[data-ats-select-job][value="linkedin-only"]'
-    ).check()
-    setup_page.locator(
-        '[data-ats-select-job][value="stepstone-only"]'
-    ).check()
+    _select_job_cards(setup_page, "linkedin-only", "stepstone-only")
     setup_page.locator("[data-open-ats]").click()
 
     assert setup_page.locator(
@@ -5697,15 +5855,12 @@ def test_ats_start_failure_keeps_selection_for_retry(setup_page: object) -> None
     setup_page.route("**/api/ats-runs", respond_start)
     setup_page.on("dialog", lambda dialog: dialog.accept())
     open_ats_jobs_in_tracker(setup_page)
-    selected = setup_page.locator(
-        '[data-ats-select-job][value="linkedin-only"]'
-    )
-    selected.check()
+    selected = _select_job_cards(setup_page, "linkedin-only")[0]
     start = setup_page.locator("[data-open-ats]")
 
     start.click()
     setup_page.wait_for_timeout(100)
-    assert selected.is_checked()
+    assert "is-batch-selected" in (selected.get_attribute("class") or "")
     assert start.is_enabled()
     assert start.text_content() == "Check 1 selected jobs"
 
@@ -5828,9 +5983,7 @@ def test_ats_top_nav_opens_just_completed_result(
             body=json.dumps(completed),
         ),
     )
-    setup_page.locator(
-        '[data-ats-select-job][value="linkedin-only"]'
-    ).check()
+    _select_job_cards(setup_page, "linkedin-only")
     setup_page.locator("[data-open-ats]").click()
     setup_page.locator(
         '#ats-results-link[href="/setup?ats_run_id=ats%2Fnew%20result#ats-check"]'
@@ -5934,7 +6087,7 @@ def test_restored_ats_run_keeps_the_start_button_disabled(
     setup_page.locator(
         '[data-ats-task="linkedin-only"][data-state="active"]'
     ).wait_for(state="attached")
-    setup_page.locator("[data-ats-select-job]").first.check()
+    _select_job_cards(setup_page, "linkedin-only")
 
     playwright.expect(setup_page.locator("[data-open-ats]")).to_be_disabled()
 
@@ -5972,9 +6125,7 @@ def test_pending_current_ats_lookup_blocks_new_run_until_idle_is_known(
     setup_page.goto(
         "http://draft.test/setup?ats-jobs=1&delayed-current=1#job-tracker"
     )
-    setup_page.locator(
-        '[data-ats-select-job][value="linkedin-only"]'
-    ).check()
+    _select_job_cards(setup_page, "linkedin-only")
 
     playwright.expect(setup_page.locator("[data-open-ats]")).to_be_disabled()
     assert len(pending_current) == 1
