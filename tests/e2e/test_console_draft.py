@@ -1183,7 +1183,10 @@ def test_job_tracker_empty_group_delete_removes_lifecycle_nodes_without_reload(
     setup_page.wait_for_load_state("networkidle")
     setup_page.locator('[data-review-group-tab="interviewing"]').click()
     card = setup_page.locator('article[data-job-key="global-interviewing"]')
-    status_form = card.locator(".job-preview-status-form")
+    card.locator("[data-job-preview-open-area]").click()
+    status_form = card.locator(
+        '[data-job-detail-dialog] [data-job-action="status"]'
+    )
     status_form.locator('select[name="status"]').select_option("rejected")
     status_form.locator('button[type="submit"]').click()
     card.locator('[data-lifecycle-step][data-lifecycle-status="rejected"]').wait_for(
@@ -2187,7 +2190,7 @@ def test_global_job_delete_confirms_and_uses_the_global_endpoint(
     ]
 
 
-def test_status_change_updates_review_without_page_navigation(
+def test_job_tracker_detail_status_change_updates_review_without_page_navigation(
     setup_page: object,
 ) -> None:
     updated_global = Snapshot(
@@ -2232,8 +2235,11 @@ def test_status_change_updates_review_without_page_navigation(
     navigations: list[str] = []
     setup_page.on("framenavigated", lambda frame: navigations.append(frame.url))
     global_review = setup_page.locator('[data-review-block="global"]')
+    card = global_review.locator('article[data-job-key="global-saved"]')
+    card.locator("[data-job-preview-open-area]").click()
     status_form = global_review.locator(
-        'article[data-job-key="global-saved"] .job-preview-status-form'
+        'article[data-job-key="global-saved"] '
+        '[data-job-detail-dialog] [data-job-action="status"]'
     )
 
     status_form.locator('select[name="status"]').select_option("interviewing")
@@ -2861,9 +2867,14 @@ def test_global_status_request_does_not_replace_the_job_resume(
     setup_page.route("**/*", serve_resume_tracker)
     setup_page.goto("http://draft.test/setup?resume-status=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator(
+        '[data-review-block="global"] [data-job-key="global-saved"]'
+    )
+    card.locator("[data-job-preview-open-area]").click()
     form = setup_page.locator(
         '[data-review-block="global"] '
-        '[data-job-key="global-saved"] .job-preview-status-form'
+        '[data-job-key="global-saved"] '
+        '[data-job-detail-dialog] [data-job-action="status"]'
     )
 
     form.locator('select[name="status"]').select_option("applied")
@@ -5076,7 +5087,7 @@ def test_review_job_list_row_has_fixed_sections_and_opens_full_details(
     assert dialog.is_hidden()
 
 
-def test_job_tracker_list_row_keeps_ats_outside_full_action_dialog(
+def test_job_tracker_list_row_omits_status_picker_and_keeps_ats_outside_dialog(
     setup_page: object,
 ) -> None:
     setup_page.goto("http://draft.test/setup?global-status=1#job-tracker")
@@ -5085,6 +5096,9 @@ def test_job_tracker_list_row_keeps_ats_outside_full_action_dialog(
         '[data-review-block="global"] .job-card:visible'
     ).first
 
+    assert card.locator(
+        ":scope > .job-preview-body > .job-preview-status-form"
+    ).count() == 0
     assert card.locator(
         ":scope > .job-preview-body > .job-preview-footer [data-ats-select-job]"
     ).count() == 1

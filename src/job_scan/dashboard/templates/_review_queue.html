@@ -81,18 +81,20 @@
           </ul>
         {% endif %}
       </div>
-      <form class="job-action job-preview-status-form" data-job-action="status" data-job-key="{{ job.canonical_key }}">
-        <label>
-          <span>Set user status</span>
-          <select name="status">
-            {% if job.user_status_id == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
-            {% for group in tracker_groups %}
-              <option value="{{ group.id }}"{% if group.id == job.user_status_id %} selected{% endif %}>{{ group.name }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <button type="submit">Save</button>
-      </form>
+      {% if status_scope != 'global' %}
+        <form class="job-action job-preview-status-form" data-job-action="status" data-job-key="{{ job.canonical_key }}">
+          <label>
+            <span>Set user status</span>
+            <select name="status">
+              {% if job.user_status_id == 'new' %}<option value="" disabled selected>Choose status</option>{% endif %}
+              {% for group in tracker_groups %}
+                <option value="{{ group.id }}"{% if group.id == job.user_status_id %} selected{% endif %}>{{ group.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      {% endif %}
       <footer class="job-preview-footer">
         {% if ats_selectable %}
           <label class="form-check ats-job-selector">

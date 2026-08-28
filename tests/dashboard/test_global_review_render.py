@@ -146,10 +146,18 @@ def test_configured_groups_drive_global_sidebar_status_picker_and_lifecycle_name
         "Inbox",
         "Phone screen",
     ]
-    assert [option.get_text(strip=True) for option in card.select('select[name="status"] option')] == [
+    assert card.select_one(".job-preview-status-form") is None
+    detail_status_form = card.select_one(
+        '[data-job-detail-dialog] form[data-job-action="status"]'
+    )
+    assert detail_status_form is not None
+    assert [
+        option.get_text(strip=True)
+        for option in detail_status_form.select('select[name="status"] option')
+    ] == [
         "Inbox",
         "Phone screen",
-    ] * 2
+    ]
     assert card.select_one(".job-preview-status small").get_text(strip=True) == "Phone screen"
     assert "User status: Phone screen" in card.select_one(
         ".job-detail-status"

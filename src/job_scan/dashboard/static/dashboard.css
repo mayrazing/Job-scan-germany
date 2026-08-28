@@ -652,6 +652,16 @@ main {
   border-right: 1px solid var(--border);
 }
 
+.job-card[data-status-scope="global"] .job-preview-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.job-card[data-status-scope="global"] .job-preview-summary {
+  grid-row: auto;
+  padding-right: 0;
+  border-right: 0;
+}
+
 .job-preview-header {
   display: grid;
   min-height: 0;
