@@ -471,6 +471,10 @@
       return (card) =>
         card.dataset.addedAt ? new Date(card.dataset.addedAt).getTime() : null;
     }
+    if (mode === "applied-desc" || mode === "applied-asc") {
+      return (card) =>
+        card.dataset.appliedAt ? new Date(card.dataset.appliedAt).getTime() : null;
+    }
     if (mode === "posted-desc" || mode === "posted-asc") {
       return (card) =>
         card.dataset.postedAt
@@ -482,6 +486,19 @@
         card.dataset.score === "" ? null : Number(card.dataset.score);
     }
     return null;
+  };
+
+  const updateAppliedSortAvailability = (groupId) => {
+    const select = document.querySelector("#global-sort");
+    if (!select) return;
+    const appliedSelected = groupId === "applied";
+    select.querySelectorAll('option[value^="applied-"]').forEach((option) => {
+      option.hidden = !appliedSelected;
+      option.disabled = !appliedSelected;
+    });
+    if (!appliedSelected && select.value.startsWith("applied-")) {
+      select.value = "";
+    }
   };
 
   const initializeGlobalSort = () => {
@@ -615,6 +632,9 @@
       ? selectedPanel
       : selectedPanel.querySelector(":scope > details");
     if (details) details.open = true;
+    if (navigation.closest('[data-review-block="global"]')) {
+      updateAppliedSortAvailability(groupId);
+    }
     if (updateHash) window.history.replaceState(null, "", `#${groupId}`);
   };
 
@@ -1102,6 +1122,21 @@
     reconcileReviewJob(refreshedDocument, jobKey, options);
   };
 
+  const syncAppliedPreview = (liveCard, refreshedCard) => {
+    const liveApplied = liveCard.querySelector("[data-job-preview-applied]");
+    const refreshedApplied = refreshedCard.querySelector("[data-job-preview-applied]");
+    if (liveApplied && refreshedApplied) {
+      liveApplied.replaceWith(document.importNode(refreshedApplied, true));
+    } else if (liveApplied) {
+      liveApplied.remove();
+    } else if (refreshedApplied) {
+      liveCard.querySelector(".job-preview-location")?.append(
+        document.importNode(refreshedApplied, true),
+      );
+    }
+    liveCard.dataset.appliedAt = refreshedCard.dataset.appliedAt || "";
+  };
+
   const refreshJobLifecycle = async (card, jobKey) => {
     const refreshedDocument = await fetchReviewDocument(window.location.href);
     const blockName = card.closest("[data-review-block]")?.dataset.reviewBlock;
@@ -1109,14 +1144,17 @@
       ...refreshedDocument.querySelectorAll("[data-review-block]"),
     ].find((block) => block.dataset.reviewBlock === blockName);
     const liveLifecycle = card.querySelector("[data-job-lifecycle]");
-    const refreshedLifecycle = reviewCardForJob(
+    const refreshedCard = reviewCardForJob(
       refreshedBlock || refreshedDocument,
       jobKey,
-    )?.querySelector("[data-job-lifecycle]");
-    if (!liveLifecycle || !refreshedLifecycle) {
+    );
+    const refreshedLifecycle = refreshedCard?.querySelector("[data-job-lifecycle]");
+    if (!liveLifecycle || !refreshedCard || !refreshedLifecycle) {
       throw new Error("Could not refresh this job lifecycle.");
     }
     liveLifecycle.replaceWith(document.importNode(refreshedLifecycle, true));
+    syncAppliedPreview(card, refreshedCard);
+    document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
   };
 
   const reconcileGlobalJobs = (refreshedDocument) => {
@@ -1777,6 +1815,10 @@
         card.querySelectorAll(
           `[data-lifecycle-status="${CSS.escape(groupId)}"]`,
         ).forEach((event) => { event.remove(); });
+        if (groupId === "applied") {
+          card.querySelector("[data-job-preview-applied]")?.remove();
+          card.dataset.appliedAt = "";
+        }
         reindexLifecycle(card);
       });
       if (wasSelected && groupPanels && navigation) {
@@ -2726,6 +2768,13 @@
           input.value = changedOn;
           input.defaultValue = changedOn;
         });
+        const appliedTime = card.querySelector(
+          "[data-job-preview-applied] [data-lifecycle-time]",
+        );
+        if (appliedTime?.dataset.lifecycleTime === eventIndex) {
+          card.dataset.appliedAt = appliedTime.dateTime;
+          document.dispatchEvent(new CustomEvent("job-scan:review-updated"));
+        }
       } catch (error) {
         matchingInputs.forEach((input) => { input.value = previousValue; });
         window.alert(error.message);

@@ -475,16 +475,34 @@ def _saved_job(
     key: str,
     *,
     added_at: datetime,
+    applied_at: datetime | None,
     posted_at: date | None,
     score: int | None,
 ) -> JobRecord:
+    history = [
+        UserStatusHistoryEntry(status=UserStatus.SAVED, changed_at=added_at),
+    ]
+    user_status_updated_at = added_at
+    if applied_at is not None:
+        user_status_updated_at = applied_at + timedelta(days=1)
+        history.extend(
+            [
+                UserStatusHistoryEntry(
+                    status=UserStatus.APPLIED,
+                    changed_at=applied_at,
+                ),
+                UserStatusHistoryEntry(
+                    status=UserStatus.SAVED,
+                    changed_at=user_status_updated_at,
+                ),
+            ]
+        )
     return source_job(key, (SourceKind.LINKEDIN,), posted_at=posted_at, score=score).model_copy(
         update={
             "posted_at": posted_at,
             "user_status": UserStatus.SAVED,
-            "user_status_history": [
-                UserStatusHistoryEntry(status=UserStatus.SAVED, changed_at=added_at),
-            ],
+            "user_status_updated_at": user_status_updated_at,
+            "user_status_history": history,
         }
     )
 
@@ -495,24 +513,28 @@ GLOBAL_SORT_SNAPSHOT = Snapshot(
         _saved_job(
             "sort-a",
             added_at=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
+            applied_at=datetime(2026, 8, 10, 9, 0, tzinfo=UTC),
             posted_at=date(2026, 8, 10),
             score=60,
         ),
         _saved_job(
             "sort-b",
             added_at=datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+            applied_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
             posted_at=date(2026, 8, 20),
             score=90,
         ),
         _saved_job(
             "sort-c",
             added_at=datetime(2026, 8, 2, 9, 0, tzinfo=UTC),
+            applied_at=None,
             posted_at=None,
             score=75,
         ),
         _saved_job(
             "sort-d",
             added_at=datetime(2026, 8, 4, 9, 0, tzinfo=UTC),
+            applied_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
             posted_at=date(2026, 8, 15),
             score=None,
         ),
@@ -986,6 +1008,12 @@ def test_job_tracker_group_dialog_creates_renames_and_deletes_empty_group(
     assert dialog.locator(
         '[data-group-id="saved"] [data-delete-tracker-group]'
     ).is_disabled()
+    applied_row = dialog.locator(
+        '[data-tracker-group-row][data-group-id="applied"]'
+    )
+    assert applied_row.locator("[data-tracker-group-name]").is_disabled()
+    assert applied_row.locator("[data-save-tracker-group]").is_disabled()
+    assert applied_row.locator("[data-delete-tracker-group]").is_disabled()
 
     dialog.locator("[data-new-tracker-group-name]").fill("Phone screen")
     dialog.locator("[data-new-tracker-group-name]").press("Enter")
@@ -1107,28 +1135,96 @@ def test_job_tracker_group_rename_updates_visible_job_labels_without_reload(
 def test_job_tracker_empty_group_delete_removes_lifecycle_nodes_without_reload(
     setup_page: object,
 ) -> None:
+    status_changed = False
+
+    def respond_after_status_change(route: object) -> None:
+        nonlocal status_changed
+        request = route.request
+        if request.url.endswith("/api/global-jobs/global-interviewing/status"):
+            status_changed = True
+            route.fulfill(status=204, body="")
+            return
+        if status_changed and request.method == "GET" and "/setup" in request.url:
+            job = GLOBAL_LIFECYCLE_SNAPSHOT.jobs[0].model_copy(
+                update={
+                    "user_status": UserStatus.REJECTED,
+                    "user_status_updated_at": datetime(2026, 8, 12, 9, 0, tzinfo=UTC),
+                    "user_status_history": [
+                        *GLOBAL_LIFECYCLE_SNAPSHOT.jobs[0].user_status_history,
+                        UserStatusHistoryEntry(
+                            status=UserStatus.REJECTED,
+                            changed_at=datetime(2026, 8, 12, 9, 0, tzinfo=UTC),
+                        ),
+                    ],
+                }
+            )
+            route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=render_console(
+                    SOURCE_FILTER_SNAPSHOT,
+                    global_snapshot=Snapshot(
+                        meta=StoreMeta(
+                            data_revision=46,
+                            tracker_groups=default_tracker_groups(),
+                        ),
+                        jobs=[job],
+                    ),
+                    ai_providers=AI_PROVIDERS,
+                    ats_history=ATS_HISTORY,
+                    selected_ats=SELECTED_ATS,
+                ),
+            )
+            return
+        route.fallback()
+
+    setup_page.route("**/*", respond_after_status_change)
     setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
     setup_page.wait_for_load_state("networkidle")
-    setup_page.locator("[data-open-tracker-groups]").click()
-    applied = setup_page.locator(
-        '[data-tracker-group-row][data-group-id="applied"]'
+    setup_page.locator('[data-review-group-tab="interviewing"]').click()
+    card = setup_page.locator('article[data-job-key="global-interviewing"]')
+    status_form = card.locator(".job-preview-status-form")
+    status_form.locator('select[name="status"]').select_option("rejected")
+    status_form.locator('button[type="submit"]').click()
+    card.locator('[data-lifecycle-step][data-lifecycle-status="rejected"]').wait_for(
+        state="attached",
     )
-    assert applied.locator(".tracker-group-job-count").inner_text() == "0 jobs"
 
-    applied.locator("[data-delete-tracker-group]").click()
+    setup_page.locator("[data-open-tracker-groups]").click()
+    interviewing = setup_page.locator(
+        '[data-tracker-group-row][data-group-id="interviewing"]'
+    )
+    assert interviewing.locator(".tracker-group-job-count").inner_text() == "0 jobs"
+    assert card.locator("[data-job-preview-applied]").text_content() == (
+        "Applied: 2026-08-08"
+    )
+
+    interviewing.locator("[data-delete-tracker-group]").click()
     delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
     delete_dialog.locator("[data-confirm-tracker-group-delete]").click()
-    applied.wait_for(state="detached")
+    interviewing.wait_for(state="detached")
 
-    card = setup_page.locator('[data-job-key="global-interviewing"]')
-    assert card.locator('[data-lifecycle-status="applied"]').count() == 0
-    interviewing = card.locator(
+    assert card.locator(
         '[data-lifecycle-step][data-lifecycle-status="interviewing"]'
+    ).count() == 0
+    assert card.locator("[data-job-preview-applied]").count() == 1
+    assert card.locator("[data-job-preview-applied]").text_content() == (
+        "Applied: 2026-08-08"
     )
-    assert interviewing.get_attribute("data-lifecycle-event-index") == "1"
-    assert interviewing.locator(
+    applied_step = card.locator(
+        '[data-lifecycle-step][data-lifecycle-status="applied"]'
+    )
+    assert applied_step.get_attribute("data-lifecycle-event-index") == "1"
+    assert applied_step.locator(
         "[data-lifecycle-date-input]"
     ).get_attribute("data-lifecycle-event-index") == "1"
+    rejected_step = card.locator(
+        '[data-lifecycle-step][data-lifecycle-status="rejected"]'
+    )
+    assert rejected_step.get_attribute("data-lifecycle-event-index") == "2"
+    assert rejected_step.locator(
+        "[data-lifecycle-date-input]"
+    ).get_attribute("data-lifecycle-event-index") == "2"
 
 
 def test_job_tracker_ats_controls_share_height_and_edges(setup_page: object) -> None:
@@ -1682,7 +1778,7 @@ def test_job_tracker_filters_order_add_button_url_filter_then_sort(
     assert order == ["source", "add", "other", "url", "sort"]
 
 
-def test_job_tracker_sort_orders_by_added_posted_and_score(
+def test_job_tracker_sort_orders_by_added_applied_posted_and_score(
     setup_page: object,
 ) -> None:
     setup_page.goto("http://draft.test/setup?sort=1#job-tracker")
@@ -1702,6 +1798,15 @@ def test_job_tracker_sort_orders_by_added_posted_and_score(
     sort_select.select_option("added-desc")
     assert card_keys() == ["sort-d", "sort-b", "sort-c", "sort-a"]
 
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="applied"]'
+    ).click()
+    sort_select.select_option("applied-asc")
+    assert card_keys() == ["sort-a", "sort-d", "sort-b", "sort-c"]
+
+    sort_select.select_option("applied-desc")
+    assert card_keys() == ["sort-b", "sort-d", "sort-a", "sort-c"]
+
     sort_select.select_option("posted-asc")
     assert card_keys() == ["sort-a", "sort-d", "sort-b", "sort-c"]
 
@@ -1713,6 +1818,35 @@ def test_job_tracker_sort_orders_by_added_posted_and_score(
 
     sort_select.select_option("score-desc")
     assert card_keys() == ["sort-b", "sort-c", "sort-a", "sort-d"]
+
+
+def test_job_tracker_applied_sort_is_only_available_in_applied_group(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?sort=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    global_review = setup_page.locator('[data-review-block="global"]')
+    sort_select = setup_page.locator("#global-sort")
+    applied_options = sort_select.locator('option[value^="applied-"]')
+
+    assert applied_options.evaluate_all(
+        "options => options.every(option => option.hidden && option.disabled)"
+    ) is True
+
+    global_review.locator('[data-review-group-tab="applied"]').click()
+
+    assert applied_options.evaluate_all(
+        "options => options.every(option => !option.hidden && !option.disabled)"
+    ) is True
+    sort_select.select_option("applied-desc")
+    assert sort_select.input_value() == "applied-desc"
+
+    global_review.locator('[data-review-group-tab="saved"]').click()
+
+    assert sort_select.input_value() == ""
+    assert applied_options.evaluate_all(
+        "options => options.every(option => option.hidden && option.disabled)"
+    ) is True
 
 
 def test_job_tracker_selects_a_new_manual_source_after_cards_refresh(
@@ -2305,6 +2439,42 @@ def test_saved_lifecycle_date_updates_job_tracker_added_date(
     assert posted == [{"changed_on": "2026-08-07"}]
 
 
+def test_applied_lifecycle_date_updates_job_tracker_applied_date(
+    setup_page: object,
+) -> None:
+    posted: list[dict[str, str]] = []
+
+    def save_lifecycle_date(route: object) -> None:
+        posted.append(route.request.post_data_json)
+        route.fulfill(status=204, body="")
+
+    setup_page.route(
+        "**/api/global-jobs/global-interviewing/lifecycle/1/date",
+        save_lifecycle_date,
+    )
+    setup_page.goto("http://draft.test/setup?lifecycle=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    setup_page.locator(
+        '[data-review-block="global"] [data-review-group-tab="interviewing"]'
+    ).click()
+    card = setup_page.locator(
+        '[data-review-block="global"] article[data-job-key="global-interviewing"]'
+    )
+    applied = card.locator("[data-job-preview-applied]")
+
+    assert applied.text_content() == "Applied: 2026-08-08"
+
+    dialog = open_job_details(card)
+    dialog.locator(
+        '[data-lifecycle-date-input][data-lifecycle-event-index="1"]'
+    ).first.fill("2026-08-09")
+    setup_page.wait_for_timeout(100)
+
+    assert applied.text_content() == "Applied: 2026-08-09"
+    assert card.get_attribute("data-applied-at") == "2026-08-09T09:00:00+00:00"
+    assert posted == [{"changed_on": "2026-08-09"}]
+
+
 def test_lifecycle_node_delete_requires_confirmation_and_preserves_saved(
     setup_page: object,
 ) -> None:
@@ -2374,6 +2544,9 @@ def test_lifecycle_node_delete_requires_confirmation_and_preserves_saved(
         '[data-lifecycle-step][data-lifecycle-event-index="1"] strong'
     )
     delete_dialog = card.locator("[data-lifecycle-delete-dialog]")
+    preview_applied = card.locator("[data-job-preview-applied]")
+
+    assert preview_applied.text_content() == "Applied: 2026-08-08"
 
     saved.dblclick()
 
@@ -2406,6 +2579,8 @@ def test_lifecycle_node_delete_requires_confirmation_and_preserves_saved(
     assert job_dialog.locator("[data-lifecycle-step]").evaluate_all(
         "steps => steps.map(step => step.dataset.lifecycleStatus)"
     ) == ["saved", "interviewing"]
+    assert preview_applied.count() == 0
+    assert card.get_attribute("data-applied-at") == ""
 
     job_dialog.locator(
         '[data-lifecycle-step][data-lifecycle-status="interviewing"] strong'
@@ -2422,7 +2597,7 @@ def test_job_tracker_card_drag_to_group_updates_status(
         meta=StoreMeta(data_revision=45),
         jobs=[
             GLOBAL_STATUS_SNAPSHOT.jobs[0].model_copy(
-                update={"user_status": UserStatus.APPLIED}
+                update={"user_status": UserStatus.INTERVIEWING}
             )
         ],
     )
@@ -2456,21 +2631,21 @@ def test_job_tracker_card_drag_to_group_updates_status(
     card = global_review.locator(
         '#saved article[data-job-key="global-saved"]'
     )
-    target = global_review.locator('[data-review-group-tab="applied"]')
+    target = global_review.locator('[data-review-group-tab="interviewing"]')
 
     assert card.get_attribute("draggable") == "true"
     card.drag_to(target)
 
-    applied_card = global_review.locator(
-        '#applied article[data-job-key="global-saved"]'
+    interviewing_card = global_review.locator(
+        '#interviewing article[data-job-key="global-saved"]'
     )
-    applied_card.wait_for(state="attached")
-    assert posted == [{"status": "applied"}]
+    interviewing_card.wait_for(state="attached")
+    assert posted == [{"status": "interviewing"}]
     assert global_review.locator(
         '[data-review-group-count="saved"]'
     ).text_content() == "0"
     assert global_review.locator(
-        '[data-review-group-count="applied"]'
+        '[data-review-group-count="interviewing"]'
     ).text_content() == "1"
     assert global_review.locator(
         '[data-review-group-tab="saved"]'
@@ -2479,10 +2654,12 @@ def test_job_tracker_card_drag_to_group_updates_status(
     setup_page.locator("[data-open-tracker-groups]").click()
     group_dialog = setup_page.locator("[data-tracker-group-dialog]")
     saved_row = group_dialog.locator('[data-group-id="saved"]')
-    applied_row = group_dialog.locator('[data-group-id="applied"]')
+    interviewing_row = group_dialog.locator('[data-group-id="interviewing"]')
     assert saved_row.locator(".tracker-group-job-count").inner_text() == "0 jobs"
-    assert applied_row.locator(".tracker-group-job-count").inner_text() == "1 job"
-    applied_row.locator("[data-delete-tracker-group]").click()
+    assert interviewing_row.locator(
+        ".tracker-group-job-count"
+    ).inner_text() == "1 job"
+    interviewing_row.locator("[data-delete-tracker-group]").click()
     delete_dialog = setup_page.locator("[data-tracker-group-delete-dialog]")
     assert delete_dialog.locator(
         "[data-tracker-group-confirmation-field]"
@@ -2494,9 +2671,9 @@ def test_job_tracker_card_drag_to_group_updates_status(
     group_dialog.evaluate("dialog => dialog.close()")
 
     target.click()
-    applied_card.drag_to(target)
+    interviewing_card.drag_to(target)
     setup_page.wait_for_timeout(100)
-    assert posted == [{"status": "applied"}]
+    assert posted == [{"status": "interviewing"}]
 
 
 def _long_press_job_card(page: object, card: object) -> None:

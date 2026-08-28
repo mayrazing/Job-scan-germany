@@ -706,7 +706,8 @@ main {
 }
 
 .job-preview-posted,
-.job-preview-added {
+.job-preview-added,
+.job-preview-applied {
   flex: 0 0 auto;
 }
 

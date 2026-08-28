@@ -611,6 +611,75 @@ def test_review_and_job_tracker_previews_show_posted_date() -> None:
         assert posted.select_one('time[datetime="2026-08-18"]') is not None
 
 
+def test_job_tracker_preview_shows_the_latest_applied_date() -> None:
+    applied_at = NOW - timedelta(days=2)
+    tracked = _job("interviewing", user=UserStatus.INTERVIEWING).model_copy(
+        update={
+            "user_status_history": [
+                UserStatusHistoryEntry(
+                    status=UserStatus.SAVED,
+                    changed_at=NOW - timedelta(days=8),
+                ),
+                UserStatusHistoryEntry(
+                    status=UserStatus.APPLIED,
+                    changed_at=NOW - timedelta(days=6),
+                ),
+                UserStatusHistoryEntry(
+                    status=UserStatus.INTERVIEWING,
+                    changed_at=NOW - timedelta(days=4),
+                ),
+                UserStatusHistoryEntry(
+                    status=UserStatus.APPLIED,
+                    changed_at=applied_at,
+                ),
+                UserStatusHistoryEntry(
+                    status=UserStatus.INTERVIEWING,
+                    changed_at=NOW,
+                ),
+            ]
+        }
+    )
+
+    page = BeautifulSoup(
+        render_console(global_snapshot=_snapshot(tracked)),
+        "html.parser",
+    )
+    card = page.select_one(
+        '[data-review-block="global"] [data-job-key="interviewing"]'
+    )
+    assert card is not None
+    applied = card.select_one("[data-job-preview-applied]")
+    assert applied is not None
+    assert applied.get_text(" ", strip=True) == "Applied: 2026-08-16"
+    assert applied.select_one("time").get("datetime") == applied_at.isoformat()
+    assert card.get("data-applied-at") == applied_at.isoformat()
+
+
+def test_only_job_tracker_preview_hides_the_job_location() -> None:
+    page = BeautifulSoup(
+        render_console(
+            _snapshot(_job("recommended")),
+            global_snapshot=_snapshot(_job("saved", user=UserStatus.SAVED)),
+        ),
+        "html.parser",
+    )
+    review_card = page.select_one(
+        '[data-review-block="current"] [data-job-key="recommended"]'
+    )
+    tracker_card = page.select_one(
+        '[data-review-block="global"] [data-job-key="saved"]'
+    )
+    assert review_card is not None
+    assert tracker_card is not None
+    assert review_card.select_one("[data-job-preview-location]").get_text(strip=True) == (
+        "Berlin"
+    )
+    assert tracker_card.select_one("[data-job-preview-location]") is None
+    assert tracker_card.select_one(".job-detail-header .location").get_text(strip=True) == (
+        "Berlin"
+    )
+
+
 def test_job_tracker_preview_labels_missing_posted_date_as_unknown() -> None:
     tracked = _snapshot(
         _job("saved", user=UserStatus.SAVED).model_copy(update={"posted_at": None})

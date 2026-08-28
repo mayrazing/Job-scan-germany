@@ -118,6 +118,8 @@ class GlobalJobStore:
 
     def rename_group(self, group_id: str, name: str) -> TrackerGroup:
         """Change one group display name without changing its stable ID."""
+        if group_id == UserStatus.APPLIED.value:
+            raise ValueError("The applied group cannot be renamed")
         normalized_name = _tracker_group_name(name)
         with self._lock.exclusive():
             current = self._load_and_migrate_unlocked()
@@ -138,6 +140,8 @@ class GlobalJobStore:
         """Delete one group and batch-delete jobs currently assigned to it."""
         if group_id == UserStatus.SAVED.value:
             raise ValueError("The required starting group cannot be deleted")
+        if group_id == UserStatus.APPLIED.value:
+            raise ValueError("The applied group cannot be deleted")
         deleted_at = _utc_timestamp(now if now is not None else datetime.now(UTC))
         with self._lock.exclusive():
             current = self._load_and_migrate_unlocked()

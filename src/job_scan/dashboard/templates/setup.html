@@ -645,6 +645,8 @@
                         <option value="">Default order</option>
                         <option value="added-desc">Added: newest first</option>
                         <option value="added-asc">Added: oldest first</option>
+                        <option value="applied-desc">Applied: newest first</option>
+                        <option value="applied-asc">Applied: oldest first</option>
                         <option value="posted-desc">Posted: newest first</option>
                         <option value="posted-asc">Posted: oldest first</option>
                         <option value="score-desc">Score: highest first</option>
@@ -718,12 +720,12 @@
                         <div class="tracker-group-row" data-tracker-group-row data-group-id="{{ group.id }}" data-group-name="{{ group.title }}" data-group-count="{{ group.count }}">
                           <label>
                             <span class="visually-hidden">{{ group.title }} group name</span>
-                            <input type="text" value="{{ group.title }}" maxlength="80" data-tracker-group-name aria-label="Rename {{ group.title }}">
+                            <input type="text" value="{{ group.title }}" maxlength="80" data-tracker-group-name aria-label="Rename {{ group.title }}"{% if group.id == 'applied' %} disabled title="The applied group cannot be renamed"{% endif %}>
                           </label>
                           <span class="tracker-group-job-count">{{ group.count }} {{ 'job' if group.count == 1 else 'jobs' }}</span>
                           <div class="tracker-group-row-actions">
-                            <button class="btn btn-outline-secondary" type="button" data-save-tracker-group>Save</button>
-                            <button class="btn btn-outline-danger" type="button" data-delete-tracker-group{% if group.id == 'saved' %} disabled aria-disabled="true" title="{{ group.title }} is the required starting group"{% endif %}>Delete</button>
+                            <button class="btn btn-outline-secondary" type="button" data-save-tracker-group{% if group.id == 'applied' %} disabled title="The applied group cannot be renamed"{% endif %}>Save</button>
+                            <button class="btn btn-outline-danger" type="button" data-delete-tracker-group{% if group.id == 'saved' %} disabled aria-disabled="true" title="{{ group.title }} is the required starting group"{% elif group.id == 'applied' %} disabled aria-disabled="true" title="The applied group cannot be deleted"{% endif %}>Delete</button>
                           </div>
                         </div>
                       {% endfor %}

@@ -16,15 +16,20 @@
 
 {% macro card(job, ats_selectable=false, company_size_searchable=false, status_scope='current', tracker_groups=()) -%}
   {% set saved_event = namespace(entry=none, index=none) %}
+  {% set applied_event = namespace(entry=none, index=none) %}
   {% if status_scope == 'global' %}
     {% for event in job.user_status_history %}
       {% if saved_event.entry is none and event.status_id == 'saved' %}
         {% set saved_event.entry = event %}
         {% set saved_event.index = loop.index0 %}
       {% endif %}
+      {% if event.status_id == 'applied' %}
+        {% set applied_event.entry = event %}
+        {% set applied_event.index = loop.index0 %}
+      {% endif %}
     {% endfor %}
   {% endif %}
-  <article class="job-card" data-availability="{{ job.availability_status.value }}" data-added-at="{{ saved_event.entry.changed_at.isoformat() if saved_event.entry else '' }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
+  <article class="job-card" data-applied-at="{{ applied_event.entry.changed_at.isoformat() if applied_event.entry else '' }}" data-availability="{{ job.availability_status.value }}" data-added-at="{{ saved_event.entry.changed_at.isoformat() if saved_event.entry else '' }}" data-company-industry="{{ job.company_industry_label or '' }}" data-company-size-maximum="{{ job.company_size_maximum if job.company_size_maximum is not none else '' }}" data-company-size-minimum="{{ job.company_size_minimum if job.company_size_minimum is not none else '' }}" data-german-requirement="{{ job.german_requirement or '' }}" data-job-key="{{ job.canonical_key }}" data-job-preview-card data-posted-at="{{ job.posted_at.isoformat() if job.posted_at else '' }}" data-score="{{ job.score if job.score is not none else '' }}" data-sources="{{ job.source_names | join(',') }}" data-status-scope="{{ status_scope }}"{% if job.reevaluation_notice %} data-reevaluation-status="{{ job.reevaluation_notice.status }}" data-reevaluation-finished-at="{{ job.reevaluation_notice.finished_at.isoformat() }}"{% endif %}{% if status_scope == 'global' %} data-job-url="{{ job.url }}" draggable="true" data-job-drag-source{% endif %} tabindex="0" aria-haspopup="dialog" aria-label="View details for {{ job.title }} at {{ job.company }}{% if job.reevaluation_notice %}. Re-evaluation {{ job.reevaluation_notice.status }}; open to acknowledge{% endif %}">
     {% if status_scope == 'global' %}
       <button class="job-batch-toggle" type="button" data-job-batch-toggle aria-label="Select {{ job.title }} at {{ job.company }}" aria-pressed="false" hidden>
         <span aria-hidden="true">✓</span>
@@ -42,9 +47,10 @@
             <p class="company">{{ job.company }}</p>
             <h3><a href="{{ job.url }}" target="_blank" rel="noopener noreferrer">{{ job.title }}</a></h3>
             <p class="location job-preview-location">
-              <span>{{ job.location }}</span>
+              {% if status_scope != 'global' %}<span data-job-preview-location>{{ job.location }}</span>{% endif %}
               <span class="job-preview-posted">Posted: {% if job.posted_at %}<time datetime="{{ job.posted_at.isoformat() }}">{{ job.posted_at.isoformat() }}</time>{% else %}Unknown{% endif %}</span>
               {% if saved_event.entry %}<span class="job-preview-added" data-job-preview-added>Added: <time data-lifecycle-time="{{ saved_event.index }}" data-lifecycle-time-format="date" datetime="{{ saved_event.entry.changed_at.isoformat() }}">{{ saved_event.entry.changed_at.date().isoformat() }}</time></span>{% endif %}
+              {% if applied_event.entry %}<span class="job-preview-applied" data-job-preview-applied>Applied: <time data-lifecycle-time="{{ applied_event.index }}" data-lifecycle-time-format="date" datetime="{{ applied_event.entry.changed_at.isoformat() }}">{{ applied_event.entry.changed_at.date().isoformat() }}</time></span>{% endif %}
             </p>
           </div>
           {% if job.score is not none %}

@@ -216,6 +216,16 @@ def test_saved_tracker_group_cannot_be_deleted(store: GlobalJobStore) -> None:
         store.delete_group("saved")
 
 
+def test_applied_tracker_group_cannot_be_renamed(store: GlobalJobStore) -> None:
+    with pytest.raises(ValueError, match="cannot be renamed"):
+        store.rename_group("applied", "Submitted")
+
+
+def test_applied_tracker_group_cannot_be_deleted(store: GlobalJobStore) -> None:
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        store.delete_group("applied")
+
+
 def test_empty_tracker_group_can_be_deleted_without_name_confirmation(
     store: GlobalJobStore,
 ) -> None:
