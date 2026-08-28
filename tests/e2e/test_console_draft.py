@@ -1065,6 +1065,25 @@ def test_job_tracker_group_dialog_creates_renames_and_deletes_empty_group(
     ).count() == 0
 
 
+def test_job_tracker_group_dialog_closes_on_backdrop_click(
+    setup_page: object,
+) -> None:
+    setup_page.locator('[data-nav-step="job-tracker"]').click()
+    setup_page.locator("[data-open-tracker-groups]").click()
+    dialog = setup_page.locator("[data-tracker-group-dialog]")
+    assert dialog.is_visible()
+
+    dialog.locator("[data-new-tracker-group-name]").click()
+    assert dialog.is_visible()
+
+    dialog_box = dialog.bounding_box()
+    assert dialog_box is not None
+    setup_page.mouse.click(dialog_box["x"] - 10, dialog_box["y"] + 10)
+    setup_page.wait_for_timeout(50)
+
+    assert not dialog.is_visible()
+
+
 def test_job_tracker_nonempty_group_delete_requires_exact_name(
     setup_page: object,
 ) -> None:

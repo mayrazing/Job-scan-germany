@@ -1886,6 +1886,10 @@
     });
 
     dialog.addEventListener("click", async (event) => {
+      if (event.target === dialog) {
+        dialog.close("cancel");
+        return;
+      }
       const createButton = event.target.closest("[data-create-tracker-group]");
       if (createButton) {
         const name = newName?.value.trim() || "";
