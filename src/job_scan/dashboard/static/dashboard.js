@@ -2251,6 +2251,18 @@
       "job-scan:review-updated",
       updateReviewGroupNoticeCounts,
     );
+    // A background re-evaluation restored after a page refresh has finished;
+    // pull the job's new score and notice into the visible card.
+    document.addEventListener(
+      "job-scan:background-reevaluation-finished",
+      (event) => {
+        const jobKey = event.detail?.jobKey;
+        if (!jobKey) return;
+        void refreshReviewJob(jobKey, { preserveOpenDetail: true }).catch(
+          () => {},
+        );
+      },
+    );
   };
 
   if (document.readyState === "loading") {

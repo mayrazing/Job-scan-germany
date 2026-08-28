@@ -143,6 +143,7 @@
   let codexLoginPolling = false;
   let codexLoginBusy = false;
   let backgroundTaskRequestInFlight = false;
+  const restoredReevaluations = new Set();
 
   const backgroundTaskKindLabels = {
     scan: "Scan",
@@ -157,6 +158,27 @@
         .filter((task) => task.kind === "re-evaluate" && task.subject_key)
         .map((task) => task.subject_key),
     );
+    // Restore the is-reevaluating border after a page refresh: re-apply it to
+    // cards whose re-evaluation is still running, and retire it (with a
+    // refresh event) once the task leaves the active list. Cards whose class
+    // was set by the live re-evaluate flow in dashboard.js are never touched.
+    document.querySelectorAll(".job-card[data-job-key]").forEach((card) => {
+      const jobKey = card.dataset.jobKey;
+      if (runningReevaluations.has(jobKey)) {
+        if (!card.classList.contains("is-reevaluating")) {
+          card.classList.add("is-reevaluating");
+          restoredReevaluations.add(jobKey);
+        }
+      } else if (restoredReevaluations.has(jobKey)) {
+        card.classList.remove("is-reevaluating");
+        restoredReevaluations.delete(jobKey);
+        document.dispatchEvent(
+          new CustomEvent("job-scan:background-reevaluation-finished", {
+            detail: { jobKey },
+          }),
+        );
+      }
+    });
     document.querySelectorAll('form[data-job-action="re-evaluate"]').forEach((form) => {
       const button = form.querySelector("[data-job-resume-reevaluate]");
       if (!button) return;
