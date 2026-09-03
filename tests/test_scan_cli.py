@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,8 +10,24 @@ from typer.testing import CliRunner
 
 from job_scan import cli as cli_module
 from job_scan.cli import app
+from job_scan.config import (
+    AppConfig,
+    ClaudeSettings,
+    SchedulerSettings,
+    load_config,
+    save_config,
+)
+from job_scan.domain import Snapshot, StoreMeta
 from job_scan.paths import AppPaths
-from job_scan.scan_service import ScanAlreadyRunning, ScanError, ScanSummary
+from job_scan.scan_service import (
+    ScanAlreadyRunning,
+    ScanError,
+    ScanProgress,
+    ScanSummary,
+    SourceProgress,
+    read_scan_run_state,
+)
+from job_scan.search_history import SearchHistoryStore
 
 NOW = datetime(2026, 8, 3, 9, 0, tzinfo=UTC)
 
@@ -52,11 +69,29 @@ class RecordingScanService:
         self.error = error
         self.force_review_calls: list[bool] = []
 
-    def run(self, force_review: bool = False) -> ScanSummary:
+    def run(
+        self,
+        force_review: bool = False,
+        *,
+        on_published=None,
+        progress=None,
+        workflow_lock_held: bool = False,
+    ) -> ScanSummary:
         self.force_review_calls.append(force_review)
         if self.error is not None:
             raise self.error
-        return summary(self.paths)
+        if progress is not None:
+            progress(
+                ScanProgress(
+                    stage="sources",
+                    source_progress=SourceProgress(1, 4, 5, 0),
+                )
+            )
+        result = summary(self.paths)
+        if on_published is not None:
+            assert workflow_lock_held is True
+            on_published(result, Snapshot(meta=StoreMeta(data_revision=1)))
+        return result
 
 
 def install_factory(
@@ -129,3 +164,91 @@ def test_scan_fatal_error_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert result.exit_code == 1
     assert result.stdout == ""
     assert result.stderr.strip() == "Scan failed: Could not publish scan results."
+
+
+def test_scan_publishes_complete_state_for_the_task_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_factory(monkeypatch)
+    root = tmp_path / "home"
+    monkeypatch.setenv("JOB_SCAN_HOME", str(root))
+
+    result = CliRunner().invoke(app, ["scan"])
+
+    assert result.exit_code == 0, result.output
+    state = read_scan_run_state(AppPaths.from_root(root))
+    assert state is not None
+    assert state.status == "complete"
+    assert state.stage == "publish"
+    assert state.message == "Review queue published."
+    assert state.progress_percent == 100.0
+
+
+def test_scan_failure_persists_failed_state_for_the_task_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_factory(monkeypatch, error=ScanError("Could not publish scan results."))
+    root = tmp_path / "home"
+    monkeypatch.setenv("JOB_SCAN_HOME", str(root))
+
+    result = CliRunner().invoke(app, ["scan"])
+
+    assert result.exit_code == 1
+    state = read_scan_run_state(AppPaths.from_root(root))
+    assert state is not None
+    assert state.status == "failed"
+    assert state.message == "Could not publish scan results."
+
+
+def test_scan_contention_persists_no_task_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_factory(
+        monkeypatch, error=ScanAlreadyRunning("A scan is already running.")
+    )
+    root = tmp_path / "home"
+    monkeypatch.setenv("JOB_SCAN_HOME", str(root))
+
+    result = CliRunner().invoke(app, ["scan"])
+
+    assert result.exit_code == 2
+    assert read_scan_run_state(AppPaths.from_root(root)) is None
+
+
+def test_scheduled_scan_uses_the_saved_schedule_and_archives_search_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = install_factory(monkeypatch)
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    resume = paths.root / "resumes" / "scheduled.docx"
+    resume.parent.mkdir()
+    resume.write_bytes(b"scheduled resume")
+    profile_bytes = b"# Scheduled A\n"
+    config = AppConfig(
+        candidate_name="Scheduled A",
+        resume_path=resume,
+        resume_sha256="sha256:" + "a" * 64,
+        profile_sha256="sha256:" + hashlib.sha256(profile_bytes).hexdigest(),
+        search_terms=["backend engineer"],
+        locations=["Berlin"],
+        german_level="B1",
+        claude=ClaudeSettings(model="sonnet", effort="medium"),
+        scheduler=SchedulerSettings(local_time="08:30"),
+    )
+    save_config(paths.scheduled_config_toml, config)
+    paths.scheduled_profile_md.write_bytes(profile_bytes)
+    monkeypatch.setenv("JOB_SCAN_HOME", str(paths.root))
+
+    result = CliRunner().invoke(app, ["scan", "--scheduled"])
+
+    assert result.exit_code == 0, result.output
+    assert load_config(paths.config_toml).candidate_name == "Scheduled A"
+    assert paths.profile_md.read_text(encoding="utf-8") == "# Scheduled A\n"
+    history = SearchHistoryStore(paths)
+    entries = history.list()
+    assert len(entries) == 1
+    assert entries[0].candidate_name == "Scheduled A"
+    assert history.read_resume(entries[0].run_id)[1] == b"scheduled resume"
+    assert services[0].force_review_calls == [False]

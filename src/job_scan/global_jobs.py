@@ -21,6 +21,7 @@ from job_scan.domain import (
     TrackerStatus,
     UserStatus,
     UserStatusHistoryEntry,
+    UserTag,
     default_tracker_groups,
     tracker_status_id,
 )
@@ -519,6 +520,64 @@ class GlobalJobStore:
             return self._persist_unlocked(current, jobs).jobs[first].model_copy(
                 deep=True
             )
+
+    def add_user_tag(self, job: JobRecord, name: str, color: str) -> UserTag:
+        """Attach one user-owned tag, reusing its existing display and color."""
+        requested = UserTag(name=name, color=color)
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            normalized_name = requested.name.casefold()
+            tag = next(
+                (
+                    existing.model_copy(deep=True)
+                    for item in jobs
+                    for existing in item.user_tags
+                    if existing.name.casefold() == normalized_name
+                ),
+                requested,
+            )
+            merged = _merge_jobs([jobs[index] for index in matches])
+            if not any(
+                existing.name.casefold() == normalized_name
+                for existing in merged.user_tags
+            ):
+                merged.user_tags.append(tag.model_copy(deep=True))
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            self._persist_unlocked(current, jobs)
+        return tag.model_copy(deep=True)
+
+    def delete_user_tag(self, job: JobRecord, name: str) -> None:
+        """Detach one user-owned tag from a tracked job."""
+        normalized_name = name.strip().casefold()
+        if not normalized_name:
+            raise ValueError("tag name cannot be blank")
+        with self._lock.exclusive():
+            current = self._load_and_migrate_unlocked()
+            jobs = [item.model_copy(deep=True) for item in current.jobs]
+            matches = _matching_indices(jobs, job)
+            if not matches:
+                raise KeyError(job.canonical_job_key)
+            merged = _merge_jobs([jobs[index] for index in matches])
+            retained = [
+                tag
+                for tag in merged.user_tags
+                if tag.name.casefold() != normalized_name
+            ]
+            if len(retained) == len(merged.user_tags):
+                raise KeyError(name)
+            merged.user_tags = retained
+            first = matches[0]
+            jobs[first] = merged
+            for index in reversed(matches[1:]):
+                del jobs[index]
+            self._persist_unlocked(current, jobs)
 
     def add_note(
         self,
@@ -1241,6 +1300,11 @@ def _merge_jobs(candidates: Sequence[JobRecord]) -> JobRecord:
         notes.values(),
         key=lambda note: (note.created_at, str(note.id)),
     )
+    user_tags: dict[str, UserTag] = {}
+    for candidate in candidates:
+        for tag in candidate.user_tags:
+            user_tags.setdefault(tag.name.casefold(), tag.model_copy(deep=True))
+    profile.user_tags = list(user_tags.values())
     for field_name in (
         "manual_posted_at",
         "manual_company_size",

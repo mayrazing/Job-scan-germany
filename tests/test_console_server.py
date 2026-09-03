@@ -62,6 +62,7 @@ class RecordingWorkflow:
     def __init__(self, paths: AppPaths) -> None:
         self.paths = paths
         self.runs: list[tuple[str, bytes, SetupAnswers]] = []
+        self.schedules: list[tuple[str, bytes, SetupAnswers]] = []
         self.remove_count = 0
         self.status_count = 0
         self.busy = False
@@ -103,6 +104,23 @@ class RecordingWorkflow:
             raise WebWorkflowBusy("A setup and scan is already running.")
         self.runs.append((filename, payload, answers))
         return self.completed_result()
+
+    def save_schedule(
+        self,
+        filename: str,
+        payload: bytes,
+        answers: SetupAnswers,
+    ) -> SchedulerState:
+        if self.busy:
+            raise WebWorkflowBusy("A setup and scan is already running.")
+        self.schedules.append((filename, payload, answers))
+        return SchedulerState(
+            backend="cron",
+            installed=True,
+            local_time=answers.scheduler.local_time,
+            executable=Path("/opt/job-scan/bin/job-scan"),
+            managed_location="fixture:scheduler",
+        )
 
     def read_run(self, run_id: str) -> dict[str, object] | None:
         if self.run_state is None or self.run_state["run_id"] != run_id:
@@ -1420,9 +1438,26 @@ def test_setup_page_prefills_every_editable_field_from_saved_answers(
     assert page.select_one("#glassdoor-de-limit").get("value") == "31"
     assert page.select_one("#simplify-de-limit").get("value") == "37"
     assert page.select_one("#staffing-penalty") is None
-    assert page.select_one("#claude-batch-size").get("value") == "4"
+    assert page.select_one("#claude-batch-size") is None
     assert page.select_one("#scan-time").get("value") == "06:45"
     assert page.select_one("#company-list") is None
+
+
+def test_setup_page_has_separate_save_schedule_and_run_scan_buttons(
+    console_client: tuple[TestClient, RecordingWorkflow],
+) -> None:
+    client, _workflow = console_client
+
+    page = BeautifulSoup(client.get("/setup").text, "html.parser")
+
+    save_schedule = page.select_one("#save-schedule")
+    run_scan = page.select_one("#run-scan")
+    assert save_schedule is not None
+    assert save_schedule.get("type") == "button"
+    assert save_schedule.get_text(strip=True) == "Save Daily scan time"
+    assert run_scan is not None
+    assert run_scan.get("type") == "submit"
+    assert run_scan.get_text(strip=True) == "Run scan"
 
 
 def test_setup_and_scan_endpoint_validates_form_and_returns_real_summary(
@@ -1474,6 +1509,33 @@ def test_setup_and_scan_endpoint_validates_form_and_returns_real_summary(
     assert answers.staffing_penalty == 10
     assert answers.claude.thinking_enabled is True
     assert answers.scheduler.local_time is None
+
+
+def test_save_schedule_endpoint_saves_setup_without_starting_a_scan(
+    console_client: tuple[TestClient, RecordingWorkflow],
+) -> None:
+    client, workflow = console_client
+    open_console(client)
+    settings = json.loads(settings_json())
+    settings["scheduler"] = {"local_time": "07:15"}
+
+    response = client.post(
+        "/api/schedule",
+        files={
+            "settings": (None, json.dumps(settings)),
+            "resume": ("scheduled.docx", b"scheduled resume"),
+        },
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"installed": True, "local_time": "07:15"}
+    assert len(workflow.schedules) == 1
+    filename, payload, answers = workflow.schedules[0]
+    assert filename == "scheduled.docx"
+    assert payload == b"scheduled resume"
+    assert answers.scheduler.local_time == "07:15"
+    assert workflow.runs == []
 
 
 def test_setup_and_scan_uses_the_saved_global_ai_selection(

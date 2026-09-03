@@ -67,6 +67,7 @@ from job_scan.manual_job_import_workflow import (
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
 from job_scan.review_server import create_review_app
+from job_scan.scan_service import ScanRunState, write_scan_run_state
 from job_scan.search_history import SearchHistoryStore
 from job_scan.setup_service import SetupAnswers, SetupPreparation
 
@@ -1124,6 +1125,73 @@ def test_global_job_notes_can_be_added_edited_and_deleted(tmp_path: Path) -> Non
     assert edited.notes[0].created_at == created_at
     assert deleted is not None
     assert deleted.notes == []
+
+
+def test_global_job_user_tag_can_be_added_and_deleted(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        added_response = client.post(
+            "/api/global-jobs/tracked/tags",
+            json={"name": "Backend", "color": "#2F6F5E"},
+            headers=HEADERS,
+        )
+        added = global_jobs.find("tracked")
+        deleted_response = client.request(
+            "DELETE",
+            "/api/global-jobs/tracked/tags",
+            json={"name": "backend"},
+            headers=HEADERS,
+        )
+
+    deleted = global_jobs.find("tracked")
+    assert added_response.status_code == 200
+    assert added_response.json() == {"name": "Backend", "color": "#2F6F5E"}
+    assert added is not None
+    assert [tag.name for tag in added.user_tags] == ["Backend"]
+    assert deleted_response.status_code == 204
+    assert deleted is not None
+    assert deleted.user_tags == []
+
+
+def test_global_job_user_tag_rejects_invalid_color(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    global_jobs = GlobalJobStore(paths)
+    global_jobs.set_status(
+        _job("tracked", external_id="tracked"),
+        UserStatus.SAVED,
+        NOW,
+    )
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        global_job_store=global_jobs,
+    )
+
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.post(
+            "/api/global-jobs/tracked/tags",
+            json={"name": "Backend", "color": "red"},
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert global_jobs.find("tracked").user_tags == []
 
 
 def test_history_status_hides_matching_review_without_changing_history(
@@ -3113,7 +3181,7 @@ def test_background_tasks_endpoint_lists_every_active_task_type(tmp_path: Path) 
             {
                 "task_id": "scan:scan-1",
                 "kind": "scan",
-                "label": "Save and run scan",
+                "label": "Run scan",
                 "status": "running",
                 "message": "Reviewing complete job descriptions...",
                 "progress_percent": 60.0,
@@ -3816,3 +3884,110 @@ def test_manual_job_reevaluation_claims_workflow_before_preparing_profile(
                 first_responses[0].json()["import_id"],
             )
             assert state["status"] == "complete"
+
+
+def _persist_cli_scan_state(paths: AppPaths, *, status: str) -> None:
+    write_scan_run_state(
+        paths,
+        ScanRunState(
+            run_id="cli-1",
+            status=status,  # type: ignore[arg-type]
+            stage="review" if status == "running" else None,
+            message=(
+                "Reviewing complete job descriptions..."
+                if status == "running"
+                else "Could not publish scan results."
+            ),
+            progress_percent=80.0,
+            updated_at=NOW,
+        ),
+    )
+
+
+def _background_tasks_for(paths: AppPaths, workflow: object) -> list[dict]:
+    app = create_review_app(
+        _repository(paths),
+        TOKEN,
+        frozenset({ORIGIN}),
+        workflow=workflow,
+    )
+    with TestClient(app, base_url=ORIGIN) as client:
+        _open_session(client)
+        response = client.get("/api/background-tasks")
+    assert response.status_code == 200
+    return response.json()["tasks"]
+
+
+def test_background_tasks_show_external_command_line_scan(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _persist_cli_scan_state(paths, status="running")
+    workflow = SimpleNamespace(read_current_run=lambda: None, is_busy=lambda: False)
+
+    with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False):
+        tasks = _background_tasks_for(paths, workflow)
+
+    assert {
+        "task_id": "cli-scan:cli-1",
+        "kind": "scan",
+        "label": "Command-line scan",
+        "status": "running",
+        "message": "Reviewing complete job descriptions...",
+        "progress_percent": 80.0,
+        "subject_key": None,
+    } in tasks
+
+
+def test_background_tasks_hide_command_line_scan_of_this_server(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _persist_cli_scan_state(paths, status="running")
+    workflow = SimpleNamespace(read_current_run=lambda: None, is_busy=lambda: True)
+
+    with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False):
+        tasks = _background_tasks_for(paths, workflow)
+
+    assert tasks == []
+
+
+def test_background_tasks_hide_leftover_state_of_a_killed_scan(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _persist_cli_scan_state(paths, status="running")
+    workflow = SimpleNamespace(read_current_run=lambda: None, is_busy=lambda: False)
+
+    tasks = _background_tasks_for(paths, workflow)
+
+    assert tasks == []
+
+
+def test_background_tasks_show_failed_command_line_scan(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _persist_cli_scan_state(paths, status="failed")
+    workflow = SimpleNamespace(read_current_run=lambda: None, is_busy=lambda: False)
+
+    tasks = _background_tasks_for(paths, workflow)
+
+    assert [
+        {
+            "task_id": "cli-scan:cli-1",
+            "kind": "scan",
+            "label": "Command-line scan",
+            "status": "failed",
+            "message": "Could not publish scan results.",
+            "progress_percent": 80.0,
+            "subject_key": None,
+        }
+    ] == tasks
+
+
+def test_background_tasks_hide_completed_command_line_scan(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    paths.ensure_directories()
+    _persist_cli_scan_state(paths, status="complete")
+    workflow = SimpleNamespace(read_current_run=lambda: None, is_busy=lambda: False)
+
+    tasks = _background_tasks_for(paths, workflow)
+
+    assert tasks == []

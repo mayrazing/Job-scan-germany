@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sys
+import tempfile
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -151,6 +154,123 @@ class ScanProgress:
 
 ScanProgressCallback = Callable[[ScanProgress], None]
 PublishedSnapshotCallback = Callable[[ScanSummary, Snapshot], None]
+
+SCAN_STAGE_MESSAGES = {
+    "sources": "Searching configured job sources...",
+    "review": "Reviewing complete job descriptions...",
+    "company_size": "Checking company sizes...",
+    "publish": "Publishing review queue...",
+}
+
+
+class ScanRunState(BaseModel):
+    """Persist one command-line scan's progress for other processes to read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(min_length=1)
+    status: Literal["running", "complete", "failed"]
+    stage: ScanProgressStage | None
+    message: str
+    progress_percent: float = Field(ge=0, le=100)
+    updated_at: datetime
+
+
+def read_scan_run_state(paths: AppPaths) -> ScanRunState | None:
+    """Load the persisted command-line scan state, ignoring missing or unusable files."""
+    try:
+        payload = json.loads(paths.scan_run_state.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    try:
+        return ScanRunState.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def write_scan_run_state(paths: AppPaths, state: ScanRunState) -> None:
+    """Atomically replace the persisted command-line scan state file."""
+    paths.scan_run_state.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=paths.scan_run_state.parent,
+        prefix=f".{paths.scan_run_state.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(state.model_dump_json())
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, paths.scan_run_state)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def scan_progress_percent(current: ScanProgress) -> float:
+    """Map real scan progress into the existing browser progress-bar range."""
+    if current.stage == "sources":
+        source = current.source_progress
+        if source is None or source.total_sources == 0:
+            return 35
+        return round(
+            35 + (40 * source.completed_sources / source.total_sources),
+            1,
+        )
+    if current.stage == "publish":
+        return 99
+    company_size = current.company_size
+    if current.stage == "company_size":
+        if company_size is None or company_size.total_companies == 0:
+            return 95
+        return round(
+            95
+            + (4 * company_size.completed_companies / company_size.total_companies),
+            1,
+        )
+    review = current.review
+    if review is None or review.total_batches == 0:
+        return 75
+    return round(
+        75 + (20 * review.completed_batches / review.total_batches),
+        1,
+    )
+
+
+def scan_progress_message(current: ScanProgress) -> str:
+    """Describe the current stage with review counts when batches exist."""
+    source = current.source_progress
+    if current.stage == "sources" and source is not None:
+        job_label = "job" if source.found_jobs == 1 else "jobs"
+        warning_text = ""
+        if source.warning_count:
+            warning_label = "warning" if source.warning_count == 1 else "warnings"
+            warning_text = f", {source.warning_count} {warning_label}"
+        return (
+            "Searching job sources: "
+            f"{source.completed_sources}/{source.total_sources} sources, "
+            f"{source.found_jobs} {job_label} found{warning_text}..."
+        )
+    company_size = current.company_size
+    if (
+        current.stage == "company_size"
+        and company_size is not None
+        and company_size.total_companies > 0
+    ):
+        return (
+            "Checking company sizes: "
+            f"{company_size.completed_companies}/{company_size.total_companies} "
+            "companies..."
+        )
+    review = current.review
+    if current.stage != "review" or review is None or review.total_batches == 0:
+        return SCAN_STAGE_MESSAGES[current.stage]
+    return (
+        "Reviewing complete job descriptions: "
+        f"{review.completed_batches}/{review.total_batches} batches, "
+        f"{review.completed_jobs}/{review.total_jobs} jobs..."
+    )
 
 
 class ScanService:

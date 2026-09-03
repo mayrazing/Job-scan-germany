@@ -17,6 +17,7 @@ from job_scan.domain import (
     Snapshot,
     TrackerGroup,
     TrackerStatus,
+    UserTag,
     default_tracker_groups,
     tracker_status_id,
 )
@@ -121,6 +122,7 @@ class JobCard:
     expected_salary: SalaryValue | None
     offer_salary: SalaryValue | None
     notes: tuple[JobNote, ...]
+    user_tags: tuple[UserTag, ...]
     machine_status: MachineStatus
     effective_status: MachineStatus
     availability_status: AvailabilityStatus
@@ -337,6 +339,7 @@ def _card(
             else None
         ),
         notes=tuple(note.model_copy(deep=True) for note in job.notes),
+        user_tags=tuple(tag.model_copy(deep=True) for tag in job.user_tags),
         machine_status=job.machine_status,
         effective_status=status,
         availability_status=job.availability_status,

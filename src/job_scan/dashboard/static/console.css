@@ -289,6 +289,10 @@
   text-transform: uppercase;
 }
 
+.background-task-status.failed {
+  color: var(--danger);
+}
+
 .background-task-label,
 .background-task-message {
   margin: 0;
@@ -982,9 +986,23 @@ label > small {
 }
 
 .job-tracker-filters {
-  grid-template-columns: minmax(0, 16rem) max-content minmax(10rem, 1fr) minmax(0, 12rem);
+  grid-template-columns:
+    minmax(13rem, 16rem)
+    max-content
+    minmax(10rem, 1fr)
+    minmax(0, 13rem)
+    minmax(0, 12rem);
   column-gap: clamp(1rem, 3vw, 2rem);
   align-items: end;
+}
+
+.job-tracker-filters .manual-job-button,
+.job-tracker-filters .tracker-group-settings-button,
+.job-tracker-filters .form-control,
+.job-tracker-filters .form-select,
+.job-tracker-filters .ts-control {
+  height: 44px;
+  min-height: 44px;
 }
 
 .tracker-source-filter {
@@ -1093,7 +1111,36 @@ label > small {
   color: #FFFFFF;
 }
 
+@media (max-width: 64rem) {
+  .job-tracker-filters {
+    grid-template-columns: minmax(13rem, 16rem) max-content minmax(10rem, 1fr);
+  }
+
+  .job-tracker-filters > .tag-filter {
+    grid-column: 2;
+  }
+
+  .job-tracker-filters > .sort-filter {
+    grid-column: 3;
+  }
+}
+
+@media (max-width: 50rem) {
+  .job-tracker-filters {
+    grid-template-columns: 12rem max-content minmax(10rem, 1fr);
+  }
+}
+
 @media (max-width: 42rem) {
+  .job-tracker-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .job-tracker-filters > .tag-filter,
+  .job-tracker-filters > .sort-filter {
+    grid-column: auto;
+  }
+
   .tracker-group-row,
   .tracker-group-create {
     grid-template-columns: 1fr;
@@ -1122,6 +1169,7 @@ label > small {
 
 .source-filter label,
 .url-filter label,
+.tag-filter label,
 .sort-filter label {
   display: grid;
   gap: 0.35rem;
@@ -1129,10 +1177,27 @@ label > small {
 
 .source-filter,
 .url-filter,
+.tag-filter,
 .sort-filter,
 .source-filter .ts-wrapper,
-.source-filter .ts-control {
+.source-filter .ts-control,
+.tag-filter .ts-wrapper,
+.tag-filter .ts-control {
   min-width: 0;
+}
+
+.tag-filter .ts-control {
+  min-height: 44px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.tag-filter .ts-wrapper.multi .ts-control > .item {
+  max-width: 8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 0.3rem;
 }
 
 .source-filter .ts-control {

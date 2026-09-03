@@ -10,14 +10,17 @@ def test_job_scan_home_overrides_default(tmp_path: Path) -> None:
 
     assert paths.root == tmp_path
     assert paths.config_toml == tmp_path / "config.toml"
+    assert paths.scheduled_config_toml == tmp_path / "scheduled-config.toml"
     assert paths.job_tracker_config_toml == tmp_path / "job-tracker-config.toml"
     assert paths.profile_md == tmp_path / "profile.md"
+    assert paths.scheduled_profile_md == tmp_path / "scheduled-profile.md"
     assert paths.codex_home == tmp_path / "codex-home"
     assert paths.jobs_jsonl == tmp_path / "output" / "jobs.jsonl"
     assert paths.dashboard_html == tmp_path / "output" / "index.html"
     assert paths.lock_file == tmp_path / "output" / ".data.lock"
     assert paths.scan_lock_file == tmp_path / "output" / ".scan.lock"
     assert paths.workflow_lock_file == tmp_path / "output" / ".workflow.lock"
+    assert paths.schedule_lock_file == tmp_path / "output" / ".schedule.lock"
     assert paths.history_dir == tmp_path / "history"
     assert paths.history_lock_file == tmp_path / "history" / ".history.lock"
     assert paths.job_snapshots_dir == tmp_path / "job-snapshots"

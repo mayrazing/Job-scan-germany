@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from job_scan.claude_process import ClaudeProcessError
 from job_scan.company_size import CompanySizeProgress
-from job_scan.config import AppConfig, SchedulerSettings, load_config, save_config
+from job_scan.config import SchedulerSettings, load_config, save_config
 from job_scan.domain import Snapshot
 from job_scan.locking import FileRWLock, LockUnavailable
 from job_scan.paths import AppPaths
@@ -25,6 +25,8 @@ from job_scan.scan_service import (
     ScanService,
     ScanSummary,
     SourceProgress,
+    scan_progress_message,
+    scan_progress_percent,
 )
 from job_scan.scheduler import SchedulerBackend, SchedulerError, SchedulerState
 from job_scan.search_history import SearchHistoryStore
@@ -76,16 +78,8 @@ class WebRunState(BaseModel):
     error: str | None = None
 
 
-_STAGE_MESSAGES = {
-    "sources": "Searching configured job sources...",
-    "review": "Reviewing complete job descriptions...",
-    "company_size": "Checking company sizes...",
-    "publish": "Publishing review queue...",
-}
-
-
 class WebWorkflow:
-    """Run one browser-submitted setup, schedule reconciliation, and scan."""
+    """Run manual browser scans and manage one separate daily setup."""
 
     def __init__(
         self,
@@ -174,6 +168,121 @@ class WebWorkflow:
         finally:
             self._run_lock.release()
 
+    def save_schedule(
+        self,
+        resume_filename: str,
+        resume_bytes: bytes,
+        answers: SetupAnswers,
+    ) -> SchedulerState:
+        """Validate and save one dedicated scheduled setup without scanning."""
+        if answers.scheduler.local_time is None:
+            raise SchedulerError("Daily scan time is required.")
+        try:
+            with FileRWLock(
+                self._paths.schedule_lock_file
+            ).exclusive(blocking=False):
+                scheduled_answers = answers.model_copy(
+                    update={
+                        "candidate_name": (
+                            Path(resume_filename).stem.strip() or "Candidate"
+                        ),
+                    }
+                )
+                resume_path, _created = store_uploaded_resume(
+                    self._paths,
+                    resume_filename,
+                    resume_bytes,
+                )
+                prepared = self._setup_service.prepare(
+                    resume_path,
+                    scheduled_answers,
+                )
+                previous_profile = _read_optional_bytes(
+                    self._paths.scheduled_profile_md
+                )
+                previous_config = _read_optional_bytes(
+                    self._paths.scheduled_config_toml
+                )
+                self._setup_service.publish_prepared(
+                    prepared,
+                    profile_path=self._paths.scheduled_profile_md,
+                    config_path=self._paths.scheduled_config_toml,
+                )
+                try:
+                    return self._scheduler.install(
+                        prepared.config,
+                        self._paths,
+                        self._executable,
+                    )
+                except BaseException:
+                    self._setup_service.restore_pair(
+                        previous_profile,
+                        previous_config,
+                        profile_path=self._paths.scheduled_profile_md,
+                        config_path=self._paths.scheduled_config_toml,
+                    )
+                    raise
+        except LockUnavailable:
+            raise WebWorkflowBusy(
+                "A scheduler change is already in progress."
+            ) from None
+
+    def reconcile_schedule(self) -> SchedulerState:
+        """Migrate an installed legacy task and reconcile the saved daily setup."""
+        if not self._run_lock.acquire(blocking=False):
+            raise WebWorkflowBusy("A setup and scan is already running.")
+        try:
+            try:
+                with FileRWLock(
+                    self._paths.workflow_lock_file
+                ).exclusive(blocking=False), FileRWLock(
+                    self._paths.schedule_lock_file
+                ).exclusive(blocking=False):
+                    state = self._scheduler.status(self._paths)
+                    scheduled_config_exists = (
+                        self._paths.scheduled_config_toml.is_file()
+                    )
+                    scheduled_profile_exists = self._paths.scheduled_profile_md.is_file()
+                    if scheduled_config_exists != scheduled_profile_exists:
+                        raise SchedulerError("The saved daily setup is incomplete.")
+                    seeded = False
+                    if not scheduled_config_exists:
+                        if not state.installed:
+                            return state
+                        current_config = self._paths.config_toml.read_bytes()
+                        current_profile = self._paths.profile_md.read_bytes()
+                        self._setup_service.restore_pair(
+                            current_profile,
+                            current_config,
+                            profile_path=self._paths.scheduled_profile_md,
+                            config_path=self._paths.scheduled_config_toml,
+                        )
+                        seeded = True
+                    config = load_config(self._paths.scheduled_config_toml)
+                    if config.scheduler.local_time is None:
+                        return state
+                    try:
+                        return self._scheduler.install(
+                            config,
+                            self._paths,
+                            self._executable,
+                        )
+                    except BaseException:
+                        if seeded:
+                            self._setup_service.restore_pair(
+                                None,
+                                None,
+                                profile_path=self._paths.scheduled_profile_md,
+                                config_path=self._paths.scheduled_config_toml,
+                            )
+                        raise
+            except LockUnavailable:
+                raise WebWorkflowBusy(
+                    "Another setup or scan is already running."
+                ) from None
+        finally:
+            self._run_lock.release()
+
     def _run_once(
         self,
         resume_filename: str,
@@ -208,10 +317,6 @@ class WebWorkflow:
         )
         previous_profile_bytes = _read_optional_bytes(self._paths.profile_md)
         previous_config_bytes = _read_optional_bytes(self._paths.config_toml)
-        try:
-            previous_config = load_config(self._paths.config_toml)
-        except (OSError, ValueError):
-            previous_config = None
         resume_path, _created = store_uploaded_resume(
             self._paths,
             resume_filename,
@@ -223,7 +328,6 @@ class WebWorkflow:
             return self._complete_locked(
                 resume_filename,
                 resume_path,
-                answers,
                 setup_result,
                 progress,
             )
@@ -232,27 +336,18 @@ class WebWorkflow:
                 previous_profile_bytes,
                 previous_config_bytes,
             )
-            self._restore_previous_schedule(previous_config)
             raise
 
     def _complete_locked(
         self,
         resume_filename: str,
         resume_path: Path,
-        answers: SetupAnswers,
         setup_result: SetupResult,
         progress: Callable[[ScanProgress], None] | None,
     ) -> WebRunResult:
-        """Reconcile schedule, scan, and archive under the workflow lock."""
+        """Scan and archive one manual setup without changing its schedule."""
 
-        if setup_result.config.scheduler.local_time is None:
-            schedule = self._scheduler.remove(self._paths)
-        else:
-            schedule = self._scheduler.install(
-                setup_result.config,
-                self._paths,
-                self._executable,
-            )
+        schedule = self._scheduler.status(self._paths)
         profile_bytes = setup_result.profile_path.read_bytes()
         config_bytes = self._paths.config_toml.read_bytes()
 
@@ -280,13 +375,6 @@ class WebWorkflow:
                 local_time=schedule.local_time,
             ),
         )
-
-    def _restore_previous_schedule(self, config: AppConfig | None) -> None:
-        """Restore the scheduler state paired with the prior setup after failure."""
-        if config is None or config.scheduler.local_time is None:
-            self._scheduler.remove(self._paths)
-            return
-        self._scheduler.install(config, self._paths, self._executable)
 
     def _run_in_background(
         self,
@@ -331,8 +419,8 @@ class WebWorkflow:
             run_id,
             status="running",
             stage=current.stage,
-            message=_progress_message(current),
-            progress_percent=_progress_percent(current),
+            message=scan_progress_message(current),
+            progress_percent=scan_progress_percent(current),
             source_progress=current.source_progress,
             review_progress=current.review,
             company_size_progress=current.company_size,
@@ -349,25 +437,22 @@ class WebWorkflow:
 
     def remove_schedule(self) -> SchedulerState:
         """Remove the owned native task and clear its saved local time."""
-        if not self._run_lock.acquire(blocking=False):
-            raise WebWorkflowBusy("A setup and scan is already running.")
         try:
-            try:
-                with FileRWLock(self._paths.workflow_lock_file).exclusive(blocking=False):
-                    state = self._scheduler.remove(self._paths)
-                    if self._paths.config_toml.is_file():
-                        config = load_config(self._paths.config_toml)
-                        config = config.model_copy(
-                            update={"scheduler": SchedulerSettings()}
-                        )
-                        save_config(self._paths.config_toml, config)
-                    return state
-            except LockUnavailable:
-                raise WebWorkflowBusy(
-                    "Another setup or scan is already running."
-                ) from None
-        finally:
-            self._run_lock.release()
+            with FileRWLock(
+                self._paths.schedule_lock_file
+            ).exclusive(blocking=False):
+                state = self._scheduler.remove(self._paths)
+                if self._paths.scheduled_config_toml.is_file():
+                    config = load_config(self._paths.scheduled_config_toml)
+                    config = config.model_copy(
+                        update={"scheduler": SchedulerSettings()}
+                    )
+                    save_config(self._paths.scheduled_config_toml, config)
+                return state
+        except LockUnavailable:
+            raise WebWorkflowBusy(
+                "A scheduler change is already in progress."
+            ) from None
 
     def schedule_status(self) -> SchedulerState:
         """Return the current owned native scheduler state without changing it."""
@@ -375,9 +460,14 @@ class WebWorkflow:
 
     def load_setup_answers(self) -> SetupAnswers | None:
         """Return saved browser setup values when available."""
-        try:
-            config = load_config(self._paths.config_toml)
-        except (OSError, ValueError):
+        config = None
+        for path in (self._paths.config_toml, self._paths.scheduled_config_toml):
+            try:
+                config = load_config(path)
+                break
+            except (OSError, ValueError):
+                continue
+        if config is None:
             return None
         return SetupAnswers.model_validate(
             config.model_dump(
@@ -480,71 +570,6 @@ def _read_optional_bytes(path: Path) -> bytes | None:
         return path.read_bytes()
     except FileNotFoundError:
         return None
-
-
-def _progress_percent(current: ScanProgress) -> float:
-    """Map real scan progress into the existing browser progress-bar range."""
-    if current.stage == "sources":
-        source = current.source_progress
-        if source is None or source.total_sources == 0:
-            return 35
-        return round(
-            35 + (40 * source.completed_sources / source.total_sources),
-            1,
-        )
-    if current.stage == "publish":
-        return 99
-    company_size = current.company_size
-    if current.stage == "company_size":
-        if company_size is None or company_size.total_companies == 0:
-            return 95
-        return round(
-            95
-            + (4 * company_size.completed_companies / company_size.total_companies),
-            1,
-        )
-    review = current.review
-    if review is None or review.total_batches == 0:
-        return 75
-    return round(
-        75 + (20 * review.completed_batches / review.total_batches),
-        1,
-    )
-
-
-def _progress_message(current: ScanProgress) -> str:
-    """Describe the current stage with review counts when batches exist."""
-    source = current.source_progress
-    if current.stage == "sources" and source is not None:
-        job_label = "job" if source.found_jobs == 1 else "jobs"
-        warning_text = ""
-        if source.warning_count:
-            warning_label = "warning" if source.warning_count == 1 else "warnings"
-            warning_text = f", {source.warning_count} {warning_label}"
-        return (
-            "Searching job sources: "
-            f"{source.completed_sources}/{source.total_sources} sources, "
-            f"{source.found_jobs} {job_label} found{warning_text}..."
-        )
-    company_size = current.company_size
-    if (
-        current.stage == "company_size"
-        and company_size is not None
-        and company_size.total_companies > 0
-    ):
-        return (
-            "Checking company sizes: "
-            f"{company_size.completed_companies}/{company_size.total_companies} "
-            "companies..."
-        )
-    review = current.review
-    if current.stage != "review" or review is None or review.total_batches == 0:
-        return _STAGE_MESSAGES[current.stage]
-    return (
-        "Reviewing complete job descriptions: "
-        f"{review.completed_batches}/{review.total_batches} batches, "
-        f"{review.completed_jobs}/{review.total_jobs} jobs..."
-    )
 
 
 def _safe_run_error(error: BaseException) -> str:

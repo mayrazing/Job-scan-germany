@@ -41,8 +41,12 @@
   const sourceFilterKey = "job-scan.review-source-filter.v1";
   const globalSourceFilterKey = "job-scan.global-source-filter.v1";
   let jobBatchController = null;
+  let userTagController = null;
 
   const cardSources = (card) => card.dataset.sources.split(",").filter(Boolean);
+  const cardUserTags = (card) => [
+    ...card.querySelectorAll("[data-user-tag-name]"),
+  ].map((tag) => tag.dataset.userTagName);
 
   const sourceLabels = {
     arbeitsagentur: "Arbeitsagentur",
@@ -234,12 +238,18 @@
     companyIndustry,
     languageRequirement,
     jobUrl = "",
+    userTags = [],
   ) => {
     const selected = new Set(values);
+    const selectedTags = new Set(userTags);
     cards.forEach((card) => {
       const matchesSource = cardSources(card).some((source) => selected.has(source));
+      const matchesTag = selectedTags.size === 0 || cardUserTags(card).some(
+        (tag) => selectedTags.has(tag),
+      );
       card.hidden =
         !matchesSource ||
+        !matchesTag ||
         !postedWithinWindow(card, postedWithinDays) ||
         !matchesMinimumScore(card, minimumScore) ||
         !matchesCompanySize(card, companySizeMinimum) ||
@@ -373,6 +383,290 @@
     document.addEventListener("job-scan:review-updated", applyCurrentFilters);
   };
 
+  const initializeUserTags = () => {
+    const filter = document.querySelector("#global-tag-filter");
+    const globalBlock = document.querySelector('[data-review-block="global"]');
+    if (!filter || !globalBlock) return null;
+
+    let tagDefinitions = new Map();
+    let filterControl = null;
+    const cardControls = new Set();
+    const normalizedTagName = (name) => name.trim().toLocaleLowerCase();
+    const activeGroup = () => {
+      const groupId = globalBlock.querySelector(
+        '[data-review-group-tab][aria-current="page"]',
+      )?.dataset.reviewGroupTab;
+      return groupId
+        ? globalBlock.querySelector(
+          `.review-groups > .job-group#${CSS.escape(groupId)}`,
+        )
+        : null;
+    };
+    const activeCards = () => [
+      ...activeGroup()?.querySelectorAll(":scope > .card-grid > .job-card") ?? [],
+    ];
+    const allCards = () => [
+      ...globalBlock.querySelectorAll(".review-groups .job-card"),
+    ];
+    const definitionsFor = (cards) => {
+      const definitions = new Map();
+      cards.forEach((card) => {
+        card.querySelectorAll("[data-user-tag-name]").forEach((tag) => {
+          const name = tag.dataset.userTagName;
+          if (!name) return;
+          definitions.set(normalizedTagName(name), {
+            name,
+            color: tag.dataset.userTagColor || "#2F6F5E",
+          });
+        });
+      });
+      return new Map(
+        [...definitions.entries()].sort((left, right) => (
+          left[1].name.localeCompare(right[1].name)
+        )),
+      );
+    };
+    const replaceOptions = (control, definitions, selected = []) => {
+      const availableNames = new Set(
+        [...definitions.values()].map((tag) => tag.name),
+      );
+      const retained = selected.filter((name) => availableNames.has(name));
+      control.clear(true);
+      control.clearOptions();
+      definitions.forEach((tag) => {
+        control.addOption({
+          value: tag.name,
+          text: tag.name,
+          color: tag.color,
+        });
+      });
+      retained.forEach((name) => control.addItem(name, true));
+      control.refreshOptions(false);
+    };
+    const updateFilterPlaceholder = () => {
+      if (!filterControl) return;
+      filterControl.control_input.placeholder = filterControl.items.length
+        ? ""
+        : "Filter by tag";
+    };
+    const initializeCardSelect = (select) => {
+      if (select.tomselect) return select.tomselect;
+      const colorInput = select.form?.elements.namedItem("color");
+      const control = new TomSelect(select, {
+        create: true,
+        createOnBlur: true,
+        dropdownParent: "body",
+        persist: false,
+        maxItems: 1,
+        closeAfterSelect: true,
+        placeholder: "input tag",
+        render: {
+          option(data, escape) {
+            const color = data.color || "#2F6F5E";
+            return `
+              <div class="job-user-tag-option">
+                <span
+                  class="job-user-tag-option-color"
+                  data-user-tag-option-color="${escape(color)}"
+                  style="--tag-color: ${escape(color)}"
+                ></span>
+                <span class="job-user-tag-option-name">${escape(data.text)}</span>
+              </div>
+            `;
+          },
+        },
+        onChange(value) {
+          const definition = tagDefinitions.get(normalizedTagName(value || ""));
+          if (definition && colorInput) colorInput.value = definition.color;
+        },
+      });
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "job-user-tag-toggle";
+      toggle.dataset.userTagToggle = "";
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.setAttribute("aria-haspopup", "listbox");
+      toggle.setAttribute("aria-label", "Show tag options");
+      toggle.title = "Show tag options";
+      toggle.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      toggle.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (control.isOpen) {
+          control.close();
+        } else {
+          control.focus();
+          control.open();
+        }
+      });
+      control.on("dropdown_open", () => {
+        toggle.setAttribute("aria-expanded", "true");
+      });
+      control.on("dropdown_close", () => {
+        toggle.setAttribute("aria-expanded", "false");
+      });
+      const scrollContainer = select.closest(".review-groups");
+      const repositionDropdown = () => {
+        if (control.isOpen) control.positionDropdown();
+      };
+      scrollContainer?.addEventListener("scroll", repositionDropdown, {
+        passive: true,
+      });
+      control.on("destroy", () => {
+        scrollContainer?.removeEventListener("scroll", repositionDropdown);
+      });
+      control.wrapper.append(toggle);
+      cardControls.add(control);
+      return control;
+    };
+    const sync = () => {
+      cardControls.forEach((control) => {
+        if (control.input.isConnected) return;
+        control.destroy();
+        cardControls.delete(control);
+      });
+      const cards = activeCards();
+      tagDefinitions = definitionsFor(allCards());
+      replaceOptions(filterControl, tagDefinitions, filterControl.items);
+      cards.forEach((card) => {
+        const select = card.querySelector("[data-user-tag-select]");
+        if (!select) return;
+        const control = initializeCardSelect(select);
+        replaceOptions(control, tagDefinitions);
+      });
+    };
+    const addChip = (list, tag) => {
+      list.querySelector("[data-user-tag-empty]")?.remove();
+      const existing = [...list.querySelectorAll("[data-user-tag-name]")].find(
+        (chip) => normalizedTagName(chip.dataset.userTagName) === normalizedTagName(tag.name),
+      );
+      if (existing) return;
+      const chip = document.createElement("span");
+      chip.className = "job-user-tag";
+      chip.dataset.userTagName = tag.name;
+      chip.dataset.userTagColor = tag.color;
+      chip.style.setProperty("--tag-color", tag.color);
+      const label = document.createElement("span");
+      label.textContent = tag.name;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.deleteUserTag = "";
+      remove.ariaLabel = `Remove ${tag.name}`;
+      remove.title = `Remove ${tag.name}`;
+      remove.textContent = "×";
+      chip.append(label, remove);
+      list.append(chip);
+    };
+    const showEmptyTagList = (list) => {
+      if (list.querySelector("[data-user-tag-name]")) return;
+      const empty = document.createElement("span");
+      empty.className = "job-tag-empty";
+      empty.dataset.userTagEmpty = "";
+      empty.textContent = "No tags yet";
+      list.append(empty);
+    };
+
+    filterControl = new TomSelect(filter, {
+      plugins: {
+        input_autogrow: {},
+        remove_button: { title: "Remove" },
+      },
+      closeAfterSelect: false,
+      hideSelected: true,
+      maxItems: null,
+      placeholder: "Filter by tag",
+      onChange() {
+        document.dispatchEvent(new CustomEvent("job-scan:tag-filter-changed"));
+      },
+    });
+    filterControl.on("change", updateFilterPlaceholder);
+
+    document.addEventListener("submit", async (event) => {
+      const form = event.target.closest("[data-user-tag-form]");
+      if (!form) return;
+      event.preventDefault();
+      const select = form.querySelector("[data-user-tag-select]");
+      const control = select?.tomselect;
+      const name = String(control?.getValue() || "").trim();
+      const color = form.elements.namedItem("color")?.value;
+      const button = form.querySelector('button[type="submit"]');
+      const errorMessage = form.querySelector("[data-user-tag-error]");
+      if (!name || !color || !button || !errorMessage) return;
+      button.disabled = true;
+      errorMessage.hidden = true;
+      try {
+        const response = await fetch(
+          `/api/global-jobs/${encodeURIComponent(form.dataset.userTagJobKey)}/tags`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, color }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await responseError(response, "Could not save this tag."));
+        }
+        const tag = await response.json();
+        addChip(form.closest("[data-job-tag-panel]").querySelector("[data-user-tag-list]"), tag);
+        control.clear(true);
+        sync();
+        document.dispatchEvent(new CustomEvent("job-scan:tag-filter-changed"));
+      } catch (error) {
+        errorMessage.textContent = error.message;
+        errorMessage.hidden = false;
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-delete-user-tag]");
+      if (!button) return;
+      const chip = button.closest("[data-user-tag-name]");
+      const panel = button.closest("[data-job-tag-panel]");
+      const card = button.closest("[data-job-key]");
+      const errorMessage = panel?.querySelector("[data-user-tag-error]");
+      if (!chip || !panel || !card || !errorMessage) return;
+      button.disabled = true;
+      errorMessage.hidden = true;
+      try {
+        const response = await fetch(
+          `/api/global-jobs/${encodeURIComponent(card.dataset.jobKey)}/tags`,
+          {
+            method: "DELETE",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: chip.dataset.userTagName }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await responseError(response, "Could not remove this tag."));
+        }
+        const list = chip.closest("[data-user-tag-list]");
+        chip.remove();
+        showEmptyTagList(list);
+        sync();
+        document.dispatchEvent(new CustomEvent("job-scan:tag-filter-changed"));
+      } catch (error) {
+        errorMessage.textContent = error.message;
+        errorMessage.hidden = false;
+        button.disabled = false;
+      }
+    });
+
+    document.addEventListener("job-scan:review-updated", sync);
+    document.addEventListener("job-scan:review-group-changed", sync);
+    sync();
+    return {
+      selected: () => [...filterControl.items],
+      sync,
+    };
+  };
+
   const initializeGlobalSourceFilter = () => {
     const select = document.querySelector("#global-source-filter");
     if (!select) return;
@@ -433,6 +727,7 @@
         "",
         "",
         urlFilter?.value ?? "",
+        userTagController?.selected() ?? [],
       );
     };
     control = new TomSelect(select, {
@@ -463,6 +758,8 @@
     updateSourceSummary();
     applyGlobalFilters();
     urlFilter?.addEventListener("input", applyGlobalFilters);
+    document.addEventListener("job-scan:tag-filter-changed", applyGlobalFilters);
+    document.addEventListener("job-scan:review-group-changed", applyGlobalFilters);
     document.addEventListener("job-scan:review-updated", applyGlobalFilters);
   };
 
@@ -634,6 +931,7 @@
     if (details) details.open = true;
     if (navigation.closest('[data-review-block="global"]')) {
       updateAppliedSortAvailability(groupId);
+      document.dispatchEvent(new CustomEvent("job-scan:review-group-changed"));
     }
     if (updateHash) window.history.replaceState(null, "", `#${groupId}`);
   };
@@ -648,6 +946,10 @@
     if (urlFilter?.value) {
       urlFilter.value = "";
       urlFilter.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    const tagControl = document.querySelector("#global-tag-filter")?.tomselect;
+    if (tagControl?.items.length) {
+      tagControl.clear();
     }
   };
 
@@ -2266,6 +2568,7 @@
     );
     jobBatchController = initializeJobBatchMode();
     initializeSourceFilter();
+    userTagController = initializeUserTags();
     initializeGlobalSourceFilter();
     initializeGlobalSort();
     initializeManualJobImport();

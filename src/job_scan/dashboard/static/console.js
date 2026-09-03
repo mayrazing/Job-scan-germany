@@ -1,6 +1,7 @@
 (() => {
   const form = document.querySelector("#setup-form");
-  const submitButton = form.querySelector("button[type='submit']");
+  const runScanButton = document.querySelector("#run-scan");
+  const saveScheduleButton = document.querySelector("#save-schedule");
   const setupView = document.querySelector("#setup");
   const runView = document.querySelector("#run-view");
   const reviewView = document.querySelector("#review-view");
@@ -238,7 +239,14 @@
       kind.textContent = backgroundTaskKindLabels[task.kind] || "Task";
       const taskStatus = document.createElement("span");
       taskStatus.className = "background-task-status";
-      taskStatus.textContent = task.status === "waiting" ? "Waiting" : "Running";
+      if (task.status === "waiting") {
+        taskStatus.textContent = "Waiting";
+      } else if (task.status === "failed") {
+        taskStatus.textContent = "Failed";
+        taskStatus.classList.add("failed");
+      } else {
+        taskStatus.textContent = "Running";
+      }
       heading.append(kind, taskStatus);
 
       const label = document.createElement("p");
@@ -404,7 +412,7 @@
       ai_runtime: aiRuntime.value,
       claude: {
         ...selectedCliSettings(),
-        batch_size: Number(document.querySelector("#claude-batch-size").value),
+        batch_size: 2,
       },
     }));
     payload.append("resume", resume, resume.name);
@@ -888,8 +896,8 @@
 
   const syncScanSubmit = () => {
     const running = activeRunId !== null;
-    submitButton.disabled = running;
-    submitButton.textContent = running ? "Scan already running" : "Save and run scan";
+    runScanButton.disabled = running;
+    runScanButton.textContent = running ? "Scan already running" : "Run scan";
   };
 
   const resetRun = () => {
@@ -925,7 +933,7 @@
     runAiRuntime = submittedAiRuntime;
     runAiRuntimeName = submittedAiRuntimeName;
     syncRunReviewLabel();
-    submitButton.disabled = true;
+    runScanButton.disabled = true;
     setView("run");
     headerStatus.textContent = "Running";
     runPercent.textContent = "10%";
@@ -1072,7 +1080,7 @@
     german_level: document.querySelector("#german-level").tomselect.getValue(),
     claude: {
       ...selectedCliSettings(),
-      batch_size: document.querySelector("#claude-batch-size").value,
+      batch_size: 2,
     },
     scheduler: { local_time: scanTime.value },
   });
@@ -1121,7 +1129,6 @@
       "#glassdoor-de-limit": draft.glassdoor_de_limit,
       "#simplify-de-limit": draft.simplify_de_limit,
       "#minimum-company-size": draft.minimum_company_size,
-      "#claude-batch-size": draft.claude?.batch_size,
       "#scan-time": draft.scheduler?.local_time,
     };
     Object.entries(values).forEach(([selector, value]) => {
@@ -1695,12 +1702,11 @@
     }
   });
 
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  const buildSetupPayload = () => {
     if (!form.reportValidity()) return;
     const resume = form.elements.namedItem("resume");
     if (resume.files.length === 0) {
-      formError.textContent = "Choose a PDF or DOCX resume before starting the scan.";
+      formError.textContent = "Choose a PDF or DOCX resume.";
       formError.hidden = false;
       return;
     }
@@ -1712,13 +1718,19 @@
       formError.hidden = false;
       return;
     }
-
     saveSetupDraft();
     formError.hidden = true;
-    startRun();
     const payload = new FormData();
     payload.append("settings", JSON.stringify(settings));
     payload.append("resume", resume.files[0], resume.files[0].name);
+    return payload;
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const payload = buildSetupPayload();
+    if (!payload) return;
+    startRun();
     try {
       const response = await fetch("/api/setup-and-scan", {
         method: "POST",
@@ -1736,6 +1748,42 @@
         ? "Connection to scan service lost. Restart the service and try again."
         : error.message || "Setup or scan failed.";
       failRun(message);
+    }
+  });
+
+  saveScheduleButton.addEventListener("click", async () => {
+    if (!scanTime.value) {
+      formError.textContent = "Choose a Daily scan time before saving.";
+      formError.hidden = false;
+      scanTime.focus();
+      return;
+    }
+    const payload = buildSetupPayload();
+    if (!payload) return;
+    runScanButton.disabled = true;
+    saveScheduleButton.disabled = true;
+    saveScheduleButton.textContent = "Saving...";
+    try {
+      const response = await fetch("/api/schedule", {
+        method: "POST",
+        credentials: "same-origin",
+        body: payload,
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const state = await response.json();
+      scheduledTime = state.local_time || "";
+      scanTime.value = scheduledTime;
+      renderSchedule();
+      saveSetupDraft();
+    } catch (error) {
+      formError.textContent = error instanceof TypeError
+        ? "Connection to schedule service lost. Restart the service and try again."
+        : error.message || "Could not save daily scan.";
+      formError.hidden = false;
+    } finally {
+      saveScheduleButton.disabled = false;
+      saveScheduleButton.textContent = "Save Daily scan time";
+      syncScanSubmit();
     }
   });
 

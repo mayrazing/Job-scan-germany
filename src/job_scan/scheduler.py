@@ -211,11 +211,28 @@ class MacOSLaunchdBackend:
         loaded = self._is_loaded()
         if not changed and loaded:
             return self._state(local_time, executable, installed=True)
-        if loaded:
-            self._bootout()
-        if changed:
-            _write_atomic(self.plist_path, payload)
-        self._bootstrap()
+        unloaded = False
+        try:
+            if loaded:
+                self._bootout()
+                unloaded = True
+            if changed:
+                _write_atomic(self.plist_path, payload)
+            self._bootstrap()
+        except BaseException:
+            if changed:
+                if current is None:
+                    self.plist_path.unlink(missing_ok=True)
+                else:
+                    _write_atomic(self.plist_path, current)
+            if loaded and unloaded and current is not None:
+                try:
+                    self._bootstrap()
+                except BaseException as rollback_error:
+                    raise SchedulerError(
+                        "Could not restore the previous launchd scheduler."
+                    ) from rollback_error
+            raise
         return self._state(local_time, executable, installed=True)
 
     def remove(self, paths: AppPaths) -> SchedulerState:
@@ -358,6 +375,7 @@ def _render_cron_block(
         [
             _shell_quote(str(executable.resolve())),
             "scan",
+            "--scheduled",
             ">>",
             _shell_quote(str(paths.logs_dir / "scheduler.log")),
             "2>&1",
@@ -383,7 +401,7 @@ def _render_launchd_plist(
         environment[_OPENCLI_ENV] = str(opencli_executable.absolute())
     payload = {
         "Label": _LAUNCHD_LABEL,
-        "ProgramArguments": [str(executable), "scan"],
+        "ProgramArguments": [str(executable), "scan", "--scheduled"],
         "EnvironmentVariables": environment,
         "StartCalendarInterval": {"Hour": hour, "Minute": minute},
         "StandardOutPath": log_path,

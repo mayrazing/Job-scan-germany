@@ -150,11 +150,26 @@ class SetupService:
     def run(self, resume_path: Path, answers: SetupAnswers) -> SetupResult:
         """Extract a resume, obtain its profile, then publish a consistent pair."""
         prepared = self.prepare(resume_path, answers)
-        self._publish_pair(prepared.profile_bytes, prepared.config_bytes)
+        self.publish_prepared(prepared)
         return SetupResult(
             config=prepared.config,
             profile_path=self._paths.profile_md,
             profile_hash=prepared.profile_hash,
+        )
+
+    def publish_prepared(
+        self,
+        prepared: SetupPreparation,
+        *,
+        profile_path: Path | None = None,
+        config_path: Path | None = None,
+    ) -> None:
+        """Publish one prepared pair to the current or explicitly selected setup."""
+        self._publish_pair(
+            prepared.profile_bytes,
+            prepared.config_bytes,
+            profile_path=profile_path,
+            config_path=config_path,
         )
 
     def prepare(
@@ -322,16 +337,25 @@ class SetupService:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    def _publish_pair(self, profile_bytes: bytes, config_bytes: bytes) -> None:
+    def _publish_pair(
+        self,
+        profile_bytes: bytes,
+        config_bytes: bytes,
+        *,
+        profile_path: Path | None = None,
+        config_path: Path | None = None,
+    ) -> None:
         """Stage and publish profile/config together, restoring the prior pair on failure."""
         staged: list[Path] = []
         backups: dict[Path, Path | None] = {}
-        targets = (self._paths.profile_md, self._paths.config_toml)
+        profile_target = profile_path or self._paths.profile_md
+        config_target = config_path or self._paths.config_toml
+        targets = (profile_target, config_target)
         try:
             self._paths.ensure_directories()
-            profile_temp = _stage_bytes(self._paths.profile_md, profile_bytes, ".tmp")
+            profile_temp = _stage_bytes(profile_target, profile_bytes, ".tmp")
             staged.append(profile_temp)
-            config_temp = _stage_bytes(self._paths.config_toml, config_bytes, ".tmp")
+            config_temp = _stage_bytes(config_target, config_bytes, ".tmp")
             staged.append(config_temp)
             for target in targets:
                 backups[target] = (
@@ -348,8 +372,8 @@ class SetupService:
             ) from None
 
         try:
-            os.replace(profile_temp, self._paths.profile_md)
-            os.replace(config_temp, self._paths.config_toml)
+            os.replace(profile_temp, profile_target)
+            os.replace(config_temp, config_target)
         except BaseException as error:
             rollback_failed = _restore_pair(backups)
             _cleanup_paths((*staged, *(path for path in backups.values() if path)))
@@ -366,11 +390,16 @@ class SetupService:
         self,
         profile_bytes: bytes | None,
         config_bytes: bytes | None,
+        *,
+        profile_path: Path | None = None,
+        config_path: Path | None = None,
     ) -> None:
         """Restore the exact setup pair that existed before a failed workflow."""
+        profile_target = profile_path or self._paths.profile_md
+        config_target = config_path or self._paths.config_toml
         desired = {
-            self._paths.profile_md: profile_bytes,
-            self._paths.config_toml: config_bytes,
+            profile_target: profile_bytes,
+            config_target: config_bytes,
         }
         staged: dict[Path, Path] = {}
         backups: dict[Path, Path | None] = {}

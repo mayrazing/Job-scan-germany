@@ -62,6 +62,7 @@ class FakeCrontab:
 class FakeLaunchctl:
     def __init__(self) -> None:
         self.loaded = False
+        self.bootstrap_failures = 0
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(
@@ -78,6 +79,9 @@ class FakeLaunchctl:
             self.loaded = False
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         assert action == "bootstrap"
+        if self.bootstrap_failures:
+            self.bootstrap_failures -= 1
+            return subprocess.CompletedProcess(argv, 5, stdout="", stderr="failed")
         self.loaded = True
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
@@ -139,7 +143,7 @@ def test_linux_install_renders_exact_owned_block_and_is_idempotent(
             "# BEGIN job-scan-germany",
             (
                 f"05 07 * * * JOB_SCAN_HOME='{paths.root}' "
-                f"'{executable.resolve()}' scan >> '{log_path}' 2>&1"
+                f"'{executable.resolve()}' scan --scheduled >> '{log_path}' 2>&1"
             ),
             "# END job-scan-germany",
         ]
@@ -298,7 +302,7 @@ def test_macos_writes_exact_plist_reconciles_loaded_job_and_removes_only_its_fil
             "PATH": runtime_path,
         },
         "Label": "com.job-scan.germany",
-        "ProgramArguments": [str(executable.resolve()), "scan"],
+        "ProgramArguments": [str(executable.resolve()), "scan", "--scheduled"],
         "StandardErrorPath": str(log_path),
         "StandardOutPath": str(log_path),
         "StartCalendarInterval": {"Hour": 6, "Minute": 45},
@@ -328,6 +332,31 @@ def test_macos_writes_exact_plist_reconciles_loaded_job_and_removes_only_its_fil
     assert removed.installed is False
     assert plist_path.exists() is False
     assert unrelated.read_bytes() == b"other"
+
+
+def test_macos_failed_reconcile_restores_and_reloads_the_previous_task(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    executable = tmp_path / "bin" / "job-scan"
+    launch_agents = tmp_path / "LaunchAgents"
+    launch_agents.mkdir()
+    fake = FakeLaunchctl()
+    backend = MacOSLaunchdBackend(
+        run=fake,
+        launch_agents_root=launch_agents,
+        uid=501,
+    )
+    backend.install(_config("06:45"), paths, executable)
+    previous = backend.plist_path.read_bytes()
+    fake.bootstrap_failures = 1
+
+    with pytest.raises(SchedulerError, match="Could not load"):
+        backend.install(_config("07:15"), paths, executable)
+
+    assert backend.plist_path.read_bytes() == previous
+    assert fake.loaded is True
+    assert backend.status(paths).local_time == "06:45"
 
 
 def test_platform_selection_supports_only_linux_and_macos(tmp_path: Path) -> None:

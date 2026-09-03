@@ -20,16 +20,21 @@ from job_scan.normalization import content_hash
 from job_scan.paths import AppPaths
 from job_scan.resume import ResumeError, ResumeReadError
 from job_scan.reviewer import ReviewBatchOutcome, ReviewBatchProgress
-from job_scan.scan_service import ScanError, ScanProgress, ScanService, SourceProgress
-from job_scan.scheduler import BackendName, SchedulerState
+from job_scan.scan_service import (
+    ScanError,
+    ScanProgress,
+    ScanService,
+    SourceProgress,
+    scan_progress_message,
+    scan_progress_percent,
+)
+from job_scan.scheduler import BackendName, SchedulerError, SchedulerState
 from job_scan.setup_service import SetupAnswers, SetupService
 from job_scan.sources.base import FetchedOccurrence, JobReference
 from job_scan.web_workflow import (
     MAX_RESUME_BYTES,
     WebWorkflow,
     WebWorkflowBusy,
-    _progress_message,
-    _progress_percent,
     read_resume_upload,
     store_uploaded_resume,
 )
@@ -106,10 +111,17 @@ class FakeScheduler:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.installed = False
+        self.local_time: str | None = None
+        self.install_error: SchedulerError | None = None
 
     def install(self, config: Any, paths: AppPaths, executable: Path) -> SchedulerState:
         del paths
         self.calls.append("install")
+        if self.install_error is not None:
+            raise self.install_error
+        self.installed = True
+        self.local_time = config.scheduler.local_time
         return SchedulerState(
             backend=self.backend,
             installed=True,
@@ -121,6 +133,8 @@ class FakeScheduler:
     def remove(self, paths: AppPaths) -> SchedulerState:
         del paths
         self.calls.append("remove")
+        self.installed = False
+        self.local_time = None
         return SchedulerState(
             backend=self.backend,
             installed=False,
@@ -131,7 +145,14 @@ class FakeScheduler:
 
     def status(self, paths: AppPaths) -> SchedulerState:
         del paths
-        raise AssertionError("status is not used by this workflow")
+        self.calls.append("status")
+        return SchedulerState(
+            backend=self.backend,
+            installed=self.installed,
+            local_time=self.local_time,
+            executable=Path("/opt/job-scan/bin/job-scan") if self.installed else None,
+            managed_location="fixture:scheduler",
+        )
 
 
 def answers(
@@ -168,7 +189,7 @@ def workflow_at(tmp_path: Path) -> tuple[WebWorkflow, AppPaths, FakeScheduler]:
     return workflow, paths, scheduler
 
 
-def test_run_persists_uploaded_resume_then_runs_real_setup_and_scan(
+def test_manual_run_persists_current_setup_without_changing_the_schedule(
     tmp_path: Path,
 ) -> None:
     workflow, paths, scheduler = workflow_at(tmp_path)
@@ -190,9 +211,90 @@ def test_run_persists_uploaded_resume_then_runs_real_setup_and_scan(
     assert config.simplify_de_limit == 41
     assert result.summary.occurrence_count == 0
     assert result.summary.reviewed_count == 0
-    assert result.schedule.installed is True
-    assert result.schedule.local_time == "08:30"
+    assert result.schedule.installed is False
+    assert result.schedule.local_time is None
+    assert scheduler.calls == ["status"]
+
+
+def test_save_schedule_persists_a_separate_setup_without_running_a_scan(
+    tmp_path: Path,
+) -> None:
+    from job_scan.search_history import SearchHistoryStore
+
+    workflow, paths, scheduler = workflow_at(tmp_path)
+
+    state = workflow.save_schedule(
+        "scheduled-candidate.docx",
+        RESUME.read_bytes(),
+        answers(local_time="07:15"),
+    )
+
+    scheduled_config = load_config(paths.root / "scheduled-config.toml")
+    assert scheduled_config.candidate_name == "scheduled-candidate"
+    assert scheduled_config.scheduler.local_time == "07:15"
+    assert (paths.root / "scheduled-profile.md").read_text(encoding="utf-8") == PROFILE
+    assert paths.config_toml.exists() is False
+    assert paths.profile_md.exists() is False
+    assert SearchHistoryStore(paths).list() == []
+    assert state.installed is True
+    assert state.local_time == "07:15"
     assert scheduler.calls == ["install"]
+
+
+def test_reconcile_schedule_migrates_an_installed_legacy_setup(
+    tmp_path: Path,
+) -> None:
+    workflow, paths, scheduler = workflow_at(tmp_path)
+    current_config = answers(local_time="08:30")
+    SetupService(paths, FakeClaude()).run(RESUME, current_config)
+    scheduler.installed = True
+    scheduler.local_time = "08:30"
+
+    state = workflow.reconcile_schedule()
+
+    assert state.installed is True
+    assert paths.scheduled_config_toml.read_bytes() == paths.config_toml.read_bytes()
+    assert paths.scheduled_profile_md.read_bytes() == paths.profile_md.read_bytes()
+    assert scheduler.calls == ["status", "install"]
+
+
+def test_saved_schedule_prefills_setup_before_any_manual_scan(tmp_path: Path) -> None:
+    workflow, _paths, _scheduler = workflow_at(tmp_path)
+    saved_answers = answers(local_time="07:15")
+
+    workflow.save_schedule(
+        "scheduled-candidate.docx",
+        RESUME.read_bytes(),
+        saved_answers,
+    )
+
+    assert workflow.load_setup_answers() == saved_answers.model_copy(
+        update={"candidate_name": "scheduled-candidate"}
+    )
+
+
+def test_failed_schedule_update_restores_the_previous_scheduled_setup(
+    tmp_path: Path,
+) -> None:
+    workflow, paths, scheduler = workflow_at(tmp_path)
+    workflow.save_schedule(
+        "scheduled-a.docx",
+        RESUME.read_bytes(),
+        answers(local_time="07:15"),
+    )
+    scheduler.install_error = SchedulerError("scheduler failed")
+
+    with pytest.raises(SchedulerError, match="scheduler failed"):
+        workflow.save_schedule(
+            "scheduled-b.docx",
+            RESUME.read_bytes(),
+            answers(local_time="09:45"),
+        )
+
+    restored = load_config(paths.scheduled_config_toml)
+    assert restored.candidate_name == "scheduled-a"
+    assert restored.scheduler.local_time == "07:15"
+    assert scheduler.local_time == "07:15"
 
 
 def test_successful_browser_run_is_archived_as_one_search_history(
@@ -278,15 +380,29 @@ def test_load_setup_answers_falls_back_when_config_is_unavailable(
     assert workflow.load_setup_answers() is None
 
 
-def test_remove_schedule_clears_native_entry_and_saved_time(tmp_path: Path) -> None:
+def test_remove_schedule_clears_only_the_dedicated_scheduled_time(
+    tmp_path: Path,
+) -> None:
     workflow, paths, scheduler = workflow_at(tmp_path)
-    workflow.run("candidate.docx", RESUME.read_bytes(), answers())
+    workflow.save_schedule(
+        "scheduled.docx",
+        RESUME.read_bytes(),
+        answers(local_time="08:30"),
+    )
+    workflow.run(
+        "manual.docx",
+        RESUME.read_bytes(),
+        answers(local_time="11:45"),
+    )
 
     state = workflow.remove_schedule()
 
     assert state.installed is False
-    assert load_config(paths.config_toml).scheduler.local_time is None
-    assert scheduler.calls == ["install", "remove"]
+    assert load_config(paths.scheduled_config_toml).scheduler.local_time is None
+    current = load_config(paths.config_toml)
+    assert current.candidate_name == "manual"
+    assert current.scheduler.local_time == "11:45"
+    assert scheduler.calls == ["install", "status", "remove"]
 
 
 def test_failed_setup_retains_content_addressed_resume_for_parallel_reuse(
@@ -338,13 +454,79 @@ def test_second_web_run_is_rejected_while_first_setup_is_active(
 
     with pytest.raises(WebWorkflowBusy, match="already running"):
         workflow.run("candidate.docx", RESUME.read_bytes(), answers())
-    with pytest.raises(WebWorkflowBusy, match="already running"):
-        workflow.remove_schedule()
+
+    state = workflow.remove_schedule()
+    assert state.installed is False
 
     release.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert first_errors == []
+
+
+def test_save_schedule_succeeds_while_a_scan_is_running(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "home")
+    entered = Event()
+    release = Event()
+    real_setup = SetupService(paths, claude=FakeClaude())
+
+    class BlockingSetup:
+        def run(self, resume_path: Path, setup_answers: SetupAnswers):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("test did not release setup")
+            return real_setup.run(resume_path, setup_answers)
+
+        def __getattr__(self, name: str):
+            return getattr(real_setup, name)
+
+    workflow = WebWorkflow(
+        paths,
+        setup_service=BlockingSetup(),  # type: ignore[arg-type]
+        scan_service=ScanService(paths, source_factory=lambda config: []),
+        scheduler=FakeScheduler(),
+        executable=Path("/opt/job-scan/bin/job-scan"),
+    )
+    first_errors: list[Exception] = []
+
+    def run_first() -> None:
+        try:
+            workflow.run("candidate.docx", RESUME.read_bytes(), answers())
+        except (RuntimeError, AssertionError) as error:
+            first_errors.append(error)
+
+    thread = Thread(target=run_first)
+    thread.start()
+    assert entered.wait(timeout=5)
+
+    state = workflow.save_schedule(
+        "scheduled-candidate.docx",
+        RESUME.read_bytes(),
+        answers(local_time="07:15"),
+    )
+
+    assert state.installed is True
+    assert state.local_time == "07:15"
+    assert load_config(paths.scheduled_config_toml).scheduler.local_time == "07:15"
+
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert first_errors == []
+
+
+def test_save_schedule_is_rejected_while_another_scheduler_change_runs(
+    tmp_path: Path,
+) -> None:
+    workflow, _paths, _scheduler = workflow_at(tmp_path)
+
+    with FileRWLock(_paths.schedule_lock_file).exclusive(blocking=False):
+        with pytest.raises(WebWorkflowBusy, match="scheduler change"):
+            workflow.save_schedule(
+                "scheduled-candidate.docx",
+                RESUME.read_bytes(),
+                answers(local_time="07:15"),
+            )
 
 
 def test_web_run_is_rejected_before_setup_when_another_process_owns_workflow_lock(
@@ -623,7 +805,7 @@ def test_source_percent_moves_with_completed_sources() -> None:
         source_progress=SourceProgress(2, 4, 17, 1),
     )
 
-    assert _progress_percent(current) == 55
+    assert scan_progress_percent(current) == 55
 
 
 def test_source_message_reports_completed_sources_and_found_jobs() -> None:
@@ -632,7 +814,7 @@ def test_source_message_reports_completed_sources_and_found_jobs() -> None:
         source_progress=SourceProgress(2, 4, 17, 1),
     )
 
-    assert _progress_message(current) == (
+    assert scan_progress_message(current) == (
         "Searching job sources: 2/4 sources, 17 jobs found, 1 warning..."
     )
 

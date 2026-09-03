@@ -471,6 +471,26 @@ class ReviewHistoryEntry(BaseModel):
     failure_category: str | None = None
 
 
+class UserTag(BaseModel):
+    """Store one user-owned Job Tracker tag."""
+
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("tag name cannot be blank")
+        return normalized
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return value.upper()
+
+
 class _LegacyResumeMatch(BaseModel):
     """Read one legacy per-resume review while collapsing old tracker data."""
 
@@ -564,6 +584,10 @@ class JobRecord(BaseModel):
         exclude_if=lambda value: value is None,
     )
     notes: list[JobNote] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+    user_tags: list[UserTag] = Field(
         default_factory=list,
         exclude_if=lambda value: not value,
     )

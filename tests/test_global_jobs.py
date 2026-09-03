@@ -726,6 +726,73 @@ def test_tracker_notes_can_be_added_edited_deleted_and_survive_import(
     assert deleted.notes == []
 
 
+def test_user_tag_reuses_existing_name_and_color(store: GlobalJobStore) -> None:
+    first = store.set_status(
+        _job("first", external_ids=("first-source",)),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    second = store.set_status(
+        _job("second", external_ids=("second-source",)),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[1]
+
+    created = store.add_user_tag(first, "Backend", "#2F6F5E")
+    reused = store.add_user_tag(second, " backend ", "#B45309")
+
+    assert created.name == "Backend"
+    assert created.color == "#2F6F5E"
+    assert reused == created
+    assert store.find("second").user_tags == [created]
+
+
+def test_user_tags_survive_later_job_import(store: GlobalJobStore) -> None:
+    tracked = store.set_status(
+        _job("old-key", external_ids=("shared",)),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    tag = store.add_user_tag(tracked, "Follow up", "#2563EB")
+
+    store.import_snapshots(
+        [
+            _snapshot(
+                _job(
+                    "new-key",
+                    external_ids=("shared",),
+                    status=UserStatus.SAVED,
+                    last_seen=NOW + timedelta(days=1),
+                )
+            )
+        ]
+    )
+
+    saved = store.find("new-key")
+    assert saved is not None
+    assert saved.user_tags == [tag]
+
+
+def test_user_tag_delete_removes_only_selected_job(store: GlobalJobStore) -> None:
+    first = store.set_status(
+        _job("first", external_ids=("first-source",)),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[0]
+    second = store.set_status(
+        _job("second", external_ids=("second-source",)),
+        UserStatus.SAVED,
+        NOW,
+    ).jobs[1]
+    store.add_user_tag(first, "Backend", "#2F6F5E")
+    store.add_user_tag(second, "Backend", "#2F6F5E")
+
+    store.delete_user_tag(first, "backend")
+
+    assert store.find("first").user_tags == []
+    assert [tag.name for tag in store.find("second").user_tags] == ["Backend"]
+
+
 def test_tracker_manual_facts_survive_later_job_imports(
     store: GlobalJobStore,
 ) -> None:

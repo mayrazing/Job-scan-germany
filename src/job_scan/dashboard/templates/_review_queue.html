@@ -99,6 +99,27 @@
         <span class="job-preview-open-label" aria-hidden="true">View details →</span>
       </footer>
     </div>
+    {% if status_scope == 'global' %}
+      <aside class="job-tag-panel" data-job-tag-panel aria-label="Tags for {{ job.title }} at {{ job.company }}">
+        <div class="job-user-tags" data-user-tag-list>
+          {% for tag in job.user_tags %}
+            <span class="job-user-tag" data-user-tag-name="{{ tag.name }}" data-user-tag-color="{{ tag.color }}" style="--tag-color: {{ tag.color }}">
+              <span>{{ tag.name }}</span>
+              <button type="button" data-delete-user-tag aria-label="Remove {{ tag.name }}" title="Remove {{ tag.name }}">×</button>
+            </span>
+          {% else %}
+            <span class="job-tag-empty" data-user-tag-empty>No tags yet</span>
+          {% endfor %}
+        </div>
+        <form class="job-user-tag-form" data-user-tag-form data-user-tag-job-key="{{ job.canonical_key }}">
+          <input name="color" type="color" value="#2F6F5E" aria-label="Tag color">
+          <select name="tag" data-user-tag-select aria-label="Tag name"></select>
+          <button type="submit">Save</button>
+          <p class="job-user-tag-help" data-user-tag-help>Choose an existing tag or type a new one.</p>
+          <p class="job-user-tag-error" data-user-tag-error role="alert" hidden></p>
+        </form>
+      </aside>
+    {% endif %}
 
     <dialog class="job-detail-dialog" data-job-detail-dialog aria-label="Job details for {{ job.title }} at {{ job.company }}">
       <div class="job-detail-panel">

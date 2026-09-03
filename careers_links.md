@@ -1,0 +1,124 @@
+- Huawei: https://career.huawei.com/
+- ZTE: https://job.zte.com.cn/
+- Xiaomi: https://hr.xiaomi.com/
+- Lenovo: https://jobs.lenovo.com/
+- Medion: https://www.medion.com/de/karriere/stellenangebote.php (第三方: Softgarden https://medion.softgarden.io)
+- OPPO: https://careers.oppo.com/
+- vivo: https://career.vivo.com/
+- HONOR: https://career.honor.com/ (第三方: hotjob.cn)
+- OnePlus: https://www.oneplus.com/de/careers
+- DJI: https://we.dji.com/jobs_en.html
+- TP-Link: https://www.tp-link.com/de/about-us/career/ (第三方: Personio https://tp-link-gmbh.jobs.personio.com)
+- Dahua Technology: https://www.dahuasecurity.com/about-dahua/career/join-the-team
+- Hytera Mobilfunk: https://hmf-smart-solutions.de/en/jobs_en/ (已更名 HMF Smart Solutions, 岗位经第三方 iframe 加载)
+- Anker: https://career.anker-in.com/
+- Roborock: https://www.linkedin.com/company/roborock/jobs (第三方: LinkedIn, 无自有招聘页)
+- ECOVACS: https://www.ecovacs.com/us/careers/job-list
+- Insta360: https://www.insta360.com/jobs
+- TikTok: https://lifeattiktok.com/
+- Alibaba Cloud: https://www.alibabacloud.com/careers
+- China Telecom Europe: https://careers.smartrecruiters.com/ChinaTelecomEuropeLimited (第三方: SmartRecruiters)
+- China Mobile International (CMI): https://www.cmi.chinamobile.com/en/join-us
+- Nexperia: https://nexperia.wd3.myworkdayjobs.com/careers (第三方: Workday)
+- Haier: https://haier.wd3.myworkdayjobs.com/en-US/HaierEurope_Professional_Careers (第三方: Workday)
+- Midea: https://www.midea.com/de/karriere
+- Hisense: https://de.hisense.com/karriere
+- Gorenje: https://career2.successfactors.eu/career?company=gorenjegos&site_name=Hisense (第三方: SAP SuccessFactors)
+- TCL: https://www.tcl.com/eu/en/career
+- BYD: https://careers.bydeurope.com/ (第三方: Teamtailor)
+- MG Motor: https://www.mgmotor.de/career-overview
+- Maxus: 未找到自有招聘页, 第三方: LinkedIn https://de.linkedin.com/company/maxomotive-deutschland-gmbh
+- XPeng: https://www.xpeng.com/join-us
+- Omoda & Jaecoo: https://www.omodajaecoo-auto.de/karriere (第三方: LinkedIn; 原域名 omodajaecoo.de 已停放, 德国官网现为 omoda-jaecoo.de)
+- Lynk & Co: https://careers.lynkco.com/ (第三方: Teamtailor)
+- Zeekr: https://zeekreu.teamtailor.com/ (第三方: Teamtailor)
+- smart: https://career.smart.com/ (第三方: SAP SuccessFactors)
+- Lotus Cars: https://careers.lotuscars.com/ (第三方: Teamtailor)
+- Volvo Cars: https://jobs.volvocars.com/ (第三方: SAP SuccessFactors)
+- Polestar: https://polestar.teamtailor.com/jobs (第三方: Teamtailor)
+- NIO: https://www.nio.com/careers/jobs (列表自有, 申请跳第三方: Workday nio.wd3.myworkdayjobs.com)
+- Leapmotor: https://careers.stellantis.com/job-search-results/ (Stellantis 合资, 申请走 Workday stellantis.wd3.myworkdayjobs.com)
+- Leoni: https://www.leoni.com/jobs-careers/job-portal
+- Grammer: https://grammer-performance-management.csod.com/ux/ats/careersite/1/home?c=grammer-performance-management (第三方: Cornerstone OnDemand)
+- Preh: https://www.preh.com/karriere/stellenangebote (第三方: Rexx Systems)
+- Joyson Safety Systems: https://careers.joysonsafety.com (第三方: SAP SuccessFactors; 欧洲/中东/非洲岗另见 https://hr.joysonsafety.eu/en/careers/)
+- SEG Automotive: https://www.seg-automotive.com/career/career-application-platform/
+- Kiekert: https://www.kiekert.com/karriere/stellenangebote/
+- KACO: https://kaco.de/karriere-bei-kaco/jobs/
+- Wegu: https://wegu.de/category/jobs/
+- AMK Group: https://amk-group.com/de/karriere/aktuelle-jobangebote/
+- Tristone Flowtech: https://www.tristone.com/career/
+- KSM Castings: https://karriere.ksmcastings.com/en/
+- Saargummi: https://sgapply.powerappsportals.com/en-US/open-positions/ (第三方: Microsoft Power Apps Portals, 入口 de.career.saargummi.com/de)
+- Yanfeng: https://www.yanfeng.com/en/jobs
+- Fuyao Group: https://job.fuyaogroup.com/fuyao/position/index?recruitmentType=SOCIALRECRUITMENT
+- Pirelli: https://jobs.pirelli.com/ (第三方: SAP SuccessFactors)
+- Hilite: https://www.hilite.com/en/career/jobs (第三方: ADP Workforce Now)
+- Continental Aerospace: https://continental.aero/careers/ (第三方: Paycor; 欧洲岗 continentaldiesel.com/careers/)
+- KUKA: https://www.kuka.com/de-de/unternehmen/karriere/stellenangebote
+- KION Group: https://kiongroup.wd3.myworkdayjobs.com/en-US/KIONGroup (第三方: Workday)
+- Linde Material Handling: https://kiongroup.wd3.myworkdayjobs.com/de-DE/KIONGroup (第三方: Workday, KION 集团门户按公司过滤)
+- STILL: https://www.still.de/beruf-karriere/stellenangebote.html (实际跳转 KION 集团 Workday 门户)
+- KraussMaffei: https://jobs.kraussmaffei.com/ (第三方: SAP SuccessFactors)
+- Putzmeister: https://recruiting.putzmeister.com/de/jobs (第三方: d.vinci)
+- Schwing Stetter: https://schwing-stetter.com/de_de/unternehmen/ausbildung-karriere/schwing/stellenboerse.html
+- Sany Europe: https://www.sanyeurope.com/jobs-2/
+- XCMG Europe: https://www.linkedin.com/jobs/xcmg-europe-gmbh-jobs-worldwide (第三方: LinkedIn, 官网无可用招聘页)
+- CREG Germany: https://www.creg-germany.com/careers
+- Saurer: https://dvinci.saurer.com/ (第三方: d.vinci)
+- Dürkopp Adler: https://karriere.duerkopp-adler.com/ (第三方: Rexx Systems)
+- PFAFF Industrial: https://www.pfaff-industrial.com/de/unternehmen/karriere
+- Waldrich Coburg: https://www.waldrich-coburg.de/karriere/
+- KHD: https://www.khd.com/career/ (第三方: Personio)
+- FFT: https://jobs.fft.de/fft/go/fft-deutschland-alle-jobs/9308401/?locale=de_DE (第三方: SAP SuccessFactors)
+- Vossloh Locomotives: https://vossloh.wd3.myworkdayjobs.com/Vossloh_External_Careers (第三方: Workday)
+- Ziegler: https://www.ziegler.de/de/karriere/jobs-giengen/ (另见 /de/karriere/jobs-rendsburg/)
+- Flex Power Tools: https://www.flex-tools.com/de-de/karriere
+- WORX: https://positec-europe.com/en/stellenangebote/ (母公司 Positec Europe 官网)
+- ZCCCT Europe: https://www.zccct-europe.com/en/company/jobs-in-the-machining-industry/
+- Aweco: http://www.aweco.de/jobs/stellenangebote
+- CATL (德国/欧洲): https://www.catl-career.com/ (第三方: SAP SuccessFactors)
+- CATL (全球): 未找到自有招聘页, 欧洲招聘用 https://www.catl-career.com/
+- Gotion High-Tech: https://job-boards.greenhouse.io/gotion (第三方: Greenhouse)
+- Sungrow: https://career-europe.sungrowpower.com/ (EMEA 岗另见 https://sungrow-emea.jobs.personio.de)
+- LONGi: https://www.longi.com/en/jobs/
+- Trina Solar: https://careers.trinasolar.com/ (EMEA 岗另见 https://trina-solar-1.jobs.personio.com)
+- JA Solar: https://ja-solar.jobs.personio.de/ (第三方: Personio)
+- JinkoSolar: https://www.jinkosolar.com/en/site/brand (校招第三方: Mokahr https://app.mokahr.com/campus-recruitment/jinkosolar/41896)
+- EEW Energy from Waste: https://www.eew-karriere.de/stellenangebote/
+- Syngenta: https://jobs.syngenta.com/
+- ADAMA: https://www.adama.com/deutschland/de/karriere
+- Bank of China (德国): https://www.bankofchina.com/de/aboutus/ab4/
+- ICBC (德国): http://www.icbc.de/cn/column/980127925339041793.html
+- China Construction Bank (德国): http://www.ccb.com/lng/2026-03/16/article_2026031613413358949.shtml
+- Agricultural Bank of China: https://career.abchina.com/
+- Bank of Communications (德国): https://job.bankcomm.com
+- Minmetals (德国): 未找到 (官网 minmetals.de 维护中, 无招聘入口)
+- Weiqiao Germany: https://weiqiaogermany.de/karriere/
+- COSCO Shipping Lines: https://lines.coscoshipping.com/home/Recruiting/recruiting/recruiting
+- OOCL: https://www.oocl.com/eng/aboutoocl/ooclcareer/jobopportunity
+- Air China (德国): https://www.airchina.de/DE/CN/about-us/recruitment/
+- H World (华住): https://int.hworld.com/career/vacancies/career/vacancies
+- Tom Tailor: https://join.com/companies/tom-tailor (第三方: JOIN)
+- ASMPT SMT: https://talents.smt.asmpt.com/Jobs?lang=eng
+- Milwaukee Tool (欧洲): https://www.milwaukeetool.eu/careers/
+- Johnson Electric: https://johnsonelectric.wd3.myworkdayjobs.com/Career_JE (第三方: Workday)
+- Kerry Logistics (KLN): https://www.kln.com/en/careers/job-opportunities/ (第三方: Cornerstone OnDemand https://careers-kln.csod.com/ux/ats/careersite/14/home?c=careers-kln&lang=en-US)
+- Cathay Pacific: https://careers.cathaypacific.com/en/careers/jobs
+- VTech (德国): https://www.vtech.de/stellenangebote
+- TSMC: https://ro.careers.tsmc.com/
+- Delta Energy Systems: https://www.deltaenergysystems.com/de/delta-jobportal
+- HIWIN (德国): https://www.hiwin.de/de/karriere-uebersicht/stellenangebote
+- Merida: https://jobs.merida-centurion.com/de (Merida & Centurion Germany 自有招聘站)
+- Giant Bicycles: https://www.giant-bicycles.com/de/jobs
+- ASUS: https://join.com/companies/asuscom (第三方: join.com)
+- Acer: https://careers.acer.com/
+- MSI: https://jobsemea.msi.com/
+- GIGABYTE: https://www.gigabyte.com/de/Career
+- BenQ: https://benqeuropebv.recruitee.com/ (第三方: Recruitee)
+- D-Link: https://careers.smartrecruiters.com/DLinkSystemsInc (第三方: SmartRecruiters)
+- Zyxel: https://www.zyxel.com/de/de/company/careers
+- QNAP: https://www.qnap.com/de-de/career
+- Synology: https://career.synology.com/
+- Advantech: https://advantech.wd3.myworkdayjobs.com/en-US/External (第三方: Workday, 入口 advantech.com/en/careers)
+- Moxa: https://tas-moxa.taleo.net/careersection/mx_ext/jobsearch.ftl?lang=en (第三方: Oracle Taleo)

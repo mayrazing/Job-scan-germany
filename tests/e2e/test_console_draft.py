@@ -36,6 +36,7 @@ from job_scan.domain import (
     TrackerGroup,
     UserStatus,
     UserStatusHistoryEntry,
+    UserTag,
     default_tracker_groups,
 )
 
@@ -385,6 +386,33 @@ GLOBAL_STATUS_SNAPSHOT = Snapshot(
     ],
 )
 
+GLOBAL_TAG_SNAPSHOT = Snapshot(
+    meta=StoreMeta(data_revision=49),
+    jobs=[
+        source_job("tag-backend", (SourceKind.LINKEDIN,)).model_copy(
+            update={
+                "user_status": UserStatus.SAVED,
+                "user_tags": [UserTag(name="Backend", color="#2F6F5E")],
+            }
+        ),
+        source_job("tag-remote", (SourceKind.LINKEDIN,)).model_copy(
+            update={
+                "user_status": UserStatus.SAVED,
+                "user_tags": [UserTag(name="Remote", color="#2563EB")],
+            }
+        ),
+        source_job("tag-empty", (SourceKind.LINKEDIN,)).model_copy(
+            update={"user_status": UserStatus.SAVED}
+        ),
+        source_job("tag-applied", (SourceKind.LINKEDIN,)).model_copy(
+            update={
+                "user_status": UserStatus.APPLIED,
+                "user_tags": [UserTag(name="Remote", color="#2563EB")],
+            }
+        ),
+    ],
+)
+
 GLOBAL_BATCH_SNAPSHOT = Snapshot(
     meta=StoreMeta(data_revision=47),
     jobs=[
@@ -557,6 +585,7 @@ def setup_page() -> Iterator[object]:
         page = context.new_page()
         tracker_groups = default_tracker_groups()
         batch_snapshot = GLOBAL_BATCH_SNAPSHOT.model_copy(deep=True)
+        tag_snapshot = GLOBAL_TAG_SNAPSHOT.model_copy(deep=True)
         ai_selection = {
             "ai_runtime": "claude-code",
             "claude": {
@@ -572,9 +601,63 @@ def setup_page() -> Iterator[object]:
         }
 
         def respond(route: object) -> None:
-            nonlocal batch_snapshot
+            nonlocal batch_snapshot, tag_snapshot
             request = route.request
             parsed_url = urlparse(request.url)
+            if (
+                parsed_url.path.startswith("/api/global-jobs/")
+                and parsed_url.path.endswith("/tags")
+            ):
+                job_key = parsed_url.path.split("/")[-2]
+                job_index = next(
+                    index
+                    for index, job in enumerate(tag_snapshot.jobs)
+                    if job.canonical_job_key == job_key
+                )
+                job = tag_snapshot.jobs[job_index]
+                payload = request.post_data_json
+                normalized_name = payload["name"].strip().casefold()
+                if request.method == "POST":
+                    tag = next(
+                        (
+                            existing
+                            for item in tag_snapshot.jobs
+                            for existing in item.user_tags
+                            if existing.name.casefold() == normalized_name
+                        ),
+                        UserTag(name=payload["name"], color=payload["color"]),
+                    )
+                    updated_tags = [*job.user_tags]
+                    if not any(
+                        existing.name.casefold() == normalized_name
+                        for existing in updated_tags
+                    ):
+                        updated_tags.append(tag)
+                    status_code = 200
+                    body = tag.model_dump_json()
+                else:
+                    updated_tags = [
+                        tag
+                        for tag in job.user_tags
+                        if tag.name.casefold() != normalized_name
+                    ]
+                    status_code = 204
+                    body = ""
+                jobs = [item.model_copy(deep=True) for item in tag_snapshot.jobs]
+                jobs[job_index] = job.model_copy(
+                    update={"user_tags": updated_tags},
+                    deep=True,
+                )
+                tag_snapshot = tag_snapshot.model_copy(
+                    update={"jobs": jobs},
+                    deep=True,
+                )
+                route.fulfill(
+                    status=status_code,
+                    content_type="application/json",
+                    body=body,
+                )
+                return
             if parsed_url.path == "/api/job-tracker/jobs/batch-status":
                 payload = request.post_data_json
                 selected = set(payload["keys"])
@@ -781,6 +864,8 @@ def setup_page() -> Iterator[object]:
                 if "ats-jobs=1" in request.url
                 else GLOBAL_SORT_SNAPSHOT
                 if "sort=1" in request.url
+                else tag_snapshot
+                if "tags=1" in request.url
                 else Snapshot(meta=StoreMeta(data_revision=0))
             )
             global_snapshot = global_snapshot.model_copy(
@@ -1290,7 +1375,7 @@ def test_background_task_button_expands_and_collapses_active_task_list(
                         {
                             "task_id": "scan:scan-1",
                             "kind": "scan",
-                            "label": "Save and run scan",
+                            "label": "Run scan",
                             "status": "running",
                             "message": "Reviewing jobs...",
                             "progress_percent": 60,
@@ -1797,6 +1882,471 @@ def test_job_tracker_url_filter_matches_normalized_and_partial_urls(
     assert global_card.is_visible()
 
 
+def test_job_tracker_tag_options_are_shared_across_groups(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    tag_filter = setup_page.locator("#global-tag-filter")
+
+    assert tag_filter.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+    assert setup_page.locator(
+        'article[data-job-key="tag-empty"]'
+    ).is_visible()
+
+    tag_filter.evaluate(
+        "select => select.tomselect.setValue(['Backend'])"
+    )
+
+    assert setup_page.locator('article[data-job-key="tag-backend"]').is_visible()
+    assert setup_page.locator('article[data-job-key="tag-remote"]').is_hidden()
+    assert setup_page.locator('article[data-job-key="tag-empty"]').is_hidden()
+
+    tag_filter.evaluate(
+        "select => select.tomselect.setValue(['Backend', 'Remote'])"
+    )
+
+    assert setup_page.locator('article[data-job-key="tag-backend"]').is_visible()
+    assert setup_page.locator('article[data-job-key="tag-remote"]').is_visible()
+    assert setup_page.locator('article[data-job-key="tag-empty"]').is_hidden()
+
+    setup_page.locator('[data-review-group-tab="applied"]').click()
+
+    assert tag_filter.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+    assert setup_page.locator(
+        'article[data-job-key="tag-applied"] [data-user-tag-select]'
+    ).evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+
+
+def test_job_tracker_tag_filter_renders_a_compact_removable_selected_tag(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    tag_filter = setup_page.locator("#global-tag-filter")
+    tag_filter.evaluate(
+        "select => select.tomselect.setValue(['Backend'])"
+    )
+
+    selected_layout = tag_filter.evaluate(
+        """select => {
+          const control = select.tomselect.control;
+          const item = control.querySelector('.item[data-value="Backend"]');
+          const remove = item.querySelector('.remove');
+          const input = select.tomselect.control_input;
+          const itemBox = item.getBoundingClientRect();
+          const removeBox = remove.getBoundingClientRect();
+          return {
+            placeholder: input.placeholder,
+            itemHeight: itemBox.height,
+            itemWidth: itemBox.width,
+            itemRadius: parseFloat(getComputedStyle(item).borderTopLeftRadius),
+            removeText: remove.textContent,
+            removeInsideItem:
+              removeBox.left >= itemBox.left && removeBox.right <= itemBox.right,
+            hasHorizontalOverflow: control.scrollWidth > control.clientWidth + 1,
+          };
+        }"""
+    )
+    assert selected_layout["placeholder"] == ""
+    assert selected_layout["itemHeight"] <= 30
+    assert selected_layout["itemWidth"] > selected_layout["itemHeight"]
+    assert selected_layout["itemRadius"] <= 6
+    assert selected_layout["removeText"] == "×"
+    assert selected_layout["removeInsideItem"] is True
+    assert selected_layout["hasHorizontalOverflow"] is False
+
+    setup_page.locator(
+        '.tag-filter .item[data-value="Backend"] .remove'
+    ).click()
+    assert tag_filter.evaluate(
+        "select => select.tomselect.control_input.placeholder"
+    ) == "Filter by tag"
+
+
+def test_job_tracker_new_tag_updates_and_clears_shared_tag_options(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="tag-empty"]')
+    tag_select = card.locator("[data-user-tag-select]")
+    card.locator('input[name="color"]').fill("#B45309")
+    tag_select.evaluate("select => select.tomselect.createItem('Priority')")
+    card.locator("[data-user-tag-form] button[type='submit']").click()
+
+    chip = card.locator('[data-user-tag-name="Priority"]')
+    chip.wait_for()
+    assert chip.get_attribute("data-user-tag-color") == "#B45309"
+    assert setup_page.locator("#global-tag-filter").evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Priority", "Remote"]
+    assert setup_page.locator(
+        'article[data-job-key="tag-backend"] [data-user-tag-select]'
+    ).evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Priority", "Remote"]
+
+    chip.locator("[data-delete-user-tag]").click()
+
+    playwright.expect(chip).to_have_count(0)
+    assert setup_page.locator("#global-tag-filter").evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+    assert setup_page.locator(
+        'article[data-job-key="tag-backend"] [data-user-tag-select]'
+    ).evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+
+
+def test_job_tracker_tag_option_remains_until_last_cross_group_use_is_removed(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    tag_filter = setup_page.locator("#global-tag-filter")
+    tag_filter.evaluate(
+        "select => select.tomselect.setValue(['Remote'])"
+    )
+
+    saved_chip = setup_page.locator(
+        'article[data-job-key="tag-remote"] [data-user-tag-name="Remote"]'
+    )
+    saved_chip.locator("[data-delete-user-tag]").click()
+
+    playwright.expect(saved_chip).to_have_count(0)
+    assert tag_filter.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+    assert tag_filter.evaluate(
+        "select => select.tomselect.items"
+    ) == ["Remote"]
+
+    setup_page.locator('[data-review-group-tab="applied"]').click()
+    applied_select = setup_page.locator(
+        'article[data-job-key="tag-applied"] [data-user-tag-select]'
+    )
+    assert applied_select.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend", "Remote"]
+
+    applied_chip = setup_page.locator(
+        'article[data-job-key="tag-applied"] [data-user-tag-name="Remote"]'
+    )
+    applied_chip.locator("[data-delete-user-tag]").click()
+
+    playwright.expect(applied_chip).to_have_count(0)
+    assert tag_filter.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend"]
+    assert tag_filter.evaluate(
+        "select => select.tomselect.items"
+    ) == []
+    assert tag_filter.evaluate(
+        "select => select.tomselect.control_input.placeholder"
+    ) == "Filter by tag"
+    assert applied_select.evaluate(
+        "select => Object.keys(select.tomselect.options)"
+    ) == ["Backend"]
+
+
+def test_job_tracker_tag_dropdown_escapes_card_and_uses_internal_button(
+    setup_page: object,
+) -> None:
+    setup_page.set_viewport_size({"width": 1280, "height": 720})
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    scroll_container = setup_page.locator(
+        '[data-review-block="global"] .review-groups'
+    )
+    scroll_container.evaluate(
+        "container => { container.style.maxHeight = '240px'; container.scrollTop = 0; }"
+    )
+    assert scroll_container.evaluate(
+        "container => container.scrollHeight > container.clientHeight"
+    )
+    card = setup_page.locator('article[data-job-key="tag-backend"]')
+    toggle = card.locator("[data-user-tag-toggle]")
+
+    assert toggle.count() == 1
+    toggle_layout = card.evaluate(
+        """card => {
+          const control = card.querySelector('.job-user-tag-form .ts-control');
+          const toggle = card.querySelector('[data-user-tag-toggle]');
+          const controlBox = control.getBoundingClientRect();
+          const toggleBox = toggle.getBoundingClientRect();
+          const input = control.querySelector('input');
+          const inputBox = input.getBoundingClientRect();
+          const controlStyle = getComputedStyle(control);
+          const toggleStyle = getComputedStyle(toggle);
+          return {
+            controlBackground: controlStyle.backgroundImage,
+            controlCursor: controlStyle.cursor,
+            inputCursor: getComputedStyle(input).cursor,
+            inputPlaceholder: input.placeholder,
+            inputCenterGap: Math.abs(
+              (controlBox.top + controlBox.height / 2)
+              - (inputBox.top + inputBox.height / 2)
+            ),
+            width: toggleBox.width,
+            rightGap: Math.abs(controlBox.right - toggleBox.right),
+            borderWidths: [toggleStyle.borderTopWidth,
+                           toggleStyle.borderRightWidth,
+                           toggleStyle.borderBottomWidth,
+                           toggleStyle.borderLeftWidth],
+          };
+        }"""
+    )
+    assert toggle_layout["controlBackground"] == "none"
+    assert toggle_layout["controlCursor"] == "text"
+    assert toggle_layout["inputCursor"] == "text"
+    assert toggle_layout["inputPlaceholder"] == "input tag"
+    assert toggle_layout["inputCenterGap"] <= 1
+    assert toggle_layout["width"] == 32
+    assert toggle_layout["rightGap"] <= 1
+    assert toggle_layout["borderWidths"] == ["1px", "1px", "1px", "1px"]
+    assert card.locator("[data-user-tag-help]").text_content() == (
+        "Choose an existing tag or type a new one."
+    )
+    toggle.click()
+
+    dropdown = setup_page.locator("body > .ts-dropdown:visible")
+    dropdown.wait_for()
+    assert toggle.get_attribute("aria-expanded") == "true"
+    assert dropdown.evaluate("element => element.parentElement === document.body")
+    backend_color = dropdown.locator(
+        '[data-value="Backend"] [data-user-tag-option-color]'
+    )
+    remote_color = dropdown.locator(
+        '[data-value="Remote"] [data-user-tag-option-color]'
+    )
+    assert backend_color.get_attribute("data-user-tag-option-color") == "#2F6F5E"
+    assert remote_color.get_attribute("data-user-tag-option-color") == "#2563EB"
+    card_box = card.bounding_box()
+    dropdown_box = dropdown.bounding_box()
+    assert card_box is not None
+    assert dropdown_box is not None
+    assert dropdown_box["y"] + dropdown_box["height"] > (
+        card_box["y"] + card_box["height"]
+    )
+    initial_position = setup_page.evaluate(
+        """() => {
+          const control = document.querySelector(
+            'article[data-job-key="tag-backend"] .job-user-tag-form .ts-control'
+          ).getBoundingClientRect();
+          const dropdown = document.querySelector(
+            'body > .ts-dropdown[style*="display: block"]'
+          ).getBoundingClientRect();
+          return { controlBottom: control.bottom, dropdownTop: dropdown.top };
+        }"""
+    )
+
+    scroll_container.evaluate(
+        """container => {
+          container.scrollTop += 60;
+          container.dispatchEvent(new Event('scroll'));
+        }"""
+    )
+    anchored_position = setup_page.evaluate(
+        """() => {
+          const control = document.querySelector(
+            'article[data-job-key="tag-backend"] .job-user-tag-form .ts-control'
+          ).getBoundingClientRect();
+          const dropdown = document.querySelector(
+            'body > .ts-dropdown[style*="display: block"]'
+          ).getBoundingClientRect();
+          return { controlBottom: control.bottom, dropdownTop: dropdown.top };
+        }"""
+    )
+    initial_gap = initial_position["dropdownTop"] - initial_position["controlBottom"]
+    anchored_gap = (
+        anchored_position["dropdownTop"] - anchored_position["controlBottom"]
+    )
+    assert anchored_position["controlBottom"] < initial_position["controlBottom"]
+    assert anchored_position["dropdownTop"] < initial_position["dropdownTop"]
+    assert abs(initial_gap - anchored_gap) <= 2
+
+    toggle.click()
+
+    assert toggle.get_attribute("aria-expanded") == "false"
+    assert dropdown.is_hidden()
+    body_dropdowns = setup_page.locator("body > .ts-dropdown")
+    dropdown_count = body_dropdowns.count()
+
+    card.evaluate(
+        """card => {
+          card.remove();
+          document.dispatchEvent(new CustomEvent('job-scan:review-updated'));
+        }"""
+    )
+
+    assert body_dropdowns.count() == dropdown_count - 1
+
+
+def test_job_tracker_tag_panel_reserves_desktop_column_and_stacks_on_mobile(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    card = setup_page.locator('article[data-job-key="tag-backend"]')
+
+    desktop = card.evaluate(
+        """card => {
+          const box = (selector) => {
+            const bounds = card.querySelector(selector).getBoundingClientRect();
+            return { top: bounds.top, right: bounds.right, bottom: bounds.bottom,
+                     left: bounds.left, width: bounds.width };
+          };
+          const cardBounds = card.getBoundingClientRect();
+          return {
+            card: { top: cardBounds.top, right: cardBounds.right,
+                    bottom: cardBounds.bottom, left: cardBounds.left,
+                    width: cardBounds.width },
+            status: box(':scope > .job-preview-status'),
+            body: box(':scope > .job-preview-body'),
+            tags: box(':scope > [data-job-tag-panel]'),
+          };
+        }"""
+    )
+    url_width = setup_page.locator(".job-tracker-filters .url-filter").evaluate(
+        "element => element.getBoundingClientRect().width"
+    )
+    tag_width = setup_page.locator(".job-tracker-filters .tag-filter").evaluate(
+        "element => element.getBoundingClientRect().width"
+    )
+
+    assert desktop["status"]["right"] <= desktop["body"]["left"] + 0.5
+    assert desktop["body"]["right"] <= desktop["tags"]["left"] + 0.5
+    assert desktop["tags"]["width"] >= 200
+    assert url_width > tag_width
+
+    editor_controls = card.evaluate(
+        """card => [
+          card.querySelector('.job-user-tag-form input[type="color"]'),
+          card.querySelector('.job-user-tag-form .ts-control'),
+          card.querySelector('.job-user-tag-form button[type="submit"]'),
+        ].map((control) => {
+          const bounds = control.getBoundingClientRect();
+          return { top: bounds.top, bottom: bounds.bottom, height: bounds.height };
+        })"""
+    )
+
+    assert max(control["top"] for control in editor_controls) - min(
+        control["top"] for control in editor_controls
+    ) <= 1
+    assert max(control["bottom"] for control in editor_controls) - min(
+        control["bottom"] for control in editor_controls
+    ) <= 1
+    assert max(control["height"] for control in editor_controls) <= 32
+
+    setup_page.set_viewport_size({"width": 600, "height": 900})
+    mobile = card.evaluate(
+        """card => {
+          const cardBox = card.getBoundingClientRect();
+          const bodyBox = card.querySelector(':scope > .job-preview-body')
+            .getBoundingClientRect();
+          const tagBox = card.querySelector(':scope > [data-job-tag-panel]')
+            .getBoundingClientRect();
+          return {
+            cardWidth: cardBox.width,
+            bodyBottom: bodyBox.bottom,
+            tagTop: tagBox.top,
+            tagWidth: tagBox.width,
+          };
+        }"""
+    )
+
+    assert mobile["tagTop"] >= mobile["bodyBottom"] - 0.5
+    assert abs(mobile["tagWidth"] - mobile["cardWidth"]) <= 2
+
+
+def test_job_tracker_toolbar_aligns_with_cards_and_uses_equal_height_controls(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+
+    layout = setup_page.evaluate(
+        """() => {
+          const bounds = (selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect();
+            return { top: rect.top, right: rect.right, bottom: rect.bottom,
+                     left: rect.left, width: rect.width, height: rect.height };
+          };
+          const controls = [
+            bounds('.job-tracker-filters .source-filter .ts-control'),
+            bounds('.job-tracker-filters .tracker-group-settings-button'),
+            bounds('.job-tracker-filters .manual-job-button'),
+            bounds('#global-url-filter'),
+            bounds('.job-tracker-filters .tag-filter .ts-control'),
+            bounds('#global-sort'),
+          ];
+          return {
+            sourceFilter: bounds('.tracker-source-filter'),
+            sourceSelect: controls[0],
+            settings: controls[1],
+            addButton: controls[2],
+            groupNav: bounds('[data-review-block="global"] .review-group-nav'),
+            reviewGroups: bounds('[data-review-block="global"] .review-groups'),
+            controls,
+          };
+        }"""
+    )
+
+    assert abs(layout["sourceFilter"]["width"] - layout["groupNav"]["width"]) <= 1
+    assert abs(
+        layout["addButton"]["left"] - layout["reviewGroups"]["left"]
+    ) <= 1
+    assert 0 <= layout["settings"]["left"] - layout["sourceSelect"]["right"] <= 10
+    assert max(control["top"] for control in layout["controls"]) - min(
+        control["top"] for control in layout["controls"]
+    ) <= 1
+    assert max(control["bottom"] for control in layout["controls"]) - min(
+        control["bottom"] for control in layout["controls"]
+    ) <= 1
+    assert max(control["height"] for control in layout["controls"]) - min(
+        control["height"] for control in layout["controls"]
+    ) <= 1
+
+    for viewport_width in (800, 673):
+        setup_page.set_viewport_size({"width": viewport_width, "height": 900})
+        compact = setup_page.evaluate(
+            """() => {
+              const bounds = (selector) => {
+                const rect = document.querySelector(selector).getBoundingClientRect();
+                return { top: rect.top, right: rect.right, bottom: rect.bottom,
+                         left: rect.left, width: rect.width };
+              };
+              const toolbar = document.querySelector('.job-tracker-filters');
+              return {
+                toolbarFits: toolbar.scrollWidth <= toolbar.clientWidth + 1,
+                addButton: bounds('.job-tracker-filters .manual-job-button'),
+                reviewGroups: bounds('[data-review-block="global"] .review-groups'),
+                url: bounds('#global-url-filter'),
+                tags: bounds('.job-tracker-filters .tag-filter'),
+                sort: bounds('.job-tracker-filters .sort-filter'),
+              };
+            }"""
+        )
+
+        assert compact["toolbarFits"]
+        assert abs(
+            compact["addButton"]["left"] - compact["reviewGroups"]["left"]
+        ) <= 1
+        assert compact["tags"]["top"] >= compact["url"]["bottom"]
+        assert abs(compact["tags"]["top"] - compact["sort"]["top"]) <= 1
+        assert abs(compact["tags"]["bottom"] - compact["sort"]["bottom"]) <= 1
+        assert compact["tags"]["width"] >= 140
+        assert compact["sort"]["width"] >= 140
+
+
 def test_job_tracker_filters_order_add_button_url_filter_then_sort(
     setup_page: object,
 ) -> None:
@@ -1808,12 +2358,13 @@ def test_job_tracker_filters_order_add_button_url_filter_then_sort(
           (el) => el.matches('.source-filter') ? 'source'
             : el.matches('.manual-job-button') ? 'add'
             : el.matches('.url-filter') ? 'url'
+            : el.matches('.tag-filter') ? 'tag'
             : el.matches('.sort-filter') ? 'sort'
             : 'other'
         )"""
     )
 
-    assert order == ["source", "add", "other", "url", "sort"]
+    assert order == ["source", "add", "other", "url", "tag", "sort"]
 
 
 def test_job_tracker_sort_orders_by_added_applied_posted_and_score(
@@ -3615,6 +4166,7 @@ def test_job_tracker_group_double_click_focuses_latest_unread_result(
                         status="succeeded",
                         finished_at=NOW,
                     ),
+                    "user_tags": [UserTag(name="Backend", color="#2F6F5E")],
                 },
                 deep=True,
             ),
@@ -3629,6 +4181,7 @@ def test_job_tracker_group_double_click_focuses_latest_unread_result(
                         status="failed",
                         finished_at=NOW + timedelta(minutes=5),
                     ),
+                    "user_tags": [UserTag(name="Remote", color="#2563EB")],
                 },
                 deep=True,
             ),
@@ -3655,11 +4208,13 @@ def test_job_tracker_group_double_click_focuses_latest_unread_result(
     older = global_review.locator('article[data-job-key="notice-older"]')
     newer = global_review.locator('article[data-job-key="notice-newer"]')
     url_filter = setup_page.locator("#global-url-filter")
+    tag_filter = setup_page.locator("#global-tag-filter")
 
     setup_page.evaluate(
         "document.querySelector('#global-source-filter').tomselect.setValue(['linkedin'])"
     )
     url_filter.fill("notice-older")
+    tag_filter.evaluate("select => select.tomselect.setValue(['Backend'])")
 
     assert older.is_visible()
     assert newer.is_hidden()
@@ -3672,6 +4227,7 @@ def test_job_tracker_group_double_click_focuses_latest_unread_result(
             "document.querySelector('#global-source-filter').tomselect.items"
         )
     ) == ["linkedin", "stepstone"]
+    assert tag_filter.evaluate("select => select.tomselect.items") == []
     assert newer.is_visible()
     assert setup_page.evaluate("document.activeElement.dataset.jobKey") == (
         "notice-newer"
@@ -4498,7 +5054,6 @@ def test_setup_draft_restores_regular_fields_after_reload(setup_page: object) ->
     setup_page.locator("#simplify-de-limit").fill("47")
     setup_page.locator("#minimum-company-size").select_option("1000")
     setup_page.locator("#posted-within-days").select_option("14")
-    setup_page.locator("#claude-batch-size").fill("17")
     setup_page.locator("#scan-time").fill("08:45")
     setup_page.evaluate(
         "const control = document.querySelector('#search-terms').tomselect;"
@@ -4520,7 +5075,7 @@ def test_setup_draft_restores_regular_fields_after_reload(setup_page: object) ->
     assert setup_page.locator("#simplify-de-limit").input_value() == "47"
     assert setup_page.locator("#minimum-company-size").input_value() == "1000"
     assert setup_page.locator("#posted-within-days").input_value() == "14"
-    assert setup_page.locator("#claude-batch-size").input_value() == "17"
+    assert setup_page.locator("#claude-batch-size").count() == 0
     assert setup_page.locator("#scan-time").input_value() == "08:45"
     assert setup_page.evaluate(
         "document.querySelector('#search-terms').tomselect.items"
@@ -4637,6 +5192,46 @@ def test_deleting_latest_history_keeps_global_setup_draft(setup_page: object) ->
     ) == "keep"
 
 
+def test_save_daily_scan_time_posts_schedule_without_starting_a_scan(
+    setup_page: object,
+) -> None:
+    schedule_posts: list[str] = []
+    scan_posts: list[str] = []
+
+    def respond_schedule(route: object) -> None:
+        if route.request.method != "POST":
+            route.fallback()
+            return
+        schedule_posts.append(route.request.post_data or "")
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"installed": True, "local_time": "07:15"}),
+        )
+
+    def observe_scan(route: object) -> None:
+        if route.request.method == "POST":
+            scan_posts.append(route.request.post_data or "")
+        route.fallback()
+
+    setup_page.route("**/api/schedule", respond_schedule)
+    setup_page.route("**/api/setup-and-scan", observe_scan)
+    setup_page.locator("#resume").set_input_files(str(RESUME))
+    setup_page.locator("#scan-time").fill("07:15")
+    setup_page.evaluate(
+        "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
+    )
+
+    setup_page.get_by_role("button", name="Save Daily scan time").click()
+
+    setup_page.get_by_text("Every day at 07:15", exact=True).wait_for()
+    assert len(schedule_posts) == 1
+    assert '"local_time":"07:15"' in schedule_posts[0]
+    assert '"batch_size":2' in schedule_posts[0]
+    assert scan_posts == []
+    assert setup_page.locator("#setup").is_visible()
+
+
 def test_run_page_polls_and_renders_real_backend_stages(setup_page: object) -> None:
     states = [
         {
@@ -4734,7 +5329,7 @@ def test_run_page_polls_and_renders_real_backend_stages(setup_page: object) -> N
     setup_page.locator("#target-company-telekom").check()
     setup_page.locator("#target-company-thyssenkrupp").check()
 
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
 
     setup_page.locator("#run-percent").wait_for(state="visible")
     setup_page.get_by_text("100%", exact=True).wait_for()
@@ -4754,6 +5349,7 @@ def test_run_page_polls_and_renders_real_backend_stages(setup_page: object) -> N
         "5 eligible jobs"
     )
     assert '"thinking_enabled":false' in posted_bodies[0]
+    assert '"batch_size":2' in posted_bodies[0]
     assert (
         '"target_companies":["bosch","telekom","rohde-schwarz","siemens","dhl","thyssenkrupp","dallmeier"]'
         in posted_bodies[0]
@@ -4900,7 +5496,7 @@ def test_completed_run_open_review_desk_shows_fresh_review(setup_page: object) -
     setup_page.evaluate(
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
     review_link = setup_page.get_by_role("link", name="Open review desk")
     review_link.wait_for(state="visible")
 
@@ -4958,7 +5554,7 @@ def test_run_page_renders_review_batch_percent_and_counts(setup_page: object) ->
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
 
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
 
     setup_page.locator("#run-percent", has_text="85%").wait_for(timeout=2_000)
     assert setup_page.locator("#run-message").text_content() == review_state["message"]
@@ -5015,7 +5611,7 @@ def test_run_page_renders_source_percent_and_counts(setup_page: object) -> None:
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
 
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
 
     setup_page.locator("#run-percent", has_text="55%").wait_for(timeout=2_000)
     assert setup_page.locator("#run-message").text_content() == source_state["message"]
@@ -5073,7 +5669,7 @@ def test_run_page_renders_company_size_percent_and_counts(setup_page: object) ->
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
 
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
 
     setup_page.locator("#run-percent", has_text="97%").wait_for(timeout=2_000)
     assert setup_page.locator("#run-message").text_content() == company_size_state[
@@ -5108,7 +5704,7 @@ def test_run_page_reports_service_disconnect_instead_of_running_forever(
         "document.querySelector('#search-terms').tomselect.setValue(['Backend Engineer'])"
     )
 
-    setup_page.get_by_role("button", name="Save and run scan").click()
+    setup_page.get_by_role("button", name="Run scan").click()
 
     setup_page.locator("#run-percent", has_text="Failed").wait_for()
     assert setup_page.locator("#run-message").text_content() == (

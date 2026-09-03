@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import shutil
 import sys
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Never
 
@@ -30,20 +33,35 @@ from job_scan.ats_service import AtsCheckService
 from job_scan.ats_workflow import AtsWorkflow
 from job_scan.claude_process import ClaudeProcessError
 from job_scan.config import (
+    AppConfig,
     ClaudeSettings,
     SchedulerSettings,
     load_config,
+    load_config_bytes,
     save_config,
 )
 from job_scan.dashboard.render import render_dashboard
 from job_scan.doctor import run_doctor
+from job_scan.domain import Snapshot
 from job_scan.locking import FileRWLock, LockUnavailable
 from job_scan.mdns import MDNS_HOSTNAME, MdnsError, MdnsPublisher
 from job_scan.paths import AppPaths
 from job_scan.repository import JsonlRepository
 from job_scan.resume import ResumeError
 from job_scan.review_server import create_review_app
-from job_scan.scan_service import ScanAlreadyRunning, ScanError, ScanService
+from job_scan.scan_service import (
+    ScanAlreadyRunning,
+    ScanError,
+    ScanProgress,
+    ScanProgressCallback,
+    ScanProgressStage,
+    ScanRunState,
+    ScanService,
+    ScanSummary,
+    scan_progress_message,
+    scan_progress_percent,
+    write_scan_run_state,
+)
 from job_scan.scheduler import (
     SchedulerBackend,
     SchedulerError,
@@ -52,7 +70,7 @@ from job_scan.scheduler import (
 )
 from job_scan.search_history import SearchHistoryStore
 from job_scan.setup_service import SetupAnswers, SetupError, SetupService
-from job_scan.web_workflow import WebWorkflow
+from job_scan.web_workflow import WebWorkflow, WebWorkflowBusy
 
 app = typer.Typer(no_args_is_help=True, callback=lambda: None)
 scheduler_app = typer.Typer(no_args_is_help=True)
@@ -254,11 +272,28 @@ def scan(
         bool,
         typer.Option("--force-review", help="Review all active jobs with complete JDs."),
     ] = False,
+    scheduled: Annotated[
+        bool,
+        typer.Option(
+            "--scheduled",
+            help="Run the saved daily setup and archive its search history.",
+        ),
+    ] = False,
 ) -> None:
     """Fetch configured sources, review due jobs, and publish one snapshot."""
     paths = AppPaths.from_environment(os.environ)
     try:
-        result = _scan_service_factory(paths).run(force_review=force_review)
+        result = _run_tracked_scan(
+            paths,
+            lambda progress: (
+                _run_scheduled_scan(paths, force_review=force_review, progress=progress)
+                if scheduled
+                else _scan_service_factory(paths).run(
+                    force_review=force_review,
+                    progress=progress,
+                )
+            ),
+        )
     except ScanAlreadyRunning as error:
         _exit_scan_error(str(error), code=2)
     except ScanError as error:
@@ -275,6 +310,133 @@ def scan(
     typer.echo(f"Source errors: {result.source_error_count}")
     typer.echo(f"Jobs JSONL: {result.jobs_jsonl}")
     typer.echo(f"Dashboard: {result.dashboard_html}")
+
+
+def _run_tracked_scan(
+    paths: AppPaths,
+    run: Callable[[ScanProgressCallback], ScanSummary],
+) -> ScanSummary:
+    """Persist command-line scan progress so other processes can show it."""
+    run_id = str(uuid.uuid4())
+    last_stage: ScanProgressStage | None = None
+    last_percent = 0.0
+
+    def record(current: ScanProgress) -> None:
+        nonlocal last_stage, last_percent
+        last_stage = current.stage
+        last_percent = scan_progress_percent(current)
+        _write_scan_progress_state(
+            paths,
+            ScanRunState(
+                run_id=run_id,
+                status="running",
+                stage=current.stage,
+                message=scan_progress_message(current),
+                progress_percent=last_percent,
+                updated_at=datetime.now(UTC),
+            ),
+        )
+
+    try:
+        summary = run(record)
+    except ScanAlreadyRunning:
+        raise
+    except BaseException as error:
+        _write_scan_progress_state(
+            paths,
+            ScanRunState(
+                run_id=run_id,
+                status="failed",
+                stage=last_stage,
+                message=str(error) if isinstance(error, ScanError) else "Scan failed.",
+                progress_percent=last_percent,
+                updated_at=datetime.now(UTC),
+            ),
+        )
+        raise
+    _write_scan_progress_state(
+        paths,
+        ScanRunState(
+            run_id=run_id,
+            status="complete",
+            stage="publish",
+            message="Review queue published.",
+            progress_percent=100.0,
+            updated_at=datetime.now(UTC),
+        ),
+    )
+    return summary
+
+
+def _write_scan_progress_state(paths: AppPaths, state: ScanRunState) -> None:
+    """Store one scan state snapshot while tolerating an unusable output directory."""
+    try:
+        write_scan_run_state(paths, state)
+    except OSError:
+        pass  # state reporting must never fail the scan itself
+
+
+def _run_scheduled_scan(
+    paths: AppPaths,
+    *,
+    force_review: bool,
+    progress: ScanProgressCallback | None = None,
+) -> ScanSummary:
+    """Publish the saved daily setup, scan it, and archive the exact result."""
+    try:
+        with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False):
+            with FileRWLock(paths.schedule_lock_file).exclusive(blocking=False):
+                config_bytes = paths.scheduled_config_toml.read_bytes()
+                profile_bytes = paths.scheduled_profile_md.read_bytes()
+                config = load_config_bytes(config_bytes)
+                if config.scheduler.local_time is None:
+                    raise ScanError("Daily scan time is not configured.")
+                actual_profile_hash = (
+                    "sha256:" + hashlib.sha256(profile_bytes).hexdigest()
+                )
+                if config.profile_sha256 != actual_profile_hash:
+                    raise ScanError("Saved daily scan profile does not match its configuration.")
+
+            setup_service = _setup_service_factory(paths)
+            previous_profile = (
+                paths.profile_md.read_bytes() if paths.profile_md.is_file() else None
+            )
+            previous_config = (
+                paths.config_toml.read_bytes() if paths.config_toml.is_file() else None
+            )
+            setup_service.restore_pair(profile_bytes, config_bytes)
+            resume_path = Path(config.resume_path)
+            resume_filename = (
+                f"{config.candidate_name.strip() or 'resume'}{resume_path.suffix.lower()}"
+            )
+            history = SearchHistoryStore(paths)
+
+            def archive(summary: ScanSummary, snapshot: Snapshot) -> None:
+                history.archive(
+                    run_id=summary.run_id,
+                    candidate_name=config.candidate_name or "Candidate",
+                    resume_filename=resume_filename,
+                    resume_path=resume_path,
+                    snapshot=snapshot,
+                    finished_at=summary.finished_at,
+                    profile_bytes=profile_bytes,
+                    config_bytes=config_bytes,
+                )
+
+            try:
+                return _scan_service_factory(paths).run(
+                    force_review=force_review,
+                    progress=progress,
+                    on_published=archive,
+                    workflow_lock_held=True,
+                )
+            except BaseException:
+                setup_service.restore_pair(previous_profile, previous_config)
+                raise
+    except LockUnavailable:
+        raise ScanAlreadyRunning("Another setup or scan is already running.") from None
+    except (OSError, UnicodeError, ValueError, SetupError) as error:
+        raise ScanError("Could not load the saved daily scan setup.") from error
 
 
 @app.command()
@@ -322,6 +484,13 @@ def review(
             executable=_scheduler_executable_factory(),
             history_store=search_history,
         )
+        try:
+            workflow.reconcile_schedule()
+        except (OSError, ValueError, SchedulerError, WebWorkflowBusy) as error:
+            typer.echo(
+                f"Scheduler reconciliation failed: {error}",
+                err=True,
+            )
         review_app = create_review_app(
             repository,
             token,
@@ -372,21 +541,49 @@ def scheduler_install(
     """Install or reconcile the native daily scheduler entry."""
     paths = AppPaths.from_environment(os.environ)
     backend = _scheduler_backend_or_exit()
+    scheduler_settings: SchedulerSettings | None = None
+    if local_time is not None:
+        try:
+            scheduler_settings = SchedulerSettings(local_time=local_time)
+        except ValidationError:
+            _exit_scheduler_error("time must use HH:MM.")
     try:
-        with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False):
-            config = load_config(paths.config_toml)
-            if local_time is not None:
-                try:
-                    scheduler_settings = SchedulerSettings(local_time=local_time)
-                except ValidationError:
-                    _exit_scheduler_error("time must use HH:MM.")
-                config = config.model_copy(update={"scheduler": scheduler_settings})
-                save_config(paths.config_toml, config)
-            if config.scheduler.local_time is None:
-                raise SchedulerError(
-                    "Daily scan time is not configured; pass --time HH:MM."
+        with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False), FileRWLock(
+            paths.schedule_lock_file
+        ).exclusive(blocking=False):
+            previous_profile = (
+                paths.scheduled_profile_md.read_bytes()
+                if paths.scheduled_profile_md.is_file()
+                else None
+            )
+            previous_config = (
+                paths.scheduled_config_toml.read_bytes()
+                if paths.scheduled_config_toml.is_file()
+                else None
+            )
+            setup_service = _setup_service_factory(paths)
+            try:
+                config = _load_or_seed_scheduled_setup(paths)
+                if scheduler_settings is not None:
+                    config = config.model_copy(update={"scheduler": scheduler_settings})
+                    save_config(paths.scheduled_config_toml, config)
+                if config.scheduler.local_time is None:
+                    raise SchedulerError(
+                        "Daily scan time is not configured; pass --time HH:MM."
+                    )
+                state = backend.install(
+                    config,
+                    paths,
+                    _scheduler_executable_factory(),
                 )
-            state = backend.install(config, paths, _scheduler_executable_factory())
+            except BaseException:
+                setup_service.restore_pair(
+                    previous_profile,
+                    previous_config,
+                    profile_path=paths.scheduled_profile_md,
+                    config_path=paths.scheduled_config_toml,
+                )
+                raise
     except LockUnavailable:
         _exit_scheduler_error("Another setup or scan is already running.")
     except (OSError, ValueError, SchedulerError) as error:
@@ -400,12 +597,14 @@ def scheduler_remove() -> None:
     paths = AppPaths.from_environment(os.environ)
     backend = _scheduler_backend_or_exit()
     try:
-        with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False):
+        with FileRWLock(paths.workflow_lock_file).exclusive(blocking=False), FileRWLock(
+            paths.schedule_lock_file
+        ).exclusive(blocking=False):
             state = backend.remove(paths)
-            if paths.config_toml.is_file():
-                config = load_config(paths.config_toml)
+            if paths.scheduled_config_toml.is_file():
+                config = load_config(paths.scheduled_config_toml)
                 config = config.model_copy(update={"scheduler": SchedulerSettings()})
-                save_config(paths.config_toml, config)
+                save_config(paths.scheduled_config_toml, config)
     except LockUnavailable:
         _exit_scheduler_error("Another setup or scan is already running.")
     except (OSError, ValueError, SchedulerError) as error:
@@ -431,6 +630,24 @@ def _scheduler_backend_or_exit() -> SchedulerBackend:
         return _scheduler_backend_factory()
     except SchedulerError as error:
         _exit_scheduler_error(str(error))
+
+
+def _load_or_seed_scheduled_setup(paths: AppPaths) -> AppConfig:
+    """Load the dedicated daily setup or seed it from the current CLI setup."""
+    if paths.scheduled_config_toml.is_file() or paths.scheduled_profile_md.is_file():
+        config = load_config(paths.scheduled_config_toml)
+        paths.scheduled_profile_md.read_bytes()
+        return config
+    config_bytes = paths.config_toml.read_bytes()
+    profile_bytes = paths.profile_md.read_bytes()
+    config = load_config_bytes(config_bytes)
+    _setup_service_factory(paths).restore_pair(
+        profile_bytes,
+        config_bytes,
+        profile_path=paths.scheduled_profile_md,
+        config_path=paths.scheduled_config_toml,
+    )
+    return config
 
 
 def _print_scheduler_state(state: SchedulerState, paths: AppPaths) -> None:

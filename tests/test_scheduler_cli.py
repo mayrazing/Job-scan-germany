@@ -14,7 +14,7 @@ from job_scan.config import (
     save_config,
 )
 from job_scan.paths import AppPaths
-from job_scan.scheduler import SchedulerState, UnsupportedSchedulerPlatform
+from job_scan.scheduler import SchedulerError, SchedulerState, UnsupportedSchedulerPlatform
 
 
 def _config(local_time: str | None = "08:30") -> AppConfig:
@@ -37,12 +37,15 @@ def _config(local_time: str | None = "08:30") -> AppConfig:
 class RecordingBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
+        self.install_error: SchedulerError | None = None
 
     def install(
         self, config: AppConfig, paths: AppPaths, executable: Path
     ) -> SchedulerState:
-        persisted = load_config(paths.config_toml)
+        persisted = load_config(paths.scheduled_config_toml)
         self.calls.append(("install", persisted.scheduler.local_time))
+        if self.install_error is not None:
+            raise self.install_error
         return SchedulerState(
             backend="cron",
             installed=True,
@@ -78,6 +81,7 @@ def _install_cli_fakes(
     paths = AppPaths.from_root(tmp_path / "home")
     paths.ensure_directories()
     save_config(paths.config_toml, _config())
+    paths.profile_md.write_text("# Current profile\n", encoding="utf-8")
     executable = (tmp_path / "bin" / "job-scan").resolve()
     backend = RecordingBackend()
     monkeypatch.setenv("JOB_SCAN_HOME", str(paths.root))
@@ -95,7 +99,11 @@ def test_scheduler_install_time_is_saved_before_reconciliation_and_prints_state(
 
     assert result.exit_code == 0, result.output
     assert backend.calls == [("install", "07:15")]
-    assert load_config(paths.config_toml).scheduler.local_time == "07:15"
+    assert load_config(paths.config_toml).scheduler.local_time == "08:30"
+    assert load_config(paths.scheduled_config_toml).scheduler.local_time == "07:15"
+    assert paths.scheduled_profile_md.read_text(encoding="utf-8") == (
+        "# Current profile\n"
+    )
     assert result.stdout.splitlines() == [
         "Backend: cron",
         "Installed: yes",
@@ -134,6 +142,20 @@ def test_scheduler_install_rejects_invalid_time_without_changing_config(
     assert backend.calls == []
 
 
+def test_scheduler_install_failure_restores_the_previous_scheduled_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, backend, _executable = _install_cli_fakes(tmp_path, monkeypatch)
+    save_config(paths.scheduled_config_toml, _config("08:30"))
+    paths.scheduled_profile_md.write_text("# Scheduled profile\n", encoding="utf-8")
+    backend.install_error = SchedulerError("native install failed")
+
+    result = CliRunner().invoke(cli.app, ["scheduler", "install", "--time", "07:15"])
+
+    assert result.exit_code == 1
+    assert load_config(paths.scheduled_config_toml).scheduler.local_time == "08:30"
+
+
 def test_scheduler_install_rejects_a_missing_time_without_calling_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,12 +176,15 @@ def test_scheduler_remove_clears_the_persisted_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths, backend, _executable = _install_cli_fakes(tmp_path, monkeypatch)
+    save_config(paths.scheduled_config_toml, _config())
+    paths.scheduled_profile_md.write_text("# Scheduled profile\n", encoding="utf-8")
 
     result = CliRunner().invoke(cli.app, ["scheduler", "remove"])
 
     assert result.exit_code == 0, result.output
     assert backend.calls == [("remove", paths.root)]
-    assert load_config(paths.config_toml).scheduler.local_time is None
+    assert load_config(paths.config_toml).scheduler.local_time == "08:30"
+    assert load_config(paths.scheduled_config_toml).scheduler.local_time is None
 
 
 def test_scheduler_remove_reports_an_invalid_config_without_a_traceback(
@@ -167,7 +192,10 @@ def test_scheduler_remove_reports_an_invalid_config_without_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths, backend, _executable = _install_cli_fakes(tmp_path, monkeypatch)
-    paths.config_toml.write_text("[scheduler]\nlocal_time = '25:00'\n", encoding="utf-8")
+    paths.scheduled_config_toml.write_text(
+        "[scheduler]\nlocal_time = '25:00'\n",
+        encoding="utf-8",
+    )
 
     result = CliRunner().invoke(cli.app, ["scheduler", "remove"])
 

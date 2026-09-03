@@ -22,6 +22,7 @@ from job_scan.domain import (
     TrackerGroup,
     UserStatus,
     UserStatusHistoryEntry,
+    UserTag,
 )
 
 NOW = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
@@ -400,6 +401,37 @@ def test_console_job_tracker_has_url_filter_and_card_url() -> None:
     card = global_block.select_one('[data-job-key="saved"]')
     assert card is not None
     assert card.get("data-job-url") == "https://jobs.example/saved"
+
+
+def test_console_job_tracker_renders_user_tag_filter_and_card_editor() -> None:
+    job = _job("saved", user=UserStatus.SAVED)
+    job.user_tags = [UserTag(name="Backend", color="#2F6F5E")]
+    page = BeautifulSoup(
+        render_console(global_snapshot=_snapshot(job)),
+        "html.parser",
+    )
+
+    global_block = page.select_one('[data-review-block="global"]')
+    assert global_block is not None
+    tag_filter = global_block.select_one(
+        'select#global-tag-filter[name="global-tag-filter"][multiple]'
+    )
+    assert tag_filter is not None
+    card = global_block.select_one('[data-job-key="saved"]')
+    assert card is not None
+    panel = card.select_one(":scope > [data-job-tag-panel]")
+    assert panel is not None
+    chip = panel.select_one('[data-user-tag-name="Backend"]')
+    assert chip is not None
+    assert chip.get("style") == "--tag-color: #2F6F5E"
+    assert chip.select_one('button[data-delete-user-tag][aria-label="Remove Backend"]')
+    form = panel.select_one(
+        'form[data-user-tag-form][data-user-tag-job-key="saved"]'
+    )
+    assert form is not None
+    assert form.select_one('input[name="color"][type="color"]') is not None
+    assert form.select_one('select[name="tag"][data-user-tag-select]') is not None
+    assert form.select_one('button[type="submit"]') is not None
 
 
 def test_console_job_tracker_omits_resume_block_and_requires_a_new_upload() -> None:

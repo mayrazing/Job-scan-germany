@@ -67,6 +67,7 @@ from job_scan.ats_workflow import (
     AtsWorkflowBusy,
     AtsWorkflowInput,
 )
+from job_scan.claude_process import ClaudeProcessError
 from job_scan.codex_login import CodexLoginSnapshot, CodexLoginWorkflow
 from job_scan.codex_process import (
     CodexModelOption,
@@ -121,6 +122,7 @@ from job_scan.resume_suggestions import (
     ResumeSuggestionSettings,
 )
 from job_scan.reviewer import ClaudeReviewer
+from job_scan.scan_service import read_scan_run_state
 from job_scan.scheduler import SchedulerError
 from job_scan.search_history import SearchHistoryStore
 from job_scan.setup_service import (
@@ -257,6 +259,31 @@ class _JobNoteMutation(BaseModel):
         return value
 
 
+class _UserTagMutation(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Tag name cannot be empty")
+        return value
+
+
+class _UserTagDeletion(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Tag name cannot be empty")
+        return value
+
+
 class _AiModelDiscoveryRequest(BaseModel):
     provider_id: str | None = None
     base_url: str
@@ -297,7 +324,7 @@ class _BackgroundTaskState(BaseModel):
     task_id: str
     kind: Literal["scan", "add-job", "re-evaluate", "ats-run"]
     label: str
-    status: Literal["waiting", "running"]
+    status: Literal["waiting", "running", "failed"]
     message: str
     progress_percent: float = Field(ge=0, le=100)
     subject_key: str | None = None
@@ -305,6 +332,16 @@ class _BackgroundTaskState(BaseModel):
 
 class _BackgroundTaskCollection(BaseModel):
     tasks: list[_BackgroundTaskState]
+
+
+def _workflow_lock_is_externally_held(paths: AppPaths) -> bool:
+    """Return whether any process currently owns the whole-workflow lock."""
+    try:
+        with FileRWLock(paths.workflow_lock_file).shared(blocking=False):
+            pass
+    except LockUnavailable:
+        return True
+    return False
 
 
 class _JobDisappeared(RuntimeError):
@@ -800,7 +837,7 @@ def create_review_app(
                 _BackgroundTaskState(
                     task_id=f"scan:{scan_state.run_id}",
                     kind="scan",
-                    label="Save and run scan",
+                    label="Run scan",
                     status="running",
                     message=scan_state.message,
                     progress_percent=scan_state.progress_percent,
@@ -834,7 +871,34 @@ def create_review_app(
                     progress_percent=ats_state.progress_percent,
                 )
             )
+        tasks.extend(_external_scan_tasks(workflow, repository.paths))
         return _BackgroundTaskCollection(tasks=tasks)
+
+    def _external_scan_tasks(
+        workflow: WebWorkflow | None,
+        paths: AppPaths,
+    ) -> list[_BackgroundTaskState]:
+        """Surface the persisted command-line scan state for the task list."""
+        state = read_scan_run_state(paths)
+        if state is None or state.status == "complete":
+            return []
+        if state.status == "running":
+            busy_reader = getattr(workflow, "is_busy", None)
+            busy = busy_reader() if callable(busy_reader) else False
+            if busy or not _workflow_lock_is_externally_held(paths):
+                # Either this server runs its own scan, or the persisted state
+                # is a leftover from a killed scan process.
+                return []
+        return [
+            _BackgroundTaskState(
+                task_id=f"cli-scan:{state.run_id}",
+                kind="scan",
+                label="Command-line scan",
+                status=state.status,
+                message=state.message,
+                progress_percent=state.progress_percent,
+            )
+        ]
 
     @app.post(
         "/api/global-jobs/import-with-resume",
@@ -1810,6 +1874,50 @@ def create_review_app(
                 local_time=state.local_time,
             )
 
+        @app.post(
+            "/api/schedule",
+            dependencies=[Depends(require_mutation_request)],
+        )
+        def save_schedule(
+            settings: Annotated[str, Form()],
+            resume: Annotated[UploadFile, File()],
+        ) -> WebScheduleState:
+            try:
+                answers = SetupAnswers.model_validate_json(settings)
+            except (ValidationError, ValueError):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "Invalid setup settings.",
+                ) from None
+            if answers.scheduler.local_time is None:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "Daily scan time is required.",
+                )
+            try:
+                with FileRWLock(repository.paths.ai_usage_lock_file).shared():
+                    state = workflow.save_schedule(
+                        resume.filename or "",
+                        read_resume_upload(resume.file),
+                        apply_selection_to_setup(answers),
+                    )
+            except WebWorkflowBusy as error:
+                raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from None
+            except (SetupError, ResumeError, ClaudeProcessError, SchedulerError) as error:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    str(error),
+                ) from None
+            except OSError as error:
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    str(error) or "Could not save daily scan.",
+                ) from None
+            return WebScheduleState(
+                installed=state.installed,
+                local_time=state.local_time,
+            )
+
         @app.delete(
             "/api/schedule",
             dependencies=[Depends(require_mutation_request)],
@@ -2415,6 +2523,46 @@ def create_review_app(
             global_jobs.delete_note(job, note_id)
         except KeyError:
             raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.post(
+        "/api/global-jobs/{key}/tags",
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def add_global_job_user_tag(
+        key: str,
+        mutation: _UserTagMutation,
+    ) -> dict[str, str]:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        try:
+            tag = global_jobs.add_user_tag(job, mutation.name, mutation.color)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        return {"name": tag.name, "color": tag.color}
+
+    @app.delete(
+        "/api/global-jobs/{key}/tags",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mutation_request)],
+    )
+    def delete_global_job_user_tag(
+        key: str,
+        mutation: _UserTagDeletion,
+    ) -> Response:
+        job = global_jobs.find(key)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND)
+        try:
+            global_jobs.delete_user_tag(job, mutation.name)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND) from None
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+            ) from None
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post(

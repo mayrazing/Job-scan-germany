@@ -10,16 +10,20 @@ from pathlib import Path
 class AppPaths:
     root: Path
     config_toml: Path
+    scheduled_config_toml: Path
     job_tracker_config_toml: Path
     ai_config_toml: Path
     ai_selection_toml: Path
     profile_md: Path
+    scheduled_profile_md: Path
     codex_home: Path
     jobs_jsonl: Path
     dashboard_html: Path
     lock_file: Path
     scan_lock_file: Path
+    scan_run_state: Path
     workflow_lock_file: Path
+    schedule_lock_file: Path
     ai_usage_lock_file: Path
     history_dir: Path
     history_lock_file: Path
@@ -37,16 +41,20 @@ class AppPaths:
         return cls(
             root=root,
             config_toml=root / "config.toml",
+            scheduled_config_toml=root / "scheduled-config.toml",
             job_tracker_config_toml=root / "job-tracker-config.toml",
             ai_config_toml=root / "ai-config.toml",
             ai_selection_toml=root / "ai-selection.toml",
             profile_md=root / "profile.md",
+            scheduled_profile_md=root / "scheduled-profile.md",
             codex_home=root / "codex-home",
             jobs_jsonl=output_dir / "jobs.jsonl",
             dashboard_html=output_dir / "index.html",
             lock_file=output_dir / ".data.lock",
             scan_lock_file=output_dir / ".scan.lock",
+            scan_run_state=output_dir / ".scan-run-state.json",
             workflow_lock_file=output_dir / ".workflow.lock",
+            schedule_lock_file=output_dir / ".schedule.lock",
             ai_usage_lock_file=root / ".ai-usage.lock",
             history_dir=root / "history",
             history_lock_file=root / "history" / ".history.lock",

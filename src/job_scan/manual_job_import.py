@@ -119,7 +119,7 @@ def _manual_source_identity(source_url: str) -> tuple[str, str]:
 
 def _rendered_body_chunk_script(start: int) -> str:
     """Return browser JavaScript that cleans and slices the complete body HTML."""
-    script = """(() => {
+    script = """(async () => {
   const start = __START__;
   const chunkSize = __CHUNK_SIZE__;
   if (!document.body) {
@@ -131,6 +131,7 @@ def _rendered_body_chunk_script(start: int) -> str:
       end: 0,
       next_start_char: null,
       content: '',
+      content_sha256: null,
     };
   }
 
@@ -142,7 +143,7 @@ def _rendered_body_chunk_script(start: int) -> str:
   // Remove script, style, noscript, template, and media-only nodes.
   for (const selector of [
     'script', 'style', 'noscript', 'template',
-    'svg', 'canvas', 'video', 'audio', 'source',
+    'svg', 'canvas', 'video', 'audio', 'source', 'iframe',
   ]) {
     for (const node of clone.querySelectorAll(selector)) node.remove();
   }
@@ -170,7 +171,22 @@ def _rendered_body_chunk_script(start: int) -> str:
   }
 
   const html = clone.innerHTML;
-  const end = Math.min(html.length, start + chunkSize);
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(html),
+  );
+  const contentSha256 = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  let end = Math.min(html.length, start + chunkSize);
+  if (end < html.length) {
+    const previousCodeUnit = html.charCodeAt(end - 1);
+    const nextCodeUnit = html.charCodeAt(end);
+    if (
+      previousCodeUnit >= 0xD800 && previousCodeUnit <= 0xDBFF
+      && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF
+    ) end += 1;
+  }
   return {
     url: location.href,
     title: document.title || '',
@@ -179,6 +195,7 @@ def _rendered_body_chunk_script(start: int) -> str:
     end,
     next_start_char: end < html.length ? end : null,
     content: html.slice(start, end),
+    content_sha256: contentSha256,
   };
 })()"""
     return script.replace("__START__", str(start)).replace(
@@ -238,10 +255,16 @@ class OpenCliPageReader:
             start = 0
             page_url = safe_url
             page_title = ""
-            expected_total: int | None = None
             page_load_deadline = time.monotonic() + self._timeout_seconds
-            waiting_for_stable_page = False
-            stable_page: tuple[object, ...] | None = None
+            stable_page: tuple[str, str, int, str] | None = None
+            captured_page: tuple[str, str, int, str] | None = None
+
+            def wait_for_stable_page() -> None:
+                remaining = page_load_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ManualJobImportError("Opening this job page timed out.")
+                time.sleep(min(0.5, remaining))
+
             while True:
                 payload = self._run_json(
                     [
@@ -258,40 +281,42 @@ class OpenCliPageReader:
                 chunk_end = payload.get("end")
                 content = payload.get("content")
                 next_start = payload.get("next_start_char")
-                if start == 0 and total_chars == 0 and content == "":
-                    waiting_for_stable_page = True
+                content_sha256 = payload.get("content_sha256")
+                if type(total_chars) is int and total_chars == 0 and content == "":
                     stable_page = None
-                elif start == 0 and waiting_for_stable_page:
-                    current_page = (
-                        payload.get("title"),
-                        total_chars,
-                        chunk_start,
-                        chunk_end,
-                        content,
-                        next_start,
-                    )
-                    if current_page == stable_page:
-                        waiting_for_stable_page = False
-                    else:
-                        stable_page = current_page
-                if waiting_for_stable_page:
-                    remaining = page_load_deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise ManualJobImportError("Opening this job page timed out.")
-                    time.sleep(min(0.5, remaining))
+                    captured_page = None
+                    chunks.clear()
+                    start = 0
+                    wait_for_stable_page()
                     continue
-                page_title = _required_text(payload, "title")
+                current_title = _required_text(payload, "title")
                 if (
                     type(total_chars) is not int
                     or total_chars <= 0
                     or total_chars > _MAX_PAGE_CHARS
                 ):
                     raise ManualJobImportError("This job page is too large to import safely.")
-                if expected_total is None:
-                    expected_total = total_chars
                 if (
-                    total_chars != expected_total
-                    or type(chunk_start) is not int
+                    not isinstance(content, str)
+                    or not isinstance(content_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", content_sha256) is None
+                ):
+                    raise ManualJobImportError("OpenCLI returned invalid page content.")
+                current_page = (
+                    page_url,
+                    current_title,
+                    total_chars,
+                    content_sha256,
+                )
+                if captured_page is not None and current_page != captured_page:
+                    stable_page = current_page
+                    captured_page = None
+                    chunks.clear()
+                    start = 0
+                    wait_for_stable_page()
+                    continue
+                if (
+                    type(chunk_start) is not int
                     or type(chunk_end) is not int
                     or chunk_start != start
                     or chunk_end <= chunk_start
@@ -300,16 +325,31 @@ class OpenCliPageReader:
                     or (next_start is not None and next_start != chunk_end)
                 ):
                     raise ManualJobImportError("OpenCLI returned invalid page chunks.")
-                if not isinstance(content, str):
-                    raise ManualJobImportError("OpenCLI did not return readable page content.")
                 if _javascript_char_length(content) != chunk_end - chunk_start:
                     raise ManualJobImportError("OpenCLI returned invalid page chunks.")
+                if captured_page is None:
+                    if current_page != stable_page:
+                        stable_page = current_page
+                        start = 0
+                        wait_for_stable_page()
+                        continue
+                    captured_page = current_page
+                    page_title = current_title
                 chunks.append(content)
                 if next_start is None:
                     break
                 if type(next_start) is not int or next_start <= start:
                     raise ManualJobImportError("OpenCLI returned invalid page chunks.")
                 start = next_start
+            if captured_page is None:
+                raise ManualJobImportError("OpenCLI returned invalid page content.")
+            page_url, page_title, expected_total, expected_sha256 = captured_page
+            page_content = "".join(chunks)
+            if (
+                _javascript_char_length(page_content) != expected_total
+                or hashlib.sha256(page_content.encode("utf-8")).hexdigest() != expected_sha256
+            ):
+                raise ManualJobImportError("OpenCLI returned invalid page chunks.")
             source_instance, external_id = _manual_source_identity(page_url)
             source_job_key = f"{SourceKind.MANUAL.value}:{source_instance}:{external_id}"
             snapshot_payload = self._run_json(
@@ -343,7 +383,6 @@ class OpenCliPageReader:
                 self._address_resolver,
                 require_entries=False,
             )
-            page_content = "".join(chunks)
             if not page_content.strip():
                 raise ManualJobImportError("This page contains no readable job content.")
             return RenderedJobPage(

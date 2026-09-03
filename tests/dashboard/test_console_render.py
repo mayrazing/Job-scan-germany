@@ -164,9 +164,9 @@ def test_console_renders_setup_run_and_real_review_link() -> None:
         "glassdoor-de-limit",
         "simplify-de-limit",
         "minimum-company-size",
-        "claude-batch-size",
         "scan-time",
     } <= {field.get("id") for field in setup.select("input, select")}
+    assert setup.select_one("#claude-batch-size") is None
     assert setup.select_one("#radius-km") is None
     assert setup.select_one("#remote-preference") is None
     assert setup.select_one("#candidate-name") is None
@@ -813,7 +813,7 @@ def test_console_renders_real_ai_configuration_controls() -> None:
     assert modal.select_one("[data-save-ai-selection]") is not None
     assert page.select_one("#setup-form > #ai-config") is None
     assert page.select_one("#advanced-settings #ai-runtime") is None
-    assert page.select_one("#advanced-settings #claude-batch-size") is not None
+    assert page.select_one("#advanced-settings #claude-batch-size") is None
 
 
 def test_console_renders_codex_cli_model_and_effort_controls() -> None:

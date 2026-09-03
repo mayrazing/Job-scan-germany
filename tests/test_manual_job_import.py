@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import subprocess
@@ -533,6 +534,18 @@ def test_manual_job_facts_reject_blank_required_fields() -> None:
 def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
     reader_type = getattr(manual_job_import, "OpenCliPageReader", None)
     assert reader_type is not None
+    content = "first chunk\nsecond chunk"
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    first_chunk = {
+        "url": "https://careers.example/jobs/42",
+        "title": "Backend Engineer",
+        "total_chars": 24,
+        "content_sha256": content_sha256,
+        "start": 0,
+        "end": 12,
+        "next_start_char": 12,
+        "content": "first chunk\n",
+    }
     runner = RecordingRunner(
         [
             {
@@ -544,19 +557,13 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
                 "count": 1,
                 "entries": [{"url": "https://careers.example/jobs/42"}],
             },
+            first_chunk,
+            first_chunk,
             {
                 "url": "https://careers.example/jobs/42",
                 "title": "Backend Engineer",
                 "total_chars": 24,
-                "start": 0,
-                "end": 12,
-                "next_start_char": 12,
-                "content": "first chunk\n",
-            },
-            {
-                "url": "https://careers.example/jobs/42",
-                "title": "Backend Engineer",
-                "total_chars": 24,
+                "content_sha256": content_sha256,
                 "start": 12,
                 "end": 24,
                 "next_start_char": None,
@@ -582,7 +589,7 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
 
     assert page.url == "https://careers.example/jobs/42"
     assert page.title == "Backend Engineer"
-    assert page.content == "first chunk\nsecond chunk"
+    assert page.content == content
     assert page.snapshot_html == _MANUAL_SNAPSHOT_HTML
     assert runner.commands[:2] == [
         [
@@ -621,14 +628,20 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
     assert "image.replaceWith" not in first_script
     assert "script, style, noscript, template" in first_script
     assert "nav, header, footer, aside" not in first_script
-    assert "form, iframe, dialog" not in first_script
+    assert "form, dialog" not in first_script
     assert runner.commands[4][:4] == [
         "opencli",
         "browser",
         "manual-session",
         "eval",
     ]
-    assert runner.commands[5:] == [
+    assert runner.commands[5][:4] == [
+        "opencli",
+        "browser",
+        "manual-session",
+        "eval",
+    ]
+    assert runner.commands[6:] == [
         [
             "opencli",
             "browser",
@@ -641,6 +654,17 @@ def test_opencli_page_reader_reads_all_chunks_and_closes_session() -> None:
 
 
 def test_opencli_page_reader_captures_ai_html_and_snapshot_in_one_session() -> None:
+    content = "Backend Engineer content"
+    page_payload = {
+        "url": "https://careers.example/jobs/42",
+        "title": "Backend Engineer",
+        "total_chars": 24,
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "start": 0,
+        "end": 24,
+        "next_start_char": None,
+        "content": content,
+    }
     runner = RecordingRunner(
         [
             {
@@ -652,15 +676,8 @@ def test_opencli_page_reader_captures_ai_html_and_snapshot_in_one_session() -> N
                 "count": 1,
                 "entries": [{"url": "https://careers.example/jobs/42"}],
             },
-            {
-                "url": "https://careers.example/jobs/42",
-                "title": "Backend Engineer",
-                "total_chars": 24,
-                "start": 0,
-                "end": 24,
-                "next_start_char": None,
-                "content": "Backend Engineer content",
-            },
+            page_payload,
+            page_payload,
             {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
             {
                 "session": "manual-session",
@@ -679,12 +696,12 @@ def test_opencli_page_reader_captures_ai_html_and_snapshot_in_one_session() -> N
         timeout_seconds=10,
     ).read("https://careers.example/jobs/42")
 
-    assert page.content == "Backend Engineer content"
+    assert page.content == content
     assert page.snapshot_html == _MANUAL_SNAPSHOT_HTML
     assert [command[3] for command in runner.commands if len(command) > 3].count("open") == 1
     eval_commands = [command for command in runner.commands if command[3] == "eval"]
-    assert len(eval_commands) == 2
-    assert "manual:careers.example:012a125e" in eval_commands[1][4]
+    assert len(eval_commands) == 3
+    assert "manual:careers.example:012a125e" in eval_commands[2][4]
     assert runner.commands[-1] == ["opencli", "browser", "manual-session", "close"]
 
 
@@ -715,6 +732,7 @@ def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> Non
                 "url": "https://careers.example/jobs/42",
                 "title": "Career Site",
                 "total_chars": len(partial_content),
+                "content_sha256": hashlib.sha256(partial_content.encode("utf-8")).hexdigest(),
                 "start": 0,
                 "end": len(partial_content),
                 "next_start_char": None,
@@ -724,6 +742,7 @@ def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> Non
                 "url": "https://careers.example/jobs/42",
                 "title": "Career Site",
                 "total_chars": len(content),
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 "start": 0,
                 "end": len(content),
                 "next_start_char": None,
@@ -733,6 +752,7 @@ def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> Non
                 "url": "https://careers.example/jobs/42",
                 "title": "Career Site",
                 "total_chars": len(content),
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 "start": 0,
                 "end": len(content),
                 "next_start_char": None,
@@ -760,6 +780,119 @@ def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> Non
     assert page.content == content
 
 
+def test_opencli_page_reader_waits_for_nonempty_page_content_to_stabilize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial_content = "Employer Privacy Policy"
+    content = "Backend Engineer Detail"
+    assert len(partial_content) == len(content)
+
+    def page_payload(body: str) -> dict[str, object]:
+        return {
+            "url": "https://careers.example/jobs/42",
+            "title": "Career Site",
+            "total_chars": len(body),
+            "content_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "start": 0,
+            "end": len(body),
+            "next_start_char": None,
+            "content": body,
+        }
+
+    runner = RecordingRunner(
+        [
+            {"url": "https://careers.example/jobs/42", "page": "PAGE-42"},
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            page_payload(partial_content),
+            page_payload(content),
+            page_payload(content),
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
+            {"session": "manual-session", "count": 0, "entries": []},
+            "Browser session tab lease released",
+        ]
+    )
+    monkeypatch.setattr(manual_job_import.time, "sleep", lambda _seconds: None)
+
+    page = manual_job_import.OpenCliPageReader(
+        opencli_executable="opencli",
+        runner=runner,
+        session_factory=lambda: "manual-session",
+        address_resolver=lambda _host: ["93.184.216.34"],
+        timeout_seconds=10,
+    ).read("https://careers.example/jobs/42")
+
+    assert page.content == content
+
+
+def test_opencli_page_reader_restarts_when_page_changes_during_chunking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_version = "Backend role first|old second section"
+    stable_version = "Backend role first|new second section"
+    assert len(first_version) == len(stable_version)
+    split_at = first_version.index("|") + 1
+
+    def page_payload(body: str, start: int) -> dict[str, object]:
+        end = min(len(body), start + split_at)
+        return {
+            "url": "https://careers.example/jobs/42",
+            "title": "Career Site",
+            "total_chars": len(body),
+            "content_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "start": start,
+            "end": end,
+            "next_start_char": end if end < len(body) else None,
+            "content": body[start:end],
+        }
+
+    runner = RecordingRunner(
+        [
+            {"url": "https://careers.example/jobs/42", "page": "PAGE-42"},
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            page_payload(first_version, 0),
+            page_payload(first_version, 0),
+            page_payload(stable_version, split_at),
+            page_payload(stable_version, 0),
+            page_payload(stable_version, split_at),
+            {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
+            {"session": "manual-session", "count": 0, "entries": []},
+            "Browser session tab lease released",
+        ]
+    )
+    monkeypatch.setattr(manual_job_import.time, "sleep", lambda _seconds: None)
+
+    page = manual_job_import.OpenCliPageReader(
+        opencli_executable="opencli",
+        runner=runner,
+        session_factory=lambda: "manual-session",
+        address_resolver=lambda _host: ["93.184.216.34"],
+        timeout_seconds=10,
+    ).read("https://careers.example/jobs/42")
+
+    assert page.content == stable_version
+
+
+def test_rendered_body_chunk_filters_iframes_before_measuring_content() -> None:
+    script = manual_job_import._rendered_body_chunk_script(0)
+
+    assert "'iframe'" in script
+
+
+def test_rendered_body_chunk_does_not_split_utf16_surrogate_pairs() -> None:
+    script = manual_job_import._rendered_body_chunk_script(0)
+
+    assert "html.charCodeAt(end - 1)" in script
+    assert "html.charCodeAt(end)" in script
+
+
 def test_opencli_page_reader_rejects_a_gap_between_chunks() -> None:
     runner = RecordingRunner(
         [
@@ -773,6 +906,7 @@ def test_opencli_page_reader_rejects_a_gap_between_chunks() -> None:
                 "url": "https://careers.example/jobs/42",
                 "title": "Backend Engineer",
                 "total_chars": 100,
+                "content_sha256": "a" * 64,
                 "start": 0,
                 "end": 50,
                 "next_start_char": 100,
@@ -809,6 +943,7 @@ def test_opencli_page_reader_rejects_chunk_whose_content_length_is_false() -> No
                 "url": "https://careers.example/jobs/42",
                 "title": "Backend Engineer",
                 "total_chars": 50,
+                "content_sha256": "a" * 64,
                 "start": 0,
                 "end": 50,
                 "next_start_char": None,
@@ -969,6 +1104,16 @@ def test_opencli_page_reader_rejects_private_network_request_before_extract() ->
 
 def test_opencli_page_reader_rejects_private_request_during_extraction() -> None:
     content = "Complete public job content"
+    page_payload = {
+        "url": "https://careers.example/jobs/42",
+        "title": "Backend Engineer",
+        "total_chars": len(content),
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "start": 0,
+        "end": len(content),
+        "next_start_char": None,
+        "content": content,
+    }
     runner = RecordingRunner(
         [
             {"url": "https://careers.example/jobs/42", "page": "PAGE-42"},
@@ -977,15 +1122,8 @@ def test_opencli_page_reader_rejects_private_request_during_extraction() -> None
                 "count": 1,
                 "entries": [{"url": "https://careers.example/jobs/42"}],
             },
-            {
-                "url": "https://careers.example/jobs/42",
-                "title": "Backend Engineer",
-                "total_chars": len(content),
-                "start": 0,
-                "end": len(content),
-                "next_start_char": None,
-                "content": content,
-            },
+            page_payload,
+            page_payload,
             {"status": "ok", "html": _MANUAL_SNAPSHOT_HTML},
             {
                 "session": "manual-session",

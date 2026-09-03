@@ -434,10 +434,6 @@
                     <div class="accordion-body">
                       <div class="field-grid details-body">
                         <label>
-                          <span class="field-label">Batch size</span>
-                          <input class="form-control" id="claude-batch-size" name="claude-batch-size" type="number" value="{{ setup.claude.batch_size }}" min="1" required>
-                        </label>
-                        <label>
                           <span class="field-label">Daily scan time</span>
                           <input class="form-control" id="scan-time" name="scan-time" type="time"{% if setup.scheduler.local_time %} value="{{ setup.scheduler.local_time }}"{% endif %}>
                           <span class="form-text">Optional. Leave blank for manual scans only.</span>
@@ -458,8 +454,11 @@
 
               <p id="form-error" class="form-error" role="alert" hidden></p>
               <footer class="form-footer">
-                <p><strong>Next:</strong> Build profile, scan sources, review matching jobs.</p>
-                <button class="btn btn-primary primary-button" type="submit">Save and run scan</button>
+                <p><strong>Next:</strong> Save the daily setup or run the current setup once.</p>
+                <div class="d-flex flex-wrap gap-2">
+                  <button class="btn btn-outline-secondary" id="save-schedule" type="button">Save Daily scan time</button>
+                  <button class="btn btn-primary primary-button" id="run-scan" type="submit">Run scan</button>
+                </div>
               </footer>
             </form>
           </section>
@@ -636,6 +635,12 @@
                     <label for="global-url-filter">
                       <span class="field-label">Job URL</span>
                       <input class="form-control" id="global-url-filter" name="global-url-filter" type="search" inputmode="url" autocomplete="off" placeholder="Paste job URL">
+                    </label>
+                  </div>
+                  <div class="tag-filter">
+                    <label for="global-tag-filter">
+                      <span class="field-label">Tags</span>
+                      <select class="form-select" id="global-tag-filter" name="global-tag-filter" multiple></select>
                     </label>
                   </div>
                   <div class="sort-filter">
