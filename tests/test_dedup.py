@@ -2041,3 +2041,10 @@ def test_duplicate_edge_reappearance_uses_new_symmetric_observed_at() -> None:
         for evidence in job.possible_duplicates
     ] == [reappeared_at, reappeared_at]
     assert all(len(job.possible_duplicates) == 1 for job in result.jobs)
+
+
+def test_source_order_covers_every_source_kind() -> None:
+    from job_scan.dedup import _SOURCE_ORDER
+
+    assert set(_SOURCE_ORDER) == set(SourceKind)
+    assert len(set(_SOURCE_ORDER.values())) == len(_SOURCE_ORDER)

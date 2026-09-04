@@ -8,7 +8,8 @@ import pytest
 from bs4 import BeautifulSoup
 from pydantic import HttpUrl
 
-from job_scan.dashboard.render import render_dashboard
+from job_scan.dashboard.render import render_console, render_dashboard
+from job_scan.dashboard.source_collections import GERMAN_CHINESE_COMPANIES
 from job_scan.domain import (
     AIReview,
     AvailabilityStatus,
@@ -582,3 +583,23 @@ def test_render_has_no_remote_styles_scripts_fonts_or_images() -> None:
         is None
     )
     assert "@font-face" not in styles
+
+
+def test_setup_page_lists_chinese_companies_source_collection() -> None:
+    html = render_console()
+    soup = BeautifulSoup(html, "html.parser")
+
+    modal = soup.find(id="chinese-companies-modal")
+    assert modal is not None
+    rows = modal.select(".source-collection-row")
+    assert len(rows) == len(GERMAN_CHINESE_COMPANIES) == 124
+
+    huawei = modal.find("span", string="Huawei")
+    assert huawei is not None
+    link = huawei.find_parent("li").select_one("a.source-collection-link")
+    assert link is not None
+    assert link.get("href") == "https://career.huawei.com/"
+    assert link.get("target") == "_blank"
+    assert link.get("rel") == ["noopener", "noreferrer"]
+    assert modal.find(id="target-company-huawei") is None
+    assert soup.find(id="target-company-bosch") is not None

@@ -79,6 +79,13 @@ from job_scan.sources.simplify import SimplifyDeAdapter
 from job_scan.sources.stepstone import StepstoneDeAdapter
 from job_scan.sources.telekom import TelekomAdapter
 from job_scan.sources.thyssenkrupp import ThyssenkruppAdapter
+from job_scan.sources.workday import (
+    AdvantechAdapter,
+    HaierAdapter,
+    JohnsonElectricAdapter,
+    NexperiaAdapter,
+    VosslohAdapter,
+)
 
 
 class ScanError(RuntimeError):
@@ -736,6 +743,46 @@ def _default_source_factory(
         if "dallmeier" in config.target_companies:
             adapters.append(
                 DallmeierAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if "haier" in config.target_companies:
+            adapters.append(
+                HaierAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if "nexperia" in config.target_companies:
+            adapters.append(
+                NexperiaAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if "vossloh" in config.target_companies:
+            adapters.append(
+                VosslohAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if "johnson-electric" in config.target_companies:
+            adapters.append(
+                JohnsonElectricAdapter(
+                    config,
+                    http_client,
+                    capture_snapshot=should_capture_snapshot,
+                )
+            )
+        if "advantech" in config.target_companies:
+            adapters.append(
+                AdvantechAdapter(
                     config,
                     http_client,
                     capture_snapshot=should_capture_snapshot,

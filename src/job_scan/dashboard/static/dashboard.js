@@ -49,20 +49,25 @@
   ].map((tag) => tag.dataset.userTagName);
 
   const sourceLabels = {
+    advantech: "Advantech",
     arbeitsagentur: "Arbeitsagentur",
     bosch: "Bosch",
     dallmeier: "Dallmeier",
     dhl: "DHL",
     glassdoor: "Glassdoor",
+    haier: "Haier",
     indeed: "Indeed",
+    "johnson-electric": "Johnson Electric",
     linkedin: "LinkedIn",
     manual: "Manual",
+    nexperia: "Nexperia",
     siemens: "Siemens",
     simplify: "Simplify",
     stepstone: "StepStone",
     successfactors: "Rohde & Schwarz",
     telekom: "Deutsche Telekom",
     thyssenkrupp: "thyssenkrupp",
+    vossloh: "Vossloh",
   };
 
   const restoredSourceFilter = (sources, storageKey = sourceFilterKey) => {
@@ -182,6 +187,9 @@
     return normalizedJobUrl(card.dataset.jobUrl || "").includes(normalizedQuery);
   };
 
+  const matchesCompany = (card, company) =>
+    company === "" || (card.dataset.company || "") === company;
+
   const updateReviewGroupCounts = () => {
     document.querySelectorAll("[data-review-workspace]").forEach((workspace) => {
       workspace.querySelectorAll(".review-groups > .job-group").forEach((group) => {
@@ -239,6 +247,7 @@
     languageRequirement,
     jobUrl = "",
     userTags = [],
+    company = "",
   ) => {
     const selected = new Set(values);
     const selectedTags = new Set(userTags);
@@ -255,7 +264,8 @@
         !matchesCompanySize(card, companySizeMinimum) ||
         !matchesCompanyIndustry(card, companyIndustry) ||
         !matchesLanguageRequirement(card, languageRequirement) ||
-        !matchesJobUrl(card, jobUrl);
+        !matchesJobUrl(card, jobUrl) ||
+        !matchesCompany(card, company);
     });
     updateReviewGroupCounts();
   };
@@ -672,6 +682,7 @@
     if (!select) return;
     const sourceFilter = select.closest(".source-filter");
     const urlFilter = document.querySelector("#global-url-filter");
+    const companySelect = document.querySelector("#global-company-filter");
     const globalCards = () => [
       ...document.querySelectorAll(
         '[data-review-block="global"] .review-groups [data-sources]',
@@ -716,8 +727,38 @@
       saveSourceFilter(sources, control.items, globalSourceFilterKey);
       updateSourceSummary();
     };
+    let companyControl = null;
+    let companies = [];
+    const globalCompanies = () =>
+      [
+        ...new Set(
+          globalCards()
+            .map((card) => card.dataset.company || "")
+            .filter(Boolean),
+        ),
+      ].sort((left, right) => left.localeCompare(right));
+    const syncCompanyOptions = () => {
+      if (!companyControl) return;
+      const nextCompanies = globalCompanies();
+      const nextCompanySet = new Set(nextCompanies);
+      companies
+        .filter((name) => !nextCompanySet.has(name))
+        .forEach((name) => companyControl.removeOption(name));
+      const existingCompanySet = new Set(companies);
+      nextCompanies
+        .filter((name) => !existingCompanySet.has(name))
+        .forEach((name) => companyControl.addOption({ value: name, text: name }));
+      companies = nextCompanies;
+      if (
+        companyControl.getValue() &&
+        !nextCompanySet.has(companyControl.getValue())
+      ) {
+        companyControl.setValue("", true);
+      }
+    };
     const applyGlobalFilters = () => {
       syncSourceOptions();
+      syncCompanyOptions();
       applyReviewFilters(
         globalCards(),
         control.items,
@@ -728,6 +769,7 @@
         "",
         urlFilter?.value ?? "",
         userTagController?.selected() ?? [],
+        companyControl?.getValue() ?? "",
       );
     };
     control = new TomSelect(select, {
@@ -756,6 +798,22 @@
       true,
     );
     updateSourceSummary();
+    if (companySelect) {
+      const allOption = document.createElement("option");
+      allOption.value = "";
+      allOption.textContent = "All companies";
+      allOption.selected = true;
+      companySelect.append(allOption);
+      companies = globalCompanies();
+      companies.forEach((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        companySelect.append(option);
+      });
+      companyControl = new TomSelect(companySelect, {});
+      companyControl.on("change", applyGlobalFilters);
+    }
     applyGlobalFilters();
     urlFilter?.addEventListener("input", applyGlobalFilters);
     document.addEventListener("job-scan:tag-filter-changed", applyGlobalFilters);

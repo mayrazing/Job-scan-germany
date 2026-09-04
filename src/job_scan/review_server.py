@@ -417,7 +417,7 @@ def create_review_app(
     migrate_job_tracker_config()
     if manual_job_importer is None:
         manual_job_importer = ManualJobImportService(
-            OpenCliPageReader(),
+            OpenCliPageReader(diagnostics_dir=repository.paths.logs_dir),
             AiJobExtractor(company_size_invoker),
             ClaudeReviewer(company_size_invoker),
             job_snapshots,

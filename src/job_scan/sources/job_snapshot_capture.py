@@ -10,6 +10,14 @@ import uuid
 from pathlib import Path
 
 from job_scan.domain import SourceKind, SourceOccurrence
+
+_WORKDAY_SOURCE_LABELS = {
+    SourceKind.ADVANTECH: "Advantech",
+    SourceKind.HAIER: "Haier",
+    SourceKind.JOHNSON_ELECTRIC: "Johnson Electric",
+    SourceKind.NEXPERIA: "Nexperia",
+    SourceKind.VOSSLOH: "Vossloh",
+}
 from job_scan.http_client import InvalidResponse
 from job_scan.sources.base import BrowserSourceError
 from job_scan.sources.opencli_challenge import (
@@ -122,6 +130,19 @@ def _source_snapshot_script(
             return thyssenkrupp_snapshot_script(external_id), "thyssenkrupp"
         case SourceKind.MANUAL:
             return manual_snapshot_script(occurrence.source_job_key), "manual"
+        case (
+            SourceKind.ADVANTECH
+            | SourceKind.HAIER
+            | SourceKind.JOHNSON_ELECTRIC
+            | SourceKind.NEXPERIA
+            | SourceKind.VOSSLOH
+        ):
+            from job_scan.sources.workday import snapshot_script as workday_snapshot_script
+
+            return (
+                workday_snapshot_script(external_id),
+                _WORKDAY_SOURCE_LABELS[occurrence.source],
+            )
 
 
 def manual_snapshot_script(source_job_key: str) -> str:

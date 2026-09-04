@@ -85,13 +85,18 @@
   const analyzeResumeButton = document.querySelector("#analyze-resume");
   const setupDraftKey = "job-scan.setup-draft.v1";
   const targetCompanies = [
+    "advantech",
     "bosch",
-    "telekom",
+    "dallmeier",
+    "dhl",
+    "haier",
+    "johnson-electric",
+    "nexperia",
     "rohde-schwarz",
     "siemens",
-    "dhl",
+    "telekom",
     "thyssenkrupp",
-    "dallmeier",
+    "vossloh",
   ];
   const openCliSources = [
     {

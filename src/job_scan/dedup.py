@@ -39,7 +39,12 @@ _SOURCE_ORDER = {
     SourceKind.DHL: 11,
     SourceKind.THYSSENKRUPP: 12,
     SourceKind.DALLMEIER: 13,
-    SourceKind.MANUAL: 14,
+    SourceKind.ADVANTECH: 14,
+    SourceKind.HAIER: 15,
+    SourceKind.JOHNSON_ELECTRIC: 16,
+    SourceKind.NEXPERIA: 17,
+    SourceKind.VOSSLOH: 18,
+    SourceKind.MANUAL: 19,
 }
 _AVAILABILITY_ORDER = {
     AvailabilityStatus.ACTIVE: 0,

@@ -15,6 +15,7 @@ from job_scan.ai_selection import (
 )
 from job_scan.ats_models import AtsCheckBundle, AtsHistoryEntry
 from job_scan.config import ClaudeSettings, SchedulerSettings
+from job_scan.dashboard.source_collections import GERMAN_CHINESE_COMPANIES
 from job_scan.dashboard.view_model import (
     build_current_dashboard,
     build_global_dashboard,
@@ -109,6 +110,7 @@ def render_console(
         tracker_groups=tracker_groups,
         saved_group_name=saved_group_name,
         setup=setup_answers,
+        german_chinese_companies=GERMAN_CHINESE_COMPANIES,
         ai_selection=ai_selection,
         ai_providers=ai_providers,
         scan_history=scan_history,

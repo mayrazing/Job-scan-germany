@@ -195,6 +195,45 @@
       </div>
     </div>
 
+    <div class="modal fade" id="chinese-companies-modal" tabindex="-1" aria-labelledby="chinese-companies-modal-title" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <header class="modal-header">
+            <div>
+              <p class="eyebrow">Source collection</p>
+              <h2 class="modal-title" id="chinese-companies-modal-title">Chinese companies in Germany</h2>
+              <p class="modal-intro">{{ german_chinese_companies | length }} companies. Integrated companies can be switched on to search their official careers page directly.</p>
+            </div>
+            <button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="Close"></button>
+          </header>
+          <div class="modal-body">
+            <ul class="source-collection-list list-unstyled mb-0">
+              {% for name, url, source_id in german_chinese_companies %}
+              <li class="source-collection-row">
+                {% if source_id %}
+                <div class="form-check form-switch">
+                  <input class="form-check-input" id="target-company-{{ source_id }}" name="target-company-{{ source_id }}" type="checkbox" role="switch" value="{{ source_id }}"{% if source_id in setup.target_companies %} checked{% endif %}>
+                  <label class="form-check-label" for="target-company-{{ source_id }}">
+                    <span class="field-label">{{ name }}</span>
+                    <span class="form-text">Search current German jobs through {{ name }}'s official careers page.</span>
+                  </label>
+                </div>
+                {% else %}
+                <span class="source-collection-name">{{ name }}</span>
+                {% if url %}<a class="source-collection-link" href="{{ url }}" target="_blank" rel="noopener noreferrer">Careers page</a>{% endif %}
+                <span class="badge text-bg-secondary">Not integrated</span>
+                {% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          <footer class="modal-footer">
+            <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Close</button>
+          </footer>
+        </div>
+      </div>
+    </div>
+
     <dialog class="manual-job-dialog codex-login-dialog" id="codex-login-dialog" aria-labelledby="codex-login-dialog-title">
       <form method="dialog">
         <header>
@@ -425,6 +464,12 @@
                 </div>
               </fieldset>
 
+              <fieldset class="form-section" id="source-collections-config">
+                <legend>Source collections <span>Optional</span></legend>
+                <p class="form-text">Curated groups of company job sources. Companies already integrated show a switch; the others list their careers page for reference.</p>
+                <button class="btn btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#chinese-companies-modal">Chinese companies in Germany</button>
+              </fieldset>
+
               <div class="accordion advanced-settings" id="advanced-settings">
                 <div class="accordion-item">
                   <h2 class="accordion-header">
@@ -635,6 +680,12 @@
                     <label for="global-url-filter">
                       <span class="field-label">Job URL</span>
                       <input class="form-control" id="global-url-filter" name="global-url-filter" type="search" inputmode="url" autocomplete="off" placeholder="Paste job URL">
+                    </label>
+                  </div>
+                  <div class="company-filter">
+                    <label for="global-company-filter">
+                      <span class="field-label">Company</span>
+                      <select class="form-select" id="global-company-filter" name="global-company-filter"></select>
                     </label>
                   </div>
                   <div class="tag-filter">

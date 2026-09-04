@@ -12,13 +12,18 @@ from pydantic import BaseModel, Field, model_validator
 PostedWithinDays = Literal[0, 1, 3, 7, 14]
 MinimumCompanySize = Literal[0, 50, 250, 1000, 10000]
 TargetCompany = Literal[
+    "advantech",
     "bosch",
-    "telekom",
+    "dallmeier",
+    "dhl",
+    "haier",
+    "johnson-electric",
+    "nexperia",
     "rohde-schwarz",
     "siemens",
-    "dhl",
+    "telekom",
     "thyssenkrupp",
-    "dallmeier",
+    "vossloh",
 ]
 _NO_POSTING_WINDOW = "no-limit"
 STAFFING_AGENCY_PENALTY = 10

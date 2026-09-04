@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -215,6 +215,7 @@ class OpenCliPageReader:
         session_factory: Callable[[], str] | None = None,
         address_resolver: Callable[[str], Sequence[str]] | None = None,
         timeout_seconds: int = 90,
+        diagnostics_dir: Path | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
@@ -225,12 +226,44 @@ class OpenCliPageReader:
         )
         self._address_resolver = address_resolver or _resolve_host_addresses
         self._timeout_seconds = timeout_seconds
+        self._diagnostics_path = (
+            diagnostics_dir / "manual-import.jsonl" if diagnostics_dir is not None else None
+        )
+
+    def _record_diagnostic(self, payload: dict[str, object]) -> None:
+        """Append one failure record for post-mortem; never affect the import."""
+        if self._diagnostics_path is None:
+            return
+        record = {
+            "at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            **payload,
+        }
+        try:
+            descriptor = os.open(
+                self._diagnostics_path,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "a", encoding="utf-8") as log_file:
+                    descriptor = -1
+                    log_file.write(json.dumps(record, separators=(",", ":")))
+                    log_file.write("\n")
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        except OSError:
+            pass
 
     def read(self, source_url: str) -> RenderedJobPage:
         """Open one URL, collect cleaned body HTML, then release its tab."""
         safe_url = require_public_job_url(source_url)
         _require_public_host_addresses(safe_url, self._address_resolver)
         session = self._session_factory()
+        last_payload_summary: dict[str, object] | None = None
+        chunks: list[str] = []
+        start = 0
         try:
             self._run_json(
                 [
@@ -251,8 +284,6 @@ class OpenCliPageReader:
                 ]
             )
             _validate_network_capture(network, self._address_resolver)
-            chunks: list[str] = []
-            start = 0
             page_url = safe_url
             page_title = ""
             page_load_deadline = time.monotonic() + self._timeout_seconds
@@ -274,6 +305,7 @@ class OpenCliPageReader:
                         _rendered_body_chunk_script(start),
                     ]
                 )
+                last_payload_summary = _payload_summary(payload)
                 page_url = require_public_job_url(_required_text(payload, "url"))
                 _require_public_host_addresses(page_url, self._address_resolver)
                 total_chars = payload.get("total_chars")
@@ -391,6 +423,19 @@ class OpenCliPageReader:
                 content=page_content,
                 snapshot_html=snapshot_html,
             )
+        except ManualJobImportError as error:
+            self._record_diagnostic(
+                {
+                    "kind": "read_failed",
+                    "error": str(error),
+                    "url": safe_url,
+                    "session": session,
+                    "chunks": len(chunks),
+                    "start": start,
+                    "last_payload": last_payload_summary,
+                }
+            )
+            raise
         finally:
             self._close(session)
 
@@ -405,8 +450,24 @@ class OpenCliPageReader:
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
+            self._record_diagnostic(
+                {
+                    "kind": "invalid_json",
+                    "command": _short_command(arguments),
+                    "returncode": result.returncode,
+                    "stdout_preview": result.stdout[:2000],
+                    "stderr_preview": result.stderr[-800:],
+                }
+            )
             raise ManualJobImportError("OpenCLI returned invalid page content.") from None
         if not isinstance(payload, dict):
+            self._record_diagnostic(
+                {
+                    "kind": "non_object_json",
+                    "command": _short_command(arguments),
+                    "stdout_preview": result.stdout[:2000],
+                }
+            )
             raise ManualJobImportError("OpenCLI returned invalid page content.")
         return payload
 
@@ -421,18 +482,60 @@ class OpenCliPageReader:
         try:
             result = self._runner(command, float(self._timeout_seconds))
         except FileNotFoundError:
+            self._record_diagnostic(
+                {"kind": "executable_missing", "command": _short_command(command)}
+            )
             raise ManualJobImportError("OpenCLI executable was not found.") from None
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            self._record_diagnostic(
+                {
+                    "kind": "command_timeout",
+                    "command": _short_command(command),
+                    "stderr_preview": _process_error_stderr(error),
+                }
+            )
             raise ManualJobImportError("Opening this job page timed out.") from None
-        except OSError:
+        except OSError as error:
+            self._record_diagnostic(
+                {
+                    "kind": "command_start_failed",
+                    "command": _short_command(command),
+                    "error": repr(error),
+                }
+            )
             raise ManualJobImportError("OpenCLI could not be started.") from None
         if result.returncode == 69:
+            self._record_diagnostic(
+                {
+                    "kind": "bridge_disconnected",
+                    "command": _short_command(command),
+                    "stdout_preview": result.stdout[:800],
+                    "stderr_preview": result.stderr[-800:],
+                }
+            )
             raise ManualJobImportError("OpenCLI Browser Bridge is not connected.")
         if result.returncode == 77:
+            self._record_diagnostic(
+                {
+                    "kind": "login_required",
+                    "command": _short_command(command),
+                    "stdout_preview": result.stdout[:800],
+                    "stderr_preview": result.stderr[-800:],
+                }
+            )
             raise ManualJobImportError(
                 "This job page requires login in the connected Chrome profile."
             )
         if result.returncode != 0:
+            self._record_diagnostic(
+                {
+                    "kind": "command_failed",
+                    "command": _short_command(command),
+                    "returncode": result.returncode,
+                    "stdout_preview": result.stdout[:2000],
+                    "stderr_preview": result.stderr[-800:],
+                }
+            )
             raise ManualJobImportError("OpenCLI could not read this job page.")
         if len(result.stdout.encode("utf-8")) > max_output_bytes:
             raise ManualJobImportError("OpenCLI page output exceeded the safe limit.")
@@ -894,7 +997,7 @@ def _validate_network_capture(
         if not isinstance(request_url, str):
             raise ManualJobImportError("OpenCLI returned an invalid network safety capture.")
         parsed = urlsplit(request_url)
-        if parsed.scheme.casefold() in {"data", "blob"}:
+        if parsed.scheme.casefold() in {"data", "blob", "chrome-extension"}:
             continue
         if parsed.scheme.casefold() == "wss":
             request_url = parsed._replace(scheme="https").geturl()
@@ -1001,6 +1104,48 @@ def _required_fact(value: str | None) -> str:
     if value is None:
         raise ManualJobImportError("AI did not return a complete job from this page.")
     return value
+
+
+def _payload_summary(payload: object) -> dict[str, object]:
+    """Return bounded structural facts about one eval payload, without its content."""
+    if not isinstance(payload, dict):
+        return {"type": type(payload).__name__}
+    summary: dict[str, object] = {
+        "keys": sorted(str(key) for key in payload),
+    }
+    for field in ("url", "title", "total_chars", "start", "end", "next_start_char"):
+        value = payload.get(field)
+        if isinstance(value, str):
+            summary[field] = value if field == "url" else f"str[{len(value)}]"
+        else:
+            summary[field] = type(value).__name__
+    sha256 = payload.get("content_sha256")
+    summary["content_sha256"] = (
+        sha256[:16] if isinstance(sha256, str) else type(sha256).__name__
+    )
+    content = payload.get("content")
+    summary["content"] = (
+        f"str[{len(content)}]" if isinstance(content, str) else type(content).__name__
+    )
+    return summary
+
+
+def _short_command(arguments: list[str]) -> list[str]:
+    """Bound each logged argument so long eval scripts stay out of the log."""
+    return [
+        argument if len(argument) <= 200 else f"{argument[:200]}...[{len(argument)} chars]"
+        for argument in arguments
+    ]
+
+
+def _process_error_stderr(error: subprocess.TimeoutExpired) -> str:
+    """Return the captured stderr tail of one timed-out command."""
+    stderr = error.stderr
+    if isinstance(stderr, bytes):
+        return stderr.decode("utf-8", errors="replace")[-800:]
+    if isinstance(stderr, str):
+        return stderr[-800:]
+    return ""
 
 
 def _find_opencli() -> str:

@@ -389,6 +389,68 @@
   border-top-color: var(--border);
 }
 
+#chinese-companies-modal .modal-content {
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1.25rem 3rem rgb(23 33 43 / 22%);
+}
+
+#chinese-companies-modal .modal-header {
+  align-items: start;
+  padding: 1.25rem 1.5rem;
+  border-bottom-color: var(--border);
+}
+
+#chinese-companies-modal .modal-title,
+#chinese-companies-modal .modal-intro {
+  margin: 0;
+}
+
+#chinese-companies-modal .modal-title {
+  font-size: clamp(1.35rem, 3vw, 2rem);
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+
+#chinese-companies-modal .modal-intro {
+  margin-top: 0.35rem;
+  color: var(--muted);
+}
+
+#chinese-companies-modal .modal-body {
+  padding: 1rem 1.5rem;
+}
+
+#chinese-companies-modal .modal-footer {
+  border-top-color: var(--border);
+}
+
+.source-collection-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.source-collection-row:last-child {
+  border-bottom: 0;
+}
+
+.source-collection-row .form-check {
+  flex: 1;
+}
+
+.source-collection-name {
+  font-weight: 600;
+}
+
+.source-collection-link {
+  margin-right: auto;
+}
+
 code {
   color: inherit;
 }
@@ -989,7 +1051,8 @@ label > small {
   grid-template-columns:
     minmax(13rem, 16rem)
     max-content
-    minmax(10rem, 1fr)
+    minmax(9rem, 12rem)
+    minmax(0, 13rem)
     minmax(0, 13rem)
     minmax(0, 12rem);
   column-gap: clamp(1rem, 3vw, 2rem);

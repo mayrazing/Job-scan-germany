@@ -365,14 +365,18 @@ def test_duplicate_evidence_accepts_legacy_data_without_decision_occurrence_key(
 
 def test_domain_enums_accept_only_contract_values() -> None:
     assert {item.value for item in SourceKind} == {
+        "advantech",
         "arbeitsagentur",
         "bosch",
         "dallmeier",
         "dhl",
         "glassdoor",
+        "haier",
         "indeed",
+        "johnson-electric",
         "linkedin",
         "manual",
+        "nexperia",
         "siemens",
         "simplify",
         "smartrecruiters",
@@ -380,6 +384,7 @@ def test_domain_enums_accept_only_contract_values() -> None:
         "successfactors",
         "telekom",
         "thyssenkrupp",
+        "vossloh",
     }
     assert {item.value for item in MachineStatus} == {
         "pending_source",

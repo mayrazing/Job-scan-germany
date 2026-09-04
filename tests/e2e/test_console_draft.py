@@ -2057,6 +2057,58 @@ def test_job_tracker_tag_option_remains_until_last_cross_group_use_is_removed(
     ) == ["Backend"]
 
 
+def test_job_tracker_company_filter_lists_companies_and_filters_cards(
+    setup_page: object,
+) -> None:
+    setup_page.goto("http://draft.test/setup?tags=1#job-tracker")
+    setup_page.wait_for_load_state("networkidle")
+    company_filter = setup_page.locator("#global-company-filter")
+
+    assert company_filter.evaluate(
+        "select => [...select.options].map((option) => option.value)"
+    ) == [
+        "",
+        "Company tag-applied",
+        "Company tag-backend",
+        "Company tag-empty",
+        "Company tag-remote",
+    ]
+    assert company_filter.evaluate(
+        "select => select.tomselect.getValue()"
+    ) == ""
+
+    backend = setup_page.locator('article[data-job-key="tag-backend"]')
+    remote = setup_page.locator('article[data-job-key="tag-remote"]')
+    assert backend.is_visible()
+    assert remote.is_visible()
+
+    company_filter.evaluate(
+        "select => select.tomselect.setValue('Company tag-backend')"
+    )
+    assert backend.is_visible()
+    assert remote.is_hidden()
+
+    company_filter.evaluate(
+        """select => {
+          const input = select.tomselect.control_input;
+          select.tomselect.open();
+          input.focus();
+          input.value = 'remote';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }"""
+    )
+    assert setup_page.locator('.ts-dropdown[style*="display: block"]').evaluate(
+        """dropdown => [...dropdown.querySelectorAll('.option')].map(
+          (option) => option.textContent
+        )"""
+    ) == ["Company tag-remote"]
+
+    company_filter.evaluate(
+        "select => { select.tomselect.setValue(''); select.tomselect.close(); }"
+    )
+    assert remote.is_visible()
+
+
 def test_job_tracker_tag_dropdown_escapes_card_and_uses_internal_button(
     setup_page: object,
 ) -> None:
@@ -2225,7 +2277,7 @@ def test_job_tracker_tag_panel_reserves_desktop_column_and_stacks_on_mobile(
     assert desktop["status"]["right"] <= desktop["body"]["left"] + 0.5
     assert desktop["body"]["right"] <= desktop["tags"]["left"] + 0.5
     assert desktop["tags"]["width"] >= 200
-    assert url_width > tag_width
+    assert url_width <= 193
 
     editor_controls = card.evaluate(
         """card => [
@@ -2364,7 +2416,7 @@ def test_job_tracker_filters_order_add_button_url_filter_then_sort(
         )"""
     )
 
-    assert order == ["source", "add", "other", "url", "tag", "sort"]
+    assert order == ["source", "add", "other", "url", "other", "tag", "sort"]
 
 
 def test_job_tracker_sort_orders_by_added_applied_posted_and_score(

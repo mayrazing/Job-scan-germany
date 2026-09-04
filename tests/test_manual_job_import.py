@@ -705,6 +705,56 @@ def test_opencli_page_reader_captures_ai_html_and_snapshot_in_one_session() -> N
     assert runner.commands[-1] == ["opencli", "browser", "manual-session", "close"]
 
 
+def test_opencli_page_reader_records_diagnostics_on_invalid_content(tmp_path) -> None:
+    diagnostics_dir = tmp_path / "logs"
+    diagnostics_dir.mkdir()
+    content = "Backend Engineer\nRendered job content"
+    runner = RecordingRunner(
+        [
+            {
+                "url": "https://careers.example/jobs/42",
+                "page": "PAGE-42",
+            },
+            {
+                "session": "manual-session",
+                "count": 1,
+                "entries": [{"url": "https://careers.example/jobs/42"}],
+            },
+            {
+                "url": "https://careers.example/jobs/42",
+                "title": "Career Site",
+                "total_chars": len(content),
+                "start": 0,
+                "end": len(content),
+                "next_start_char": None,
+                "content": content,
+            },
+            "Browser session tab lease released",
+        ]
+    )
+
+    with pytest.raises(
+        manual_job_import.ManualJobImportError,
+        match="OpenCLI returned invalid page content.",
+    ):
+        manual_job_import.OpenCliPageReader(
+            opencli_executable="opencli",
+            runner=runner,
+            session_factory=lambda: "manual-session",
+            address_resolver=lambda _host: ["93.184.216.34"],
+            timeout_seconds=10,
+            diagnostics_dir=diagnostics_dir,
+        ).read("https://careers.example/jobs/42")
+
+    log_path = diagnostics_dir / "manual-import.jsonl"
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+    assert record["kind"] == "read_failed"
+    assert record["error"] == "OpenCLI returned invalid page content."
+    assert record["url"] == "https://careers.example/jobs/42"
+    assert record["last_payload"]["content"] == f"str[{len(content)}]"
+    assert content not in log_path.read_text(encoding="utf-8")
+
+
 def test_opencli_page_reader_waits_for_page_content_to_finish_rendering() -> None:
     partial_content = "Employer Privacy Policy"
     content = "Backend Engineer\nRendered job content"
@@ -1003,6 +1053,27 @@ def test_network_capture_resolves_each_hostname_once() -> None:
     )
 
     assert resolved_hosts == ["cdn.example", "analytics.example"]
+
+
+def test_network_capture_ignores_browser_extension_requests() -> None:
+    resolved_hosts: list[str] = []
+
+    def resolver(host: str) -> list[str]:
+        resolved_hosts.append(host)
+        return ["93.184.216.34"]
+
+    manual_job_import._validate_network_capture(
+        {
+            "count": 2,
+            "entries": [
+                {"url": "https://careers.example/jobs/42"},
+                {"status": 0, "url": "chrome-extension://invalid/"},
+            ],
+        },
+        resolver,
+    )
+
+    assert resolved_hosts == ["careers.example"]
 
 
 def test_network_capture_does_not_resolve_a_failed_subresource() -> None:

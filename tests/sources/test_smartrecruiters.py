@@ -12,7 +12,11 @@ from job_scan.config import AppConfig, ClaudeSettings, SchedulerSettings
 from job_scan.domain import SourceKind
 from job_scan.http_client import InvalidResponse, PublicHttpClient
 from job_scan.sources import ExplicitlyClosed
-from job_scan.sources.smartrecruiters import SmartRecruitersAdapter
+from job_scan.sources.smartrecruiters import (
+    ChinaTelecomEuropeAdapter,
+    DLinkAdapter,
+    SmartRecruitersAdapter,
+)
 
 LIST_URL = "https://api.smartrecruiters.com/v1/companies/BoschGroup/postings"
 DETAIL_URL = f"{LIST_URL}/job-1"
@@ -622,3 +626,28 @@ def test_fetch_detail_rejects_a_different_posting_id(tmp_path: Path) -> None:
 
     with pytest.raises(InvalidResponse, match="posting ID"):
         smartrecruiters.fetch_detail(reference)
+
+
+def test_china_telecom_europe_adapter_binds_its_company(tmp_path: Path) -> None:
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = ChinaTelecomEuropeAdapter(config(), client)
+
+    assert source.source is SourceKind.CHINA_TELECOM_EUROPE
+    assert source.source_instance == "chinatelecomeuropelimited"
+    assert source._company_name == "China Telecom Europe"
+    assert source._list_url == (
+        "https://api.smartrecruiters.com/v1/companies"
+        "/ChinaTelecomEuropeLimited/postings"
+    )
+
+
+def test_dlink_adapter_binds_its_company(tmp_path: Path) -> None:
+    client = PublicHttpClient(tmp_path / "cache", min_interval_seconds=0)
+    source = DLinkAdapter(config(), client)
+
+    assert source.source is SourceKind.D_LINK
+    assert source.source_instance == "dlinksystemsinc"
+    assert source._company_name == "D-Link"
+    assert source._list_url == (
+        "https://api.smartrecruiters.com/v1/companies/DLinkSystemsInc/postings"
+    )

@@ -21,14 +21,18 @@ from job_scan.job_snapshot import JobSnapshotReference
 
 
 class SourceKind(StrEnum):
+    ADVANTECH = "advantech"
     ARBEITSAGENTUR = "arbeitsagentur"
     BOSCH = "bosch"
     DALLMEIER = "dallmeier"
     DHL = "dhl"
     GLASSDOOR = "glassdoor"
+    HAIER = "haier"
     INDEED = "indeed"
+    JOHNSON_ELECTRIC = "johnson-electric"
     LINKEDIN = "linkedin"
     MANUAL = "manual"
+    NEXPERIA = "nexperia"
     SIEMENS = "siemens"
     SIMPLIFY = "simplify"
     SMARTRECRUITERS = "smartrecruiters"
@@ -36,6 +40,7 @@ class SourceKind(StrEnum):
     SUCCESSFACTORS = "successfactors"
     TELEKOM = "telekom"
     THYSSENKRUPP = "thyssenkrupp"
+    VOSSLOH = "vossloh"
 
 
 class MachineStatus(StrEnum):
